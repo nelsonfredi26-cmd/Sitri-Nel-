@@ -3,712 +3,729 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason
-} = require('@whiskeysockets/baileys');
+} = require("@whiskeysockets/baileys");
 
-const pino = require('pino');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
+const pino = require("pino");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 
-// ==========================================
-// 𖤍 SITRI-NEL | CORE CONFIGURATION
-// ==========================================
+// ═══════════════════════════════════
+// SITRI-NEL • CONFIGURATION
+// ═══════════════════════════════════
 
-const PREFIX = 'X';
-const DAILY_REWARD = 350;
-const COOLDOWN = 2500;
+const PREFIX = "X";
+const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const GROQ_KEY = process.env.GROQ_API_KEY;
+const PAIRING_NUMBER = process.env.PAIRING_NUMBER;
+const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || "")
+  .split(",")
+  .map(n => n.replace(/\D/g, ""))
+  .filter(Boolean);
 
-const DATA_DIR = path.join(__dirname, 'data');
-const DATA_FILE = path.join(DATA_DIR, 'sitri-data.json');
+const DATA_DIR = path.join(__dirname, "data");
+const DB_FILE = path.join(DATA_DIR, "sitri-data.json");
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-let db = {};
-
-try {
-  if (fs.existsSync(DATA_FILE)) {
-    db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+function loadDB() {
+  try {
+    return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  } catch {
+    return { users: {}, groups: {} };
   }
-} catch (e) {
-  console.error('Database error:', e.message);
 }
 
-// ==========================================
-// ⚡ UNICODE FUTURISTIC FONT
-// ==========================================
-
-function futuristicText(text) {
-  const normal = [
-    ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-    ...'abcdefghijklmnopqrstuvwxyz',
-    ...'0123456789'
-  ];
-
-  const bold = [
-    ...'𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭',
-    ...'𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇',
-    ...'𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵'
-  ];
-
-  const fontMap = new Map(
-    normal.map((char, index) => [char, bold[index]])
-  );
-
-  return Array.from(String(text))
-    .map(char => fontMap.get(char) || char)
-    .join('');
-}
-
-// Signature officielle
-function sitriReply(text) {
-  return `${futuristicText(text)}
-
-━━━━━━━━━━━━━━
-𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟
-𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗗 𝗕𝗬
-𝗞𝗔𝗬≈𝗗𝗘𝗡`;
-}
-
-// ==========================================
-// 💾 DATABASE
-// ==========================================
+let db = loadDB();
 
 function saveDB() {
-  try {
-    fs.writeFileSync(
-      DATA_FILE,
-      JSON.stringify(db, null, 2)
-    );
-  } catch (e) {
-    console.error('Save error:', e.message);
-  }
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
-function getUser(id) {
-  if (!db[id]) {
-    db[id] = {
+function getUser(id, name = "Utilisateur") {
+  if (!db.users[id]) {
+    db.users[id] = {
+      name,
       coins: 0,
       xp: 0,
-      level: 1,
       lastDaily: 0
     };
   }
-
-  return db[id];
+  db.users[id].name = name || db.users[id].name;
+  return db.users[id];
 }
 
-function addXP(id, amount) {
-  const user = getUser(id);
+// ═══════════════════════════════════
+// MENU OFFICIEL — NE PAS MODIFIER
+// ═══════════════════════════════════
 
-  user.xp += amount;
-  user.level = Math.floor(user.xp / 500) + 1;
+function getMenu() {
+  return `
+⟢ 𝗔𝗥𝗧𝗜𝗙𝗜𝗖𝗜𝗔𝗟 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘 ⟣
 
-  saveDB();
+━━━━━━━━━━━━━━━━━━━━━━━
+       ✎𝗠𝗔𝗜𝗡 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 𝗣𝗔𝗡𝗘𝗟
+━━━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟭 ⌬ 𝗖𝗢𝗚𝗡𝗜𝗧𝗜𝗩𝗘 〕
+│
+├ ◈ 𝚇𝚌𝚑𝚊𝚝
+├ ◈ 𝚇𝚊𝚜𝚔
+├ ◈ 𝚇𝚊𝚒
+├ ◈ 𝚇𝚊𝚗𝚒𝚖𝚎
+├ ◈ 𝚇𝚙𝚘𝚕𝚒𝚌𝚎
+├ ◈ 𝚇𝚒𝚗𝚏𝚘
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟮 ⌬ 𝗘𝗖𝗢𝗡𝗢𝗠𝗬 〕
+│
+├ ◈ 𝚇𝚍𝚊𝚒𝚕𝚢
+├ ◈ 𝚇𝚌𝚘𝚒𝚗𝚜
+├ ◈ 𝚇𝚙
+├ ◈ 𝚇𝚛𝚊𝚗𝚔
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟯 ⌬ 𝗘𝗡𝗧𝗘𝗥𝗧𝗔𝗜𝗡𝗠𝗘𝗡𝗧 〕
+│
+╰ ◈ 𝚇𝚚𝚞𝚒𝚣
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
+│
+├ ◈ 𝚇𝚒𝚖𝚐
+├ ◈ 𝚇𝚙𝚕𝚊𝚢
+├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟱 ⌬ 𝗜𝗗𝗘𝗡𝗧𝗜𝗧𝗬 〕
+│
+╰ ◈ 𝚇𝚙𝚛𝚘𝚏𝚒𝚕
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟲 ⌬ 𝗡𝗘𝗧𝗪𝗢𝗥𝗞 〕
+│
+├ ◈ 𝚇𝚝𝚊𝚐𝚊𝚕𝚕
+├ ◈ 𝚇𝚊𝚗𝚗𝚘𝚗𝚌𝚎
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟳 ⌬ 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 〕
+│
+├ ◈ 𝚇𝚔𝚒𝚌𝚔
+├ ◈ 𝚇𝚊𝚍𝚍
+├ ◈ 𝚇𝚌𝚕𝚎𝚊𝚛
+├ ◈ 𝚇𝚘𝚏𝚏
+├ ◈ 𝚇𝚛𝚎𝚜𝚝𝚊𝚛𝚝
+├ ◈ 𝚇𝚘𝚗𝚕𝚢𝚊𝚍𝚖𝚒𝚗
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟴 ⌬ 𝗦𝗬𝗦𝗧𝗘𝗠 〕
+│
+├ ◈ 𝚇𝚞𝚙𝚝
+├ ◈ 𝚇𝚖𝚎𝚗𝚞
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━
+⌬ 𝗣𝗥𝗘𝗙𝗜𝗫𝗘 : X
+⌬ 𝗦𝗧𝗔𝗧𝗨𝗦  : 𝗢𝗡𝗟𝗜𝗡𝗘
+━━━━━━━━━━━━━━━━━━━━━━
+
+              𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍
+                 ᴅᴇᴠᴇʟᴏᴘᴇᴅ ʙʏ
+                    𝗞𝗔𝗬≈𝗗𝗘𝗡
+`;
 }
 
-// ==========================================
-// 🛡️ ANTI-SPAM SYSTEM
-// ==========================================
+// ═══════════════════════════════════
+// STYLE UNICODE GRAS
+// ═══════════════════════════════════
 
-const cooldowns = new Map();
-const recentMessages = new Map();
+function futuristic(text) {
+  const normal = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bold = [
+    ..."𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙",
+    ..."𝐚𝐛𝐜𝐝𝐞𝐟𝐠𝐡𝐢𝐣𝐤𝐥𝐦𝐧𝐨𝐩𝐪𝐫𝐬𝐭𝐮𝐯𝐰𝐱𝐲𝐳",
+    ..."𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗"
+  ].join("");
 
-function isSpam(id, text) {
-  const now = Date.now();
-  const last = cooldowns.get(id) || 0;
-  const previous = recentMessages.get(id);
+  const map = {};
+  [...normal].forEach((c, i) => map[c] = [...bold][i]);
 
-  if (
-    previous &&
-    previous.text === text &&
-    now - previous.time < 8000
-  ) {
-    return true;
+  return String(text).normalize("NFD").split("").map(c => {
+    if (/\p{M}/u.test(c)) return c;
+    return map[c] || c;
+  }).join("").normalize("NFC");
+}
+
+// ═══════════════════════════════════
+// GROQ • INTELLIGENCE ENGINE
+// ═══════════════════════════════════
+
+const conversations = new Map();
+
+async function askGroq(userId, question, mode = "ai") {
+  if (!GROQ_KEY) throw new Error("GROQ_API_KEY manquante.");
+
+  const instructions = {
+    chat: `Tu es Sitri-Nel, une intelligence artificielle sophistiquée.
+Tu es calme, intelligente, naturelle, drôle avec subtilité et attentive.
+Tu parles français par défaut. Tu peux utiliser d'autres langues si nécessaire.
+Tu réponds comme une véritable interlocutrice, sans prétendre être humaine.
+Tu conserves le contexte de la conversation.
+Tes réponses sont utiles, précises et pas inutilement longues.`,
+
+    ask: `Tu es Sitri-Nel, une intelligence artificielle experte.
+Tu analyses les questions avec attention.
+Tu donnes des réponses détaillées, structurées et pédagogiques.
+Tu expliques les notions difficiles avec des exemples simples.
+Tu ne prétends pas connaître une information si tu n'en es pas sûre.`,
+
+    ai: `Tu es Sitri-Nel, une intelligence artificielle polyvalente.
+Tu réponds aux questions de culture générale, sciences, technologie,
+histoire, géographie, rédaction, raisonnement et vie quotidienne.
+Tu es précise, naturelle, intelligente et claire.
+Tu ne prétends pas connaître une information si tu n'en es pas sûre.`
+  };
+
+  let history = conversations.get(userId) || [];
+
+  const messages = [
+    { role: "system", content: instructions[mode] || instructions.ai },
+    ...history,
+    { role: "user", content: question }
+  ];
+
+  const response = await axios.post(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      model: MODEL,
+      messages,
+      temperature: 0.7,
+      max_completion_tokens: 1200
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${GROQ_KEY}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  );
+
+  const answer = response.data?.choices?.[0]?.message?.content?.trim();
+
+  if (!answer) throw new Error("Réponse vide reçue de Groq.");
+
+  if (mode === "chat") {
+    history.push(
+      { role: "user", content: question },
+      { role: "assistant", content: answer }
+    );
+
+    conversations.set(userId, history.slice(-12));
   }
 
-  if (now - last < COOLDOWN) {
-    return true;
-  }
-
-  cooldowns.set(id, now);
-  recentMessages.set(id, {
-    text,
-    time: now
-  });
-
-  if (cooldowns.size > 3000) cooldowns.clear();
-  if (recentMessages.size > 3000) recentMessages.clear();
-
-  return false;
+  return answer;
 }
 
-// ==========================================
-// 📝 MESSAGE EXTRACTION
-// ==========================================
+// ═══════════════════════════════════
+// OUTILS WHATSAPP
+// ═══════════════════════════════════
 
-function unwrapMessage(message) {
+function getText(message) {
   let msg = message;
-
-  while (
-    msg?.ephemeralMessage ||
-    msg?.viewOnceMessage ||
-    msg?.viewOnceMessageV2
-  ) {
-    msg =
-      msg.ephemeralMessage?.message ||
+  while (msg?.ephemeralMessage || msg?.viewOnceMessage || msg?.viewOnceMessageV2) {
+    msg = msg.ephemeralMessage?.message ||
       msg.viewOnceMessage?.message ||
       msg.viewOnceMessageV2?.message;
   }
 
-  return msg;
+  return msg?.conversation ||
+    msg?.extendedTextMessage?.text ||
+    msg?.imageMessage?.caption ||
+    msg?.videoMessage?.caption ||
+    msg?.documentMessage?.caption ||
+    msg?.buttonsResponseMessage?.selectedButtonId ||
+    msg?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    "";
 }
 
-function getText(message) {
-  if (!message) return '';
-
-  return (
-    message.conversation ||
-    message.extendedTextMessage?.text ||
-    message.imageMessage?.caption ||
-    message.videoMessage?.caption ||
-    message.documentMessage?.caption ||
-    message.buttonsResponseMessage?.selectedButtonId ||
-    message.listResponseMessage?.singleSelectReply?.selectedRowId ||
-    ''
+async function reply(sock, jid, text, quoted) {
+  return sock.sendMessage(
+    jid,
+    { text: futuristic(text) },
+    quoted ? { quoted } : {}
   );
 }
 
-// ==========================================
-// 🧬 FUTURISTIC MENU
-// ==========================================
-
-function getMenu() {
-  return `
-╭━━〔 ⚡ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 〕━━╮
-   🧬 𝗡𝗘𝗫𝗨𝗦 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗧
-╰━━━━━━━━━━━━━━╯
-
-⌬ 𝟬𝟭 • 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘
-├ Xchat
-├ Xask
-├ Xai
-├ Xanime
-├ Xpolice
-└ Xinfo
-
-⌬ 𝟬𝟮 • 𝗘́𝗖𝗢𝗡𝗢𝗠𝗜𝗘
-├ Xdaily
-├ Xcoins
-├ Xp
-└ Xrank
-
-⌬ 𝟬𝟯 • 𝗝𝗘𝗨𝗫
-└ Xquiz
-
-⌬ 𝟬𝟰 • 𝗠𝗘́𝗗𝗜𝗔𝗦
-├ Ximg
-├ Xplay
-└ Xvideo
-
-⌬ 𝟬𝟱 • 𝗣𝗥𝗢𝗙𝗜𝗟
-└ Xprofil
-
-⌬ 𝟬𝟲 • 𝗚𝗥𝗢𝗨𝗣𝗘
-├ Xtagall
-└ Xannonce
-
-⌬ 𝟬𝟳 • 𝗔𝗗𝗠𝗜𝗡
-├ Xkick
-├ Xadd
-├ Xclear
-├ Xoff
-├ Xrestart
-└ Xonlyadmin
-
-⌬ 𝟬𝟴 • 𝗦𝗬𝗦𝗧𝗘̀𝗠𝗘
-├ Xupt
-└ Xmenu
-
-━━━━━━━━━━━━━━
-⚡ 𝗣𝗥𝗘́𝗙𝗜𝗫𝗘 : X
-◈ 𝗦𝗧𝗔𝗧𝗨𝗦 : 𝗢𝗡𝗟𝗜𝗡𝗘
-
-       𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟
-       𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗗 𝗕𝗬
-          𝗞𝗔𝗬≈𝗗𝗘𝗡
-`;
+function getNumber(jid) {
+  return jid.split("@")[0].split(":")[0];
 }
 
-// ==========================================
-// 🧠 GROQ INTELLIGENCE
-// ==========================================
+function isOwner(jid) {
+  return OWNER_NUMBERS.includes(getNumber(jid));
+}
 
-async function askAI(prompt) {
-  const key = process.env.GROQ_API_KEY;
+async function isGroupAdmin(sock, jid, sender) {
+  const metadata = await sock.groupMetadata(jid);
+  const participant = metadata.participants.find(p =>
+    p.id === sender || p.jid === sender
+  );
+  return participant?.admin === "admin" || participant?.admin === "superadmin";
+}
 
-  if (!key) {
-    return 'Mon intelligence artificielle n’est pas configurée.';
-  }
+async function getBotAdmin(sock, jid) {
+  const metadata = await sock.groupMetadata(jid);
+  const botNumber = getNumber(sock.user.id);
+  const bot = metadata.participants.find(p => getNumber(p.id) === botNumber);
+  return bot?.admin === "admin" || bot?.admin === "superadmin";
+}
 
-  try {
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: 'llama-3.3-70b-versatile',
+// ═══════════════════════════════════
+// COMMANDES
+// ═══════════════════════════════════
 
-        messages: [
-          {
-            role: 'system',
-            content: `
-Tu es Sitri-Nel, une intelligence artificielle personnelle.
+const quizList = [
+  { q: "Quelle est la capitale du Japon ?", a: "Tokyo" },
+  { q: "Combien de côtés possède un hexagone ?", a: "6" },
+  { q: "Quelle planète est surnommée la planète rouge ?", a: "Mars" },
+  { q: "Quel est le plus grand océan du monde ?", a: "Pacifique" },
+  { q: "Combien font 12 × 8 ?", a: "96" }
+];
 
-PERSONNALITÉ :
-- Intelligente et autonome.
-- Calme, drôle et attentive.
-- Élégante et futuriste.
-- Naturelle et parfois taquine.
-- Français simple et expressions béninoises
-  quand le contexte s'y prête.
+const activeQuizzes = new Map();
 
-STYLE :
-- Réponses claires et agréables.
-- Évite les longs discours inutiles.
-- Utilise des emojis avec modération.
-- Ne répète pas toujours les mêmes phrases.
-- Ne prétends jamais avoir réalisé une action
-  que tu n'as pas réellement effectuée.
+async function handleCommand(sock, msg, command, args, jid, sender, user) {
+  const isGroup = jid.endsWith("@g.us");
+  const name = msg.pushName || "Utilisateur";
+  const text = args.trim();
 
-Tu es Sitri-Nel.
-`
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
+  switch (command) {
 
-        temperature: 0.8,
-        max_tokens: 500
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${key}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
+    // ───── SYSTEM ─────
+
+    case "menu":
+    case "help":
+      return reply(sock, jid, getMenu(), msg);
+
+    case "upt":
+    case "ping":
+      return reply(sock, jid,
+        `⌬ SYSTEM ONLINE\n⌬ Latence : ${Date.now() - msg.messageTimestamp * 1000} ms\n⌬ Intelligence : ${MODEL}\n⌬ État : OPÉRATIONNEL`,
+        msg
+      );
+
+    // ───── INTELLIGENCE ─────
+
+    case "ai":
+    case "ask":
+    case "chat": {
+      if (!text) {
+        return reply(sock, jid,
+          command === "chat"
+            ? "Indique un sujet pour commencer notre conversation.\nExemple : Xchat Parlons de technologie."
+            : "Ta question est attendue.\nExemple : Xai Quelle est la capitale de la France ?",
+          msg
+        );
       }
-    );
 
-    return response.data.choices[0].message.content.trim();
+      await sock.sendMessage(jid, { react: { text: "🧠", key: msg.key } });
 
-  } catch (e) {
-    console.error('Groq error:', e.response?.data || e.message);
+      try {
+        const mode = command === "chat" ? "chat" :
+          command === "ask" ? "ask" : "ai";
 
-    return 'Mon système IA rencontre momentanément un problème. Réessaie dans un instant.';
+        const answer = await askGroq(sender, text, mode);
+
+        user.xp += 5;
+        saveDB();
+
+        return reply(sock, jid,
+          `⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\n${answer}\n\n𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟`,
+          msg
+        );
+      } catch (error) {
+        console.error("GROQ ERROR:", error.response?.data || error.message);
+
+        let errorMessage = "Une erreur technique empêche actuellement ma réponse.";
+
+        if (error.response?.status === 401) {
+          errorMessage = "La clé Groq est refusée. Vérifie GROQ_API_KEY sur Railway.";
+        } else if (error.response?.status === 429) {
+          errorMessage = "La limite de requêtes Groq est atteinte. Réessaie un peu plus tard.";
+        } else if (error.response?.status === 400) {
+          errorMessage = "Le modèle ou les paramètres Groq sont refusés. Vérifie GROQ_MODEL.";
+        } else if (error.code === "ECONNABORTED") {
+          errorMessage = "Le serveur IA met trop de temps à répondre. Réessaie.";
+        }
+
+        return reply(sock, jid,
+          `⌬ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗔𝗟𝗘𝗥𝗧\n\n${errorMessage}\n\nCode : ${error.response?.status || error.code || "UNKNOWN"}`,
+          msg
+        );
+      }
+    }
+
+    case "anime":
+      if (!text) return reply(sock, jid, "Exemple : Xanime Présente-moi One Piece.", msg);
+      try {
+        return reply(sock, jid, await askGroq(sender,
+          `Réponds à cette demande concernant les animes : ${text}`, "ai"), msg);
+      } catch (e) {
+        console.error(e.message);
+        return reply(sock, jid, "Le module anime est temporairement indisponible.", msg);
+      }
+
+    case "police":
+      if (!text) return reply(sock, jid, "Exemple : Xpolice Corrige ce texte : ...", msg);
+      try {
+        return reply(sock, jid, await askGroq(sender,
+          `Corrige le texte suivant en conservant son sens. Donne la version corrigée et une courte explication : ${text}`,
+          "ask"), msg);
+      } catch (e) {
+        console.error(e.message);
+        return reply(sock, jid, "Le module de correction est temporairement indisponible.", msg);
+      }
+
+    case "info":
+      return reply(sock, jid,
+        `𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\nIntelligence artificielle conversationnelle.\nCréation : KAY≈DEN\nMoteur IA : Groq\nModèle : ${MODEL}\nPréfixe : X\nVersion : 1.0`,
+        msg
+      );
+
+    // ───── ECONOMY ─────
+
+    case "daily": {
+      const now = Date.now();
+      const cooldown = 24 * 60 * 60 * 1000;
+      const remaining = cooldown - (now - user.lastDaily);
+
+      if (remaining > 0) {
+        const hours = Math.floor(remaining / 3600000);
+        const minutes = Math.floor((remaining % 3600000) / 60000);
+
+        return reply(sock, jid,
+          `⌬ 𝗥𝗘𝗖𝗛𝗔𝗥𝗚𝗘 𝗘𝗡 𝗖𝗢𝗨𝗥𝗦\n\nProchaine récompense dans ${hours}h ${minutes}min.`,
+          msg
+        );
+      }
+
+      user.lastDaily = now;
+      user.coins += 350;
+      user.xp += 25;
+      saveDB();
+
+      return reply(sock, jid,
+        `╭━━〔 💰 𝗫𝗗𝗔𝗜𝗟𝗬 🧬 〕━━╮\n\n⌬ Récompense quotidienne : +350 XCoins\n⌬ Expérience : +25 XP\n\nSolde : ${user.coins} XCoins\n\n╰━━━━━━━━━━━━━━━━━━╯`,
+        msg
+      );
+    }
+
+    case "coins":
+      return reply(sock, jid,
+        `⌬ 𝗫𝗖𝗢𝗜𝗡𝗦\n\nUtilisateur : ${name}\nSolde : ${user.coins} XCoins`,
+        msg
+      );
+
+    case "p":
+      return reply(sock, jid,
+        `⌬ 𝗣𝗥𝗢𝗚𝗥𝗘𝗦𝗦𝗜𝗢𝗡\n\nXP : ${user.xp}\nNiveau : ${Math.floor(user.xp / 500) + 1}\nProchain niveau : ${500 - (user.xp % 500)} XP`,
+        msg
+      );
+
+    case "rank": {
+      const ranking = Object.entries(db.users)
+        .sort((a, b) => b[1].xp - a[1].xp)
+        .slice(0, 10);
+
+      const lines = ranking.map(([id, u], i) =>
+        `${i + 1}. ${u.name || getNumber(id)} — ${u.xp} XP`
+      );
+
+      return reply(sock, jid,
+        `⌬ 𝗫𝗥𝗔𝗡𝗞 • TOP 10\n\n${lines.join("\n") || "Aucun classement disponible."}`,
+        msg
+      );
+    }
+
+    // ───── ENTERTAINMENT ─────
+
+    case "quiz": {
+      const quiz = quizList[Math.floor(Math.random() * quizList.length)];
+      activeQuizzes.set(sender, quiz);
+
+      return reply(sock, jid,
+        `╭━━〔 🧩 𝗫𝗤𝗨𝗜𝗭 〕━━╮\n\n${quiz.q}\n\nRéponds avec : Xreponse ta réponse\n\n╰━━━━━━━━━━━━━━━━━━╯`,
+        msg
+      );
+    }
+
+    case "reponse": {
+      const quiz = activeQuizzes.get(sender);
+      if (!quiz) return reply(sock, jid, "Aucun quiz actif. Lance Xquiz.", msg);
+
+      activeQuizzes.delete(sender);
+
+      if (text.toLowerCase().trim() === quiz.a.toLowerCase()) {
+        user.coins += 30;
+        user.xp += 20;
+        saveDB();
+        return reply(sock, jid, "⌬ Réponse exacte ! +30 XCoins et +20 XP.", msg);
+      }
+
+      return reply(sock, jid, `Réponse incorrecte. La bonne réponse était : ${quiz.a}`, msg);
+    }
+
+    // ───── PROFILE ─────
+
+    case "profil":
+    case "profile":
+      return reply(sock, jid,
+        `╭━━〔 👤 𝗣𝗥𝗢𝗙𝗜𝗟 〕━━╮\n\nNom : ${name}\nXP : ${user.xp}\nNiveau : ${Math.floor(user.xp / 500) + 1}\nXCoins : ${user.coins}\n\n╰━━━━━━━━━━━━━━━━━━╯`,
+        msg
+      );
+
+    // ───── GROUP ─────
+
+    case "tagall": {
+      if (!isGroup) return reply(sock, jid, "Cette commande fonctionne dans un groupe.", msg);
+
+      const admin = await isGroupAdmin(sock, jid, sender);
+      if (!admin && !isOwner(sender)) return reply(sock, jid, "Commande réservée aux administrateurs.", msg);
+
+      const metadata = await sock.groupMetadata(jid);
+      const mentions = metadata.participants.map(p => p.id);
+      const message = text || "⌬ Attention, rassemblement demandé.";
+
+      return sock.sendMessage(jid, {
+        text: futuristic(message),
+        mentions
+      }, { quoted: msg });
+    }
+
+    case "annonce": {
+      if (!isGroup) return reply(sock, jid, "Cette commande fonctionne dans un groupe.", msg);
+      if (!text) return reply(sock, jid, "Ajoute le texte de ton annonce.", msg);
+
+      const admin = await isGroupAdmin(sock, jid, sender);
+      if (!admin && !isOwner(sender)) return reply(sock, jid, "Commande réservée aux administrateurs.", msg);
+
+      return reply(sock, jid, `⌬ 𝗔𝗡𝗡𝗢𝗡𝗖𝗘\n\n${text}\n\n𖤍 SITRI-NEL`, msg);
+    }
+
+    case "kick": {
+      if (!isGroup) return reply(sock, jid, "Cette commande fonctionne dans un groupe.", msg);
+
+      const admin = await isGroupAdmin(sock, jid, sender);
+      const botAdmin = await getBotAdmin(sock, jid);
+
+      if (!admin && !isOwner(sender)) return reply(sock, jid, "Commande réservée aux administrateurs.", msg);
+      if (!botAdmin) return reply(sock, jid, "Je dois être administratrice du groupe pour effectuer cette action.", msg);
+
+      const target = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+        || msg.message?.extendedTextMessage?.contextInfo?.participant;
+
+      if (!target) return reply(sock, jid, "Mentionne un membre ou réponds à son message.", msg);
+
+      await sock.groupParticipantsUpdate(jid, [target], "remove");
+      return reply(sock, jid, "⌬ Action effectuée.", msg);
+    }
+
+    case "add": {
+      if (!isGroup) return reply(sock, jid, "Cette commande fonctionne dans un groupe.", msg);
+
+      const admin = await isGroupAdmin(sock, jid, sender);
+      const botAdmin = await getBotAdmin(sock, jid);
+
+      if (!admin && !isOwner(sender)) return reply(sock, jid, "Commande réservée aux administrateurs.", msg);
+      if (!botAdmin) return reply(sock, jid, "Je dois être administratrice du groupe.", msg);
+
+      const number = text.replace(/\D/g, "");
+      if (number.length < 8) return reply(sock, jid, "Indique un numéro avec son indicatif.", msg);
+
+      await sock.groupParticipantsUpdate(jid, [`${number}@s.whatsapp.net`], "add");
+      return reply(sock, jid, "⌬ Demande d'ajout transmise à WhatsApp.", msg);
+    }
+
+    case "onlyadmin": {
+      if (!isGroup) return reply(sock, jid, "Cette commande fonctionne dans un groupe.", msg);
+
+      const admin = await isGroupAdmin(sock, jid, sender);
+      const botAdmin = await getBotAdmin(sock, jid);
+
+      if (!admin && !isOwner(sender)) return reply(sock, jid, "Commande réservée aux administrateurs.", msg);
+      if (!botAdmin) return reply(sock, jid, "Je dois être administratrice du groupe.", msg);
+
+      const metadata = await sock.groupMetadata(jid);
+      const enable = metadata.announce !== true;
+
+      await sock.groupSettingUpdate(jid, enable ? "announcement" : "not_announcement");
+
+      return reply(sock, jid,
+        enable ? "⌬ Mode administrateurs activé." : "⌬ Mode messages ouvert à tous.",
+        msg
+      );
+    }
+
+    case "clear": {
+      const quoted = msg.message?.extendedTextMessage?.contextInfo;
+      if (!quoted?.stanzaId) return reply(sock, jid, "Réponds au message que tu souhaites supprimer.", msg);
+
+      const admin = isGroup ? await isGroupAdmin(sock, jid, sender) : isOwner(sender);
+      if (!admin && !isOwner(sender)) return reply(sock, jid, "Autorisation insuffisante.", msg);
+
+      await sock.sendMessage(jid, {
+        delete: {
+          remoteJid: jid,
+          fromMe: quoted.participant ? false : true,
+          id: quoted.stanzaId,
+          participant: quoted.participant
+        }
+      });
+
+      return;
+    }
+
+    // ───── MULTIMEDIA ─────
+
+    case "img":
+    case "play":
+    case "video":
+      return reply(sock, jid,
+        `⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗡𝗢𝗡 𝗖𝗢𝗡𝗙𝗜𝗚𝗨𝗥𝗘\n\nLa commande ${PREFIX}${command} est prévue dans le menu, mais son service externe n'est pas encore relié.\nJe ne vais pas simuler un résultat.`,
+        msg
+      );
+
+    // ───── OWNER ─────
+
+    case "off":
+      if (!isOwner(sender)) return reply(sock, jid, "Commande réservée au propriétaire.", msg);
+      await reply(sock, jid, "⌬ Déconnexion demandée.", msg);
+      return sock.logout();
+
+    case "restart":
+      if (!isOwner(sender)) return reply(sock, jid, "Commande réservée au propriétaire.", msg);
+      await reply(sock, jid, "⌬ Redémarrage du système...", msg);
+      setTimeout(() => process.exit(0), 1000);
+      return;
+
+    default:
+      return;
   }
 }
 
-// ==========================================
-// 🚀 WHATSAPP CONNECTION
-// ==========================================
+// ═══════════════════════════════════
+// CONNEXION WHATSAPP
+// ═══════════════════════════════════
 
-let reconnecting = false;
-
-async function start() {
-  const { state, saveCreds } =
-    await useMultiFileAuthState('session');
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("session");
 
   const sock = makeWASocket({
     auth: state,
-    logger: pino({ level: 'silent' }),
-
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
-
-    markOnlineOnConnect: false,
-    syncFullHistory: false,
-
-    getMessage: async () => undefined
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false,
+    browser: ["Sitri-Nel", "Chrome", "1.0.0"],
+    markOnlineOnConnect: true,
+    syncFullHistory: false
   });
 
-  let pairingRequested = false;
+  sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on('creds.update', saveCreds);
+  // Code d'association
+  if (!state.creds.registered && PAIRING_NUMBER) {
+    const number = PAIRING_NUMBER.replace(/\D/g, "");
 
-  sock.ev.on('connection.update', async (u) => {
-    const { connection, lastDisconnect } = u;
-
-    if (
-      connection === 'connecting' &&
-      !state.creds.registered &&
-      !pairingRequested
-    ) {
-      pairingRequested = true;
-
+    setTimeout(async () => {
       try {
-        const number = (
-          process.env.PAIRING_NUMBER || ''
-        ).replace(/\D/g, '');
-
-        if (!number) {
-          console.log('PAIRING_NUMBER manquant.');
-          return;
-        }
-
-        await new Promise(r => setTimeout(r, 3000));
-
         const code = await sock.requestPairingCode(number);
-
-        console.log('𖤍 CODE DE PAIRAGE : ' + code);
-
-      } catch (e) {
-        pairingRequested = false;
-        console.error('Pairing error:', e.message);
+        console.log("SITRI-NEL PAIRING CODE:", code);
+      } catch (error) {
+        console.error("PAIRING ERROR:", error.message);
       }
+    }, 3000);
+  }
+
+  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+    if (connection === "open") {
+      console.log("SITRI-NEL CONNECTED SUCCESSFULLY");
     }
 
-    if (connection === 'open') {
-      reconnecting = false;
-      console.log('✓ SITRI-NEL CONNECTÉE !');
-    }
+    if (connection === "close") {
+      const status = lastDisconnect?.error?.output?.statusCode;
 
-    if (connection === 'close' && !reconnecting) {
-      const status =
-        lastDisconnect?.error?.output?.statusCode;
+      console.log("CONNECTION CLOSED:", status);
 
-      if (status === DisconnectReason.loggedOut) {
-        console.log('Session déconnectée. Nouveau pairage nécessaire.');
-        return;
+      if (status !== DisconnectReason.loggedOut) {
+        setTimeout(startBot, 5000);
+      } else {
+        console.log("Session déconnectée. Une nouvelle association est nécessaire.");
       }
-
-      reconnecting = true;
-      console.log('Reconnexion dans 5 secondes...');
-
-      setTimeout(() => {
-        reconnecting = false;
-        start().catch(console.error);
-      }, 5000);
     }
   });
 
-// ==========================================
-// 📩 MESSAGE HANDLER
-// ==========================================
+  
+  // ═════════════════════════════════
+  // RÉCEPTION DES MESSAGES
+  // ═════════════════════════════════
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
 
-    for (const m of messages) {
+    for (const msg of messages) {
       try {
-        if (!m.message || m.key.fromMe) continue;
+        if (!msg.message || msg.key.fromMe) continue;
 
-        const from = m.key.remoteJid;
+        const jid = msg.key.remoteJid;
+        if (!jid || jid === "status@broadcast") continue;
 
-        if (!from || from === 'status@broadcast') continue;
+        const sender = msg.key.participant || jid;
+        const name = msg.pushName || "Utilisateur";
+        const user = getUser(sender, name);
 
-        const isGroup = from.endsWith('@g.us');
+        const body = getText(msg.message).trim();
+        if (!body) continue;
 
-        const sender = isGroup
-          ? m.key.participant
-          : from;
-
-        if (!sender) continue;
-
-        const message = unwrapMessage(m.message);
-        const text = getText(message).trim();
-
-        if (!text) continue;
-
-        // Préfixe X insensible à la casse
-        const match = text.match(
-          /^X([a-z]+)(?:\s+([\s\S]*))?$/i
-        );
-
-        // Aucun préfixe = aucun message
+        const match = body.match(/^X([a-z]+)(?:\s+([\s\S]*))?$/i);
         if (!match) continue;
 
         const command = match[1].toLowerCase();
-        const args = (match[2] || '').trim();
+        const args = match[2] || "";
 
-        // Commandes actuellement programmées
-        const allowed = [
-          'menu',
-          'help',
-          'ping',
-          'upt',
-          'daily',
-          'coins',
-          'p',
-          'rank',
-          'ai',
-          'ask',
-          'chat'
-        ];
+        console.log(`COMMAND: X${command} | FROM: ${sender}`);
 
-        // Commande inconnue = silence
-        if (!allowed.includes(command)) continue;
+        await handleCommand(
+          sock,
+          msg,
+          command,
+          args,
+          jid,
+          sender,
+          user
+        );
 
-        // Anti-spam
-        if (isSpam(sender, text)) continue;
+      } catch (error) {
+        console.error("MESSAGE ERROR:", error.stack || error);
 
-        const user = getUser(sender);
-
-        // ==================================
-        // ⚡ XMENU / XHELP
-        // ==================================
-
-        if (
-          command === 'menu' ||
-          command === 'help'
-        ) {
-          await sock.sendMessage(
-            from,
-            { text: getMenu() },
-            { quoted: m }
+        try {
+          await reply(
+            sock,
+            msg.key.remoteJid,
+            "⌬ Une erreur est survenue pendant le traitement de cette commande."
           );
-
-          continue;
-        }
-
-        // ==================================
-        // ⚡ XPING
-        // ==================================
-
-        if (command === 'ping') {
-          await sock.sendMessage(
-            from,
-            {
-              text: sitriReply(
-                'Système opérationnel ! Sitri-Nel est connectée.'
-              )
-            },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-        // ==================================
-        // ⚙️ XUPT
-        // ==================================
-
-        if (command === 'upt') {
-          const uptime = Math.floor(process.uptime());
-
-          const hours = Math.floor(uptime / 3600);
-          const minutes = Math.floor((uptime % 3600) / 60);
-          const seconds = uptime % 60;
-
-          await sock.sendMessage(
-            from,
-            {
-              text: sitriReply(
-                `Système actif depuis : ${hours}h ${minutes}min ${seconds}s.`
-              )
-            },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-        // ==================================
-        // 💎 XDAILY
-        // ==================================
-
-        if (command === 'daily') {
-          const now = Date.now();
-
-          const remaining =
-            86400000 - (now - user.lastDaily);
-
-          if (remaining > 0) {
-            const hours = Math.floor(
-              remaining / 3600000
-            );
-
-            const minutes = Math.floor(
-              (remaining % 3600000) / 60000
-            );
-
-            await sock.sendMessage(
-              from,
-              {
-                text: sitriReply(
-                  `Bonus déjà récupéré. Prochain bonus dans ${hours}h ${minutes}min.`
-                )
-              },
-              { quoted: m }
-            );
-
-            continue;
-          }
-
-          user.coins += DAILY_REWARD;
-          user.lastDaily = now;
-          user.xp += 25;
-          user.level = Math.floor(user.xp / 500) + 1;
-
-          saveDB();
-
-          const dailyMessage = `
-〔 💠 𝗫𝗗𝗔𝗜𝗟𝗬 〕
-   𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 • 𝗥𝗘𝗪𝗔𝗥𝗗𝗦
-━━━━━━━━━━━━━━
-
-       ✦ +${DAILY_REWARD}
-        𝗫𝗖𝗢𝗜𝗡𝗦
-
-◈ 𝗥𝗘́𝗖𝗢𝗠𝗣𝗘𝗡𝗦𝗘 𝗥𝗘́𝗖𝗨𝗣𝗘́𝗥𝗘́𝗘
-
-━━━━━━━━━━━━━━
-⏳ 𝗣𝗥𝗢𝗖𝗛𝗔𝗜𝗡 𝗕𝗢𝗡𝗨𝗦
-         𝟮𝟰𝗛
-
-◈ 𝗦𝗢𝗟𝗗𝗘 𝗔𝗖𝗧𝗨𝗘𝗟
-   ${user.coins.toLocaleString('fr-FR')} XCoins
-
-━━━━━━━━━━━━━━
-      𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟
-     𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗗 𝗕𝗬
-        𝗞𝗔𝗬≈𝗗𝗘𝗡
-`;
-
-          await sock.sendMessage(
-            from,
-            { text: dailyMessage },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-        // ==================================
-        // 💰 XCOINS
-        // ==================================
-
-        if (command === 'coins') {
-          await sock.sendMessage(
-            from,
-            {
-              text: sitriReply(
-                `Portefeuille : ${user.coins.toLocaleString('fr-FR')} XCoins.`
-              )
-            },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-        // ==================================
-        // ⚡ XP
-        // ==================================
-
-        if (command === 'p') {
-          await sock.sendMessage(
-            from,
-            {
-              text: sitriReply(
-                `Niveau : ${user.level}\nExpérience : ${user.xp} XP\nSolde : ${user.coins} XCoins`
-              )
-            },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-        // ==================================
-        // 🏆 XRANK
-        // ==================================
-
-        if (command === 'rank') {
-          const ranking = Object.entries(db)
-            .filter(([id, value]) =>
-              !id.startsWith('chat_') &&
-              value &&
-              typeof value.xp === 'number'
-            )
-            .sort((a, b) => b[1].xp - a[1].xp)
-            .slice(0, 10);
-
-          let result = '〔 🏆 𝗫𝗥𝗔𝗡𝗞 〕\n\n';
-
-          ranking.forEach(([id, data], i) => {
-            result +=
-              `${i + 1}. ${id.split('@')[0]}\n`;
-
-            result +=
-              `   LVL ${data.level} • ${data.xp} XP\n\n`;
-          });
-
-          result += `
-━━━━━━━━━━━━━━
-𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟
-𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗗 𝗕𝗬
-𝗞𝗔𝗬≈𝗗𝗘𝗡`;
-
-          await sock.sendMessage(
-            from,
-            { text: result },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-        // ==================================
-        // 🧠 XAI / XASK / XCHAT
-        // ==================================
-
-        if (
-          command === 'ai' ||
-          command === 'ask' ||
-          command === 'chat'
-        ) {
-          if (!args) {
-            await sock.sendMessage(
-              from,
-              {
-                text: sitriReply(
-                  `Écris ta question après la commande.\nExemple : X${command} Qui es-tu ?`
-                )
-              },
-              { quoted: m }
-            );
-
-            continue;
-          }
-
-          const answer = await askAI(args);
-
-          addXP(sender, 10);
-
-          await sock.sendMessage(
-            from,
-            {
-              text: sitriReply(answer)
-            },
-            { quoted: m }
-          );
-
-          continue;
-        }
-
-      } catch (e) {
-        console.error('Message handler error:', e.message);
+        } catch {}
       }
     }
   });
 }
 
-// ==========================================
-// 🔌 START SITRI-NEL
-// ==========================================
-
-start().catch(error => {
-  console.error('Startup error:', error);
+startBot().catch(error => {
+  console.error("STARTUP ERROR:", error);
+  process.exit(1);
 });
-         
+        

@@ -723,7 +723,7 @@ sock.ev.on("connection.update", async ({ connection }) => {
           jid,
           sender,
           user
-        ); in
+        ); 
 
       } catch (error) {
         console.error("MESSAGE ERROR:", error.stack || error);

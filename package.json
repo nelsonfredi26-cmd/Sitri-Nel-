@@ -1,19 +1,15 @@
+
 {
   "name": "sitri-nel",
   "version": "1.0.0",
-  "description": "Sitri-Nel WhatsApp Bot",
+  "description": "Sitri-Nel Bot WhatsApp",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "latest",
-    "axios": "^1.7.7",
-    "dotenv": "^16.4.5",
-    "pino": "^9.3.2",
-    "qrcode-terminal": "^0.12.0"
-  },
-  "engines": {
-    "node": "20.x"
+    "@whiskeysockets/baileys": "^6.7.18",
+    "axios": "^1.7.9",
+    "pino": "^9.3.2"
   }
 }

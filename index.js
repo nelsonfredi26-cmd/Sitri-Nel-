@@ -637,19 +637,35 @@ async function startBot() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // Code d'association
-if (!state.creds.registered && PAIRING_NUMBER) {
-  const number = PAIRING_NUMBER.replace(/\D/g, "");
+  // ═══════════════════════════════════
+// CODE D'ASSOCIATION WHATSAPP
+// ═══════════════════════════════════
 
-  setTimeout(async () => {
+let pairingRequested = false;
+
+sock.ev.on("connection.update", async ({ connection }) => {
+  if (
+    connection === "open" &&
+    !state.creds.registered &&
+    PAIRING_NUMBER &&
+    !pairingRequested
+  ) {
+    pairingRequested = true;
+
     try {
+      const number = PAIRING_NUMBER.replace(/\D/g, "");
+
       const code = await sock.requestPairingCode(number);
+
+      console.log("════════════════════════════");
       console.log("SITRI-NEL PAIRING CODE:", code);
+      console.log("════════════════════════════");
     } catch (error) {
-      console.error("PAIRING ERROR:", error.message);
+      pairingRequested = false;
+      console.error("PAIRING ERROR:", error);
     }
-  }, 3000);
-}
+  }
+});
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
     if (connection === "open") {
@@ -707,7 +723,7 @@ if (!state.creds.registered && PAIRING_NUMBER) {
           jid,
           sender,
           user
-        );
+        ); in
 
       } catch (error) {
         console.error("MESSAGE ERROR:", error.stack || error);

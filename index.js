@@ -638,18 +638,18 @@ async function startBot() {
   sock.ev.on("creds.update", saveCreds);
 
   // Code d'association
-  if (!state.creds.registered && PAIRING_NUMBER) {
-    const number = PAIRING_NUMBER.replace(/\D/g, "");
+if (!state.creds.registered && PAIRING_NUMBER) {
+  const number = PAIRING_NUMBER.replace(/\D/g, "");
 
-    setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(number);
-        console.log("SITRI-NEL PAIRING CODE:", code);
-      } catch (error) {
-        console.error("PAIRING ERROR:", error.message);
-      }
-    }, 3000);
-  }
+  setTimeout(async () => {
+    try {
+      const code = await sock.requestPairingCode(number);
+      console.log("SITRI-NEL PAIRING CODE:", code);
+    } catch (error) {
+      console.error("PAIRING ERROR:", error.message);
+    }
+  }, 3000);
+}
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
     if (connection === "open") {

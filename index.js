@@ -754,8 +754,9 @@ async function askGroq(prompt, jid, options = {}) {
 
   if (!prompt || !String(prompt).trim()) {
     throw new Error('La question est vide.');
-       }
-   const useHistory = options.useHistory === true;
+  }
+
+  const useHistory = options.useHistory === true;
 
   let history = [];
 
@@ -857,6 +858,7 @@ async function askGroq(prompt, jid, options = {}) {
 
   return cleanAnswer;
 }
+
 // ------------------------------------------------------------
 // 17. PARAMÈTRES DES GROUPES
 // ------------------------------------------------------------
@@ -1630,6 +1632,30 @@ async function answerQuiz(chatJid, userJid, answer) {
     });
 
     return {
+      success: false,
+      message: '⌛ Le temps du quiz est écoulé. Lance un nouveau Xquiz.'
+    };
+  }
+
+  if (submitted !== normalizeAnswer(quiz.answer)) {
+    return { success: false, message: '❌ Mauvaise réponse. Tu peux réessayer.' };
+  }
+
+  // Suppression conditionnelle : un seul gagnant possible.
+  const claimed = await db.execute({
+    sql: `DELETE FROM active_quizzes
+          WHERE group_jid = ? AND expires_at > ?
+          RETURNING group_jid`,
+    args: [chatJid, now]
+  });
+
+  if (!claimed.rows.length) {
+    return { success: false, message: 'Ce quiz vient déjà d’être remporté.' };
+  }
+
+  const user = await addRewards(userJid, 30, 20);
+
+  return {
     success: true,
     coins: Number(user.coins),
     xp: Number(user.xp),
@@ -1643,8 +1669,9 @@ async function answerQuiz(chatJid, userJid, answer) {
       '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
       SIGNATURE
   };
-  }
-   // ------------------------------------------------------------
+}
+
+// ------------------------------------------------------------
 // 23. IMAGES : RECHERCHE ET GÉNÉRATION
 // ------------------------------------------------------------
 
@@ -1697,7 +1724,7 @@ async function searchImage(jid, message, query) {
   if (!query || !query.trim()) {
     await sendReply(jid, 'Utilisation : Ximg Naruto, paysage, animal...', message);
     return false;
-     }
+  }
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
@@ -1764,7 +1791,6 @@ async function searchImage(jid, message, query) {
   }
 }
 
-
 async function generateImage(jid, message, prompt) {
   if (!CONFIG.cloudflareToken || !CONFIG.cloudflareAccountId) {
     await sendReply(
@@ -1784,7 +1810,7 @@ async function generateImage(jid, message, prompt) {
     );
 
     return false;
- }
+  }
 
   await sendReply(
     jid,
@@ -1862,7 +1888,8 @@ async function multimediaNotIntegrated(jid, message, command) {
     message
   );
 }
-   // ------------------------------------------------------------
+
+// ------------------------------------------------------------
 // 24. ROUTEUR : ANALYSE DES COMMANDES
 // ------------------------------------------------------------
 
@@ -2530,10 +2557,7 @@ process.on('unhandledRejection', reason => {
 });
 
 process.on('uncaughtException', error => {
-  logger.error(
-    { error: error?.message || String(error) },
-    'Exception non gérée.'
-  );
+  logger.error({ error: error?.message || String(error) }, 'Exception non gérée.');
 });
 
 // ------------------------------------------------------------

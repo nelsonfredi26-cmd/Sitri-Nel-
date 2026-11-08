@@ -2530,7 +2530,10 @@ process.on('unhandledRejection', reason => {
 });
 
 process.on('uncaughtException', error => {
-  logger.error({ error: error?.message || String(error) }, 'Exception non gérée.');
+  logger.error(
+    { error: error?.message || String(error) },
+    'Exception non gérée.'
+  );
 });
 
 // ------------------------------------------------------------
@@ -2545,4 +2548,3 @@ startBot().catch(error => {
 
   scheduleReconnect();
 });
-     

@@ -2094,7 +2094,7 @@ async function handleAICommand(jid, message, command, args) {
       429: 'Limite Radox atteinte. Réessaie dans un instant.',
       400: 'Radox a refusé la requête (modèle ou message non valide).',
       404: 'Le modèle Radox demandé est introuvable.'
-
+      };
     await sendReply(
       jid,
       moduleMessage(

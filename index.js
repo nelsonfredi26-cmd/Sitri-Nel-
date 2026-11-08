@@ -2824,7 +2824,7 @@ currentSocket.ev.on('connection.update', async update => {
 
         if (statusCode === DisconnectReason.loggedOut) {
   logger.error(
-    'Session invalide. Préparation d'une nouvelle association.'
+    "Session invalide. Préparation d'une nouvelle association."
   );
 
   try {

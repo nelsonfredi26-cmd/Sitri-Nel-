@@ -2031,9 +2031,6 @@ async function handleQuizCommand(jid, message, sender, command, args) {
     return true;
   }
 
-  return false;
-}
-
 async function handleAICommand(jid, message, command, args) {
   if (!['chat', 'ai', 'ask', 'anime', 'police'].includes(command)) {
     return false;

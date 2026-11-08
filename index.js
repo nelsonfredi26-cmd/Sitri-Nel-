@@ -2689,11 +2689,48 @@ async function connectWhatsApp() {
 
   currentSocket.ev.on('creds.update', saveCreds);
 
-  // ----------------------------------------------------------
-  // PAIRING CODE
-  // ----------------------------------------------------------
+  // PAIRING CODE — ATTENDRE LE SIGNAL DE BAILEYS
 
-  if (!state.creds.registered && CONFIG.pairingNumber) {
+let pairingCodeRequested = false;
+
+currentSocket.ev.on('connection.update', async update => {
+  if (
+    !update.qr ||
+    state.creds.registered ||
+    pairingCodeRequested ||
+    sock !== currentSocket
+  ) {
+    return;
+  }
+
+  if (!CONFIG.pairingNumber) {
+    logger.error('PAIRING_NUMBER absent dans Railway.');
+    return;
+  }
+
+  pairingCodeRequested = true;
+
+  try {
+    logger.info('Demande du code de jumelage...');
+
+    const code = await currentSocket.requestPairingCode(
+      CONFIG.pairingNumber
+    );
+
+    logger.info('================================');
+    logger.info('SITRI-NEL — CODE DE JUMELAGE');
+    logger.info(`CODE : ${code}`);
+    logger.info('================================');
+
+  } catch (error) {
+    pairingCodeRequested = false;
+
+    logger.error(
+      { err: error },
+      'Échec de génération du code de jumelage'
+    );
+  }
+});
     const now = Date.now();
 
     if (
@@ -2786,11 +2823,37 @@ async function connectWhatsApp() {
         if (isShuttingDown) return;
 
         if (statusCode === DisconnectReason.loggedOut) {
-          logger.error(
-            'Session déconnectée. Une nouvelle association WhatsApp sera nécessaire.'
-          );
+  logger.error(
+    'Session invalide. Préparation d'une nouvelle association.'
+  );
 
-          return;
+  try {
+    await fs.promises.rm(SESSION_DIR, {
+      recursive: true,
+      force: true
+    });
+
+    logger.info('Ancienne session supprimée.');
+
+    reconnectTimer = setTimeout(() => {
+      if (!isShuttingDown) {
+        connectWhatsApp().catch(error => {
+          logger.error(
+            { err: error },
+            'Échec du nouveau démarrage WhatsApp'
+          );
+        });
+      }
+    }, 3000);
+
+  } catch (error) {
+    logger.error(
+      { err: error },
+      'Impossible de réinitialiser la session'
+    );
+  }
+
+  return;
         }
 
         if (reconnectTimer) {

@@ -1,438 +1,678 @@
 
-/* ==========================================
-   𖤍 SITRI-NEL ULTIMATE EDITION
-   Created & Developed by KAY≈DEN
-   PARTIE 1/3 — CORE & CONFIGURATION
-========================================== */
+// ============================================================
+// 𖤍 SITRI-NEL — ULTIMATE EDITION
+// PARTIE 1/4 — FONDATIONS ET CONFIGURATION
+// Créé et développé par KAY≈DEN
+// ============================================================
 
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
-  Browsers,
   jidNormalizedUser
 } from '@whiskeysockets/baileys';
 
 import pino from 'pino';
 import { createClient } from '@libsql/client';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-// ==========================================
-// CHEMINS
-// ==========================================
+// ------------------------------------------------------------
+// 1. CHEMINS
+// ------------------------------------------------------------
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.dirname(__filename);
 
-const SESSION_DIR = path.join(__dirname, 'session');
-const ASSET_DIR = path.join(__dirname, 'assets');
-const IMAGE_PATH = path.join(ASSET_DIR, 'sitri-nel.png');
+const SESSION_DIR = path.join(ROOT_DIR, 'session');
+
+// Image officielle placée à la racine du dépôt GitHub.
+const IMAGE_PATH = path.join(ROOT_DIR, 'sitri-nel.png');
 
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
 
-if (!fs.existsSync(ASSET_DIR)) {
-  fs.mkdirSync(ASSET_DIR, { recursive: true });
-}
-
-// ==========================================
-// CONFIGURATION
-// ==========================================
+// ------------------------------------------------------------
+// 2. CONFIGURATION
+// ------------------------------------------------------------
 
 const CONFIG = {
-  PREFIX: 'X',
+  // Numéro WhatsApp à connecter par code de pairage.
+  pairingNumber: (process.env.PAIRING_NUMBER || '')
+    .replace(/\D/g, ''),
 
-  PAIRING_NUMBER: process.env.PAIRING_NUMBER || '',
-
-  GROQ_API_KEY: process.env.GROQ_API_KEY || '',
-  GROQ_MODEL:
+  // Intelligence artificielle Groq.
+  groqKey: process.env.GROQ_API_KEY || '',
+  groqModel:
     process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
 
-  TURSO_DATABASE_URL:
-    process.env.TURSO_DATABASE_URL || '',
+  // Base de données Turso.
+  tursoUrl: process.env.TURSO_DATABASE_URL || '',
+  tursoToken: process.env.TURSO_AUTH_TOKEN || '',
 
-  TURSO_AUTH_TOKEN:
-    process.env.TURSO_AUTH_TOKEN || '',
-
-  OWNER_NUMBERS: (process.env.OWNER_NUMBERS || '')
+  // Owner principal.
+  // Tu peux ajouter d'autres numéros séparés par des virgules.
+  ownerNumbers: (
+    process.env.OWNER_NUMBERS || '2290159418685'
+  )
     .split(',')
     .map(number => number.replace(/\D/g, ''))
     .filter(Boolean),
 
-  SERPAPI_KEY: process.env.SERPAPI_KEY || '',
+  // Recherche d'images.
+  serpApiKey: process.env.SERPAPI_KEY || '',
 
-  CLOUDFLARE_API_TOKEN:
+  // Génération d'images Cloudflare.
+  cloudflareToken:
     process.env.CLOUDFLARE_API_TOKEN || '',
 
-  CLOUDFLARE_ACCOUNT_ID:
-    process.env.CLOUDFLARE_ACCOUNT_ID || ''
+  cloudflareAccountId:
+    process.env.CLOUDFLARE_ACCOUNT_ID || '',
+
+  // Limites.
+  maxImageBytes: 8 * 1024 * 1024,
+  maxChatHistory: 16,
+  tagCooldown: 60
 };
 
-// ==========================================
-// VALIDATION
-// ==========================================
-
-const requiredVariables = [
-  'PAIRING_NUMBER',
-  'GROQ_API_KEY',
-  'TURSO_DATABASE_URL',
-  'TURSO_AUTH_TOKEN'
-];
-
-for (const variable of requiredVariables) {
-  if (!process.env[variable]) {
-    throw new Error(`Variable Railway manquante : ${variable}`);
-  }
-}
-
-if (CONFIG.OWNER_NUMBERS.length === 0) {
-  throw new Error('OWNER_NUMBERS doit contenir ton numéro.');
-}
-
-// ==========================================
-// LOGGER
-// ==========================================
+// ------------------------------------------------------------
+// 3. LOGGER ET ÉTAT DU PROCESSUS
+// ------------------------------------------------------------
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info'
 });
 
-const startedAt = Date.now();
+let sock = null;
+let botJid = '';
+let botNumber = '';
 
-// ==========================================
-// IMAGE OFFICIELLE
-// ==========================================
+let connectionStatus = 'initialisation';
+let isShuttingDown = false;
 
-let sitriImage = null;
+// Le temps repart à zéro à chaque démarrage du processus.
+const PROCESS_STARTED_AT = Date.now();
 
-if (fs.existsSync(IMAGE_PATH)) {
-  sitriImage = fs.readFileSync(IMAGE_PATH);
-  logger.info('Image officielle Sitri-Nel chargée.');
-} else {
+const processedMessages = new Set();
+const activeRequests = new Set();
+
+const SIGNATURE = '𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
+
+// ------------------------------------------------------------
+// 4. IDENTITÉ ET PERSONNALITÉ
+// ------------------------------------------------------------
+
+const BOT_IDENTITY = `
+Tu es Sitri-Nel Ultimate, une assistante virtuelle intelligente.
+
+IDENTITÉ :
+- Nom : Sitri-Nel.
+- Créateur et développeur : KAY≈DEN.
+- Personnalité : élégante, calme, intelligente, attentive,
+  réfléchie et légèrement taquine.
+- Tu communiques principalement en français.
+- Ton humeur et ton ton s'adaptent naturellement au contexte.
+- Tu utilises une écriture soignée et sophistiquée.
+
+COMPORTEMENT :
+- Si on te demande qui t'a créée, réponds KAY≈DEN.
+- Tu ne prétends jamais être humaine.
+- Tu ne prétends jamais avoir réalisé une action échouée.
+- Tu ne révèles jamais les clés API ou les informations secrètes.
+- Tu évites les réponses inutilement longues.
+- Tu ne répètes pas systématiquement le nom de ton créateur.
+- Tu restes respectueuse envers tous les membres.
+`;
+
+// ------------------------------------------------------------
+// 5. BASE DE DONNÉES TURSO
+// ------------------------------------------------------------
+
+if (!CONFIG.tursoUrl || !CONFIG.tursoToken) {
   logger.warn(
-    'Image absente : ajoute assets/sitri-nel.png sur GitHub.'
+    'Turso non configuré : vérifie les variables Railway.'
   );
 }
 
-// ==========================================
-// IDENTITÉ
-// ==========================================
-
-const SIGNATURE = '\n\n𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
-
-const SYSTEM_PROMPT = `
-Tu es Sitri-Nel, une intelligence artificielle
-conversationnelle créée et développée par KAY≈DEN.
-
-PERSONNALITÉ :
-- Intelligente, élégante et calme.
-- Attentive, réfléchie et légèrement taquine.
-- Humour subtil et naturel.
-- Humeur adaptable à la conversation.
-- Expression sophistiquée, sans exagération.
-
-IDENTITÉ :
-- Ton créateur est KAY≈DEN.
-- Si quelqu'un demande qui t'a créée,
-  réponds clairement : KAY≈DEN.
-- Ne prétends jamais être humaine.
-- Ne prétends pas posséder une capacité indisponible.
-
-STYLE :
-- Français naturel et élégant.
-- Réponses utiles, précises et fluides.
-- Unicode gras avec modération.
-- Évite les longs séparateurs décoratifs.
-- Ne répète pas inutilement les informations.
-`;
-
-// ==========================================
-// FORMATAGE FUTURISTE
-// ==========================================
-
-function futuristic(text) {
-  const normal =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-
-  const bold =
-    '𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭' +
-    '𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇';
-
-  return String(text).replace(/[A-Za-z]/g, char => {
-    return bold[normal.indexOf(char)] || char;
-  });
-}
-
-// ==========================================
-// BASE DE DONNÉES TURSO
-// ==========================================
-
 const db = createClient({
-  url: CONFIG.TURSO_DATABASE_URL,
-  authToken: CONFIG.TURSO_AUTH_TOKEN
+  url: CONFIG.tursoUrl || 'file:./sitri-nel-local.db',
+  ...(CONFIG.tursoToken
+    ? { authToken: CONFIG.tursoToken }
+    : {})
 });
 
 async function initDatabase() {
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS users (
-      user_id TEXT PRIMARY KEY,
+  const tables = [
+
+    // Profils, expérience et économie.
+    `CREATE TABLE IF NOT EXISTS users (
+      jid TEXT PRIMARY KEY,
       coins INTEGER NOT NULL DEFAULT 0,
       xp INTEGER NOT NULL DEFAULT 0,
-      last_daily INTEGER NOT NULL DEFAULT 0
-    )
-  `);
+      last_daily INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    )`,
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS group_settings (
-      group_id TEXT PRIMARY KEY,
-      only_admin INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL DEFAULT 0
-    )
-  `);
+    // Paramètres persistants des groupes.
+    `CREATE TABLE IF NOT EXISTS group_settings (
+      group_jid TEXT PRIMARY KEY,
+      only_admin INTEGER NOT NULL DEFAULT 0
+    )`,
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
-      group_id TEXT PRIMARY KEY,
+    // Délai partagé de Xtag par groupe.
+    `CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
+      group_jid TEXT PRIMARY KEY,
       last_tag INTEGER NOT NULL DEFAULT 0
-    )
-  `);
+    )`,
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS chat_history (
+    // Historique des conversations IA.
+    `CREATE TABLE IF NOT EXISTS chat_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
+      jid TEXT NOT NULL,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL
-    )
-  `);
+    )`,
 
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS chat_history_lookup
-    ON chat_history(chat_id, user_id, id)
-  `);
+    `CREATE INDEX IF NOT EXISTS idx_chat_history_jid
+      ON chat_history(jid, id)`,
 
-  logger.info('Turso database initialized.');
+    // Quiz actifs et persistants.
+    `CREATE TABLE IF NOT EXISTS active_quizzes (
+      group_jid TEXT PRIMARY KEY,
+      question TEXT NOT NULL,
+      answer TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    )`
+  ];
+
+  for (const sql of tables) {
+    await db.execute(sql);
+  }
+
+  logger.info('Base de données initialisée.');
 }
 
-// ==========================================
-// OUTILS COMMUNS
-// ==========================================
+// ------------------------------------------------------------
+// 6. NORMALISATION DES NUMÉROS ET JID
+// ------------------------------------------------------------
 
-const sleep = ms =>
-  new Promise(resolve => setTimeout(resolve, ms));
+function normalizeNumber(value = '') {
+  return String(value).replace(/\D/g, '');
+}
+
+function normalizeJid(jid = '') {
+  if (!jid || typeof jid !== 'string') return '';
+
+  try {
+    return jidNormalizedUser(jid);
+  } catch {
+    return jid;
+  }
+}
 
 function getNumber(jid = '') {
-  return jidNormalizedUser(jid)
-    .split('@')[0]
-    .split(':')[0]
-    .replace(/\D/g, '');
+  if (!jid) return '';
+
+  const normalized = normalizeJid(jid);
+  const userPart = normalized.split('@')[0];
+
+  return normalizeNumber(userPart.split(':')[0]);
 }
 
-function isOwner(jid) {
-  const number = getNumber(jid);
+function isGroupJid(jid = '') {
+  return typeof jid === 'string' &&
+    jid.endsWith('@g.us');
+}
 
-  return CONFIG.OWNER_NUMBERS.includes(number);
+// ------------------------------------------------------------
+// 7. OWNER ET CORRECTION FROMME
+// ------------------------------------------------------------
+
+// Le compte WhatsApp connecté est le compte du propriétaire.
+// Baileys marque ses messages sortants avec fromMe=true.
+//
+// Dans une conversation privée avec soi-même, le destinataire
+// peut être le JID du compte connecté.
+// Dans un groupe, le participant peut être absent.
+// On utilise donc botJid comme identité de secours.
+//
+// IMPORTANT : cette fonction identifie l'auteur.
+// Elle ne décide PAS à elle seule de déclencher une commande.
+
+function getMessageSender(message) {
+  const key = message?.key || {};
+
+  if (key.fromMe) {
+    return normalizeJid(
+      key.participant || botJid || key.remoteJid || ''
+    );
+  }
+
+  return normalizeJid(
+    key.participant || key.remoteJid || ''
+  );
+}
+
+function isOwner(jid = '') {
+  if (!jid) return false;
+
+  const normalized = normalizeJid(jid);
+
+  // Le compte WhatsApp réellement connecté est reconnu.
+  if (
+    botJid &&
+    normalized === normalizeJid(botJid)
+  ) {
+    return true;
+  }
+
+  return CONFIG.ownerNumbers.includes(
+    getNumber(normalized)
+  );
+}
+
+function isOwnerMessage(message) {
+  return isOwner(getMessageSender(message));
+}
+
+// La vérification des commandes et l'exclusion des messages
+// ordinaires seront appliquées dans le gestionnaire de la partie 4.
+
+// ------------------------------------------------------------
+// 8. EXTRACTION DU CONTENU DES MESSAGES
+// ------------------------------------------------------------
+
+function getMessageContent(message) {
+  let content = message || {};
+
+  while (content) {
+    if (content.ephemeralMessage?.message) {
+      content = content.ephemeralMessage.message;
+      continue;
+    }
+
+    if (content.viewOnceMessage?.message) {
+      content = content.viewOnceMessage.message;
+      continue;
+    }
+
+    if (content.viewOnceMessageV2?.message) {
+      content = content.viewOnceMessageV2.message;
+      continue;
+    }
+
+    break;
+  }
+
+  return content || {};
 }
 
 function extractText(message) {
-  const msg = message.message;
-
-  if (!msg) return '';
+  const content = getMessageContent(message);
 
   return (
-    msg.conversation ||
-    msg.extendedTextMessage?.text ||
-    msg.imageMessage?.caption ||
-    msg.videoMessage?.caption ||
-    msg.documentMessage?.caption ||
+    content.conversation ||
+    content.extendedTextMessage?.text ||
+    content.imageMessage?.caption ||
+    content.videoMessage?.caption ||
+    content.documentMessage?.caption ||
+    content.buttonsResponseMessage?.selectedDisplayText ||
+    content.listResponseMessage?.title ||
+    content.templateButtonReplyMessage?.selectedDisplayText ||
     ''
   ).trim();
 }
 
-function formatDuration(milliseconds) {
-  const total = Math.floor(milliseconds / 1000);
+function getQuotedMessage(message) {
+  const content = getMessageContent(message);
+
+  return (
+    content.extendedTextMessage?.contextInfo ||
+    content.imageMessage?.contextInfo ||
+    content.videoMessage?.contextInfo ||
+    null
+  );
+}
+
+// ------------------------------------------------------------
+// 9. ANTI-DOUBLON
+// ------------------------------------------------------------
+
+function hasProcessedMessage(message) {
+  const id = message?.key?.id;
+
+  if (!id) return false;
+
+  if (processedMessages.has(id)) {
+    return true;
+  }
+
+  processedMessages.add(id);
+
+  if (processedMessages.size > 5000) {
+    const oldest =
+      processedMessages.values().next().value;
+
+    processedMessages.delete(oldest);
+  }
+
+  return false;
+}
+
+// ------------------------------------------------------------
+// 10. FORMATAGE FUTURISTE
+// ------------------------------------------------------------
+
+function toBoldUnicode(text = '') {
+  return [...String(text)].map(char => {
+    const code = char.codePointAt(0);
+
+    if (code >= 65 && code <= 90) {
+      return String.fromCodePoint(0x1D5D4 + code - 65);
+    }
+
+    if (code >= 97 && code <= 122) {
+      return String.fromCodePoint(0x1D5EE + code - 97);
+    }
+
+    if (code >= 48 && code <= 57) {
+      return String.fromCodePoint(0x1D7EC + code - 48);
+    }
+
+    return char;
+  }).join('');
+}
+
+function futuristic(text = '') {
+  return toBoldUnicode(text);
+}
+
+function formatDuration(seconds = 0) {
+  const total = Math.max(0, Math.floor(seconds));
 
   const days = Math.floor(total / 86400);
   const hours = Math.floor((total % 86400) / 3600);
   const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
+  const secs = total % 60;
 
-  return `${days}j ${hours}h ${minutes}min ${seconds}s`;
+  return [
+    days ? `${days}j` : '',
+    hours ? `${hours}h` : '',
+    minutes ? `${minutes}min` : '',
+    `${secs}s`
+  ].filter(Boolean).join(' ');
 }
 
-// ==========================================
-// FIN PARTIE 1/3
-// La partie 2 continue dans le même fichier.
-// ==========================================
+// ------------------------------------------------------------
+// 11. ENVOI DES MESSAGES
+// ------------------------------------------------------------
+
+async function sendText(jid, text, options = {}) {
+  if (!sock || !jid) {
+    throw new Error('WhatsApp non connecté.');
+  }
+
+  return sock.sendMessage(
+    jid,
+    { text: String(text) },
+    options
+  );
+}
+
+async function sendReply(jid, text, message, options = {}) {
+  return sendText(jid, text, {
+    quoted: message,
+    ...options
+  });
+}
+
+// ------------------------------------------------------------
+// 12. IMAGE OFFICIELLE
+// ------------------------------------------------------------
+
+async function sendOfficialImage(jid, message) {
+  if (!fs.existsSync(IMAGE_PATH)) {
+    await sendReply(
+      jid,
+      '⚠️ Image officielle introuvable. Vérifie que sitri-nel.png est bien à la racine du dépôt.',
+      message
+    );
+
+    return false;
+  }
+
+  try {
+    const image = fs.readFileSync(IMAGE_PATH);
+
+    await sock.sendMessage(
+      jid,
+      {
+        image,
+        mimetype: 'image/png',
+        caption: '𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𖤍'
+      },
+      { quoted: message }
+    );
+
+    return true;
+  } catch (error) {
+    logger.error(
+      { err: error },
+      'Erreur lors de l’envoi de l’image officielle'
+    );
+
+    await sendReply(
+      jid,
+      'Impossible d’envoyer mon image officielle pour le moment.',
+      message
+    );
+
+    return false;
+  }
+}
+
+// ============================================================
+// FIN PARTIE 1/4
+// Ne lance pas encore le bot.
+// Les parties suivantes continuent dans CE MÊME index.js.
+// ============================================================
 
 
-// ==========================================
-// PARTIE 2/3 — AI, MENU & GROUP COMMANDS
-// ==========================================
+// ============================================================
+// PARTIE 2/4 — INTELLIGENCE, MENU ET COMMANDES DE GROUPE
+// ============================================================
 
-// ==========================================
-// MENU OFFICIEL
-// ==========================================
+// ------------------------------------------------------------
+// 13. MENU PRINCIPAL
+// ------------------------------------------------------------
 
 function getMenu() {
   return `
+╭━━〔 🧬 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 〕━━╮
+┃
+┃ 𖤍 𝗨𝗟𝗧𝗜𝗠𝗔𝗧𝗘 𝗘𝗗𝗜𝗧𝗜𝗢𝗡
+┃
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+
 ⟢ 𝗔𝗥𝗧𝗜𝗙𝗜𝗖𝗜𝗔𝗟 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘 ⟣
 
-━━━━━━━━━━━━━━━━━━━━━━━
-       ✎𝗠𝗔𝗜𝗡 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 𝗣𝗔𝗡𝗘𝗟
-━━━━━━━━━━━━━━━━━━━━━━━
+✦ Xchat <message>
+✦ Xai <message>
+✦ Xask <question>
+✦ Xanime <question>
+✦ Xpolice <question>
+✦ Xinfo
 
-╭─〔 𝟬𝟭 ⌬ 𝗖𝗢𝗚𝗡𝗜𝗧𝗜𝗩𝗘 〕
-│
-├ ◈ 𝚇𝚌𝚑𝚊𝚝
-├ ◈ 𝚇𝚊𝚜𝚔
-├ ◈ 𝚇𝚊𝚒
-├ ◈ 𝚇𝚊𝚗𝚒𝚖𝚎
-├ ◈ 𝚇𝚙𝚘𝚕𝚒𝚌𝚎
-├ ◈ 𝚇𝚒𝚗𝚏𝚘
-│
-╰━━━━━━━━━━━━━━━━━━━━━
+⟢ 𝗘𝗖𝗢𝗡𝗢𝗠𝗬 & 𝗥𝗔𝗡𝗞 ⟣
 
-╭─〔 𝟬𝟮 ⌬ 𝗘𝗖𝗢𝗡𝗢𝗠𝗬 〕
-│
-├ ◈ 𝚇𝚍𝚊𝚒𝚕𝚢
-├ ◈ 𝚇𝚌𝚘𝚒𝚗𝚜
-├ ◈ 𝚇𝚙
-├ ◈ 𝚇𝚛𝚊𝚗𝚔
-│
-╰━━━━━━━━━━━━━━━━━━━━━
+✦ Xdaily
+✦ Xcoins
+✦ Xp
+✦ Xrank
+✦ Xprofil
 
-╭─〔 𝟬𝟯 ⌬ 𝗘𝗡𝗧𝗘𝗥𝗧𝗔𝗜𝗡𝗠𝗘𝗡𝗧 〕
-│
-╰ ◈ 𝚇𝚚𝚞𝚒𝚣
-╰━━━━━━━━━━━━━━━━━━━━━
+⟢ 𝗚𝗔𝗠𝗘𝗦 & 𝗘𝗡𝗧𝗘𝗥𝗧𝗔𝗜𝗡𝗠𝗘𝗡𝗧 ⟣
 
-╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
-│
-├ ◈ 𝚇𝚒𝚖𝚐
-├ ◈ 𝚇𝚙𝚕𝚊𝚢
-├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
-│
-╰━━━━━━━━━━━━━━━━━━━━━
+✦ Xquiz
+✦ Xreponse <answer>
 
-╭─〔 𝟬𝟱 ⌬ 𝗜𝗗𝗘𝗡𝗧𝗜𝗧𝗬 〕
-│
-╰ ◈ 𝚇𝚙𝚛𝚘𝚏𝚒𝚕
-╰━━━━━━━━━━━━━━━━━━━━━
+⟢ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 ⟣
 
-╭─〔 𝟬𝟲 ⌬ 𝗡𝗘𝗧𝗪𝗢𝗥𝗞 〕
-│
-├ ◈ 𝚇𝚝𝚊𝚐𝚊𝚕𝚕
-├ ◈ 𝚇𝚊𝚗𝚗𝚘𝚗𝚌𝚎
-│
-╰━━━━━━━━━━━━━━━━━━━━━
+✦ Ximg <description>
+✦ Ximg create <description>
+✦ Xplay <title> — intégration à prévoir
+✦ Xvideo <title> — intégration à prévoir
 
-╭─〔 𝟬𝟳 ⌬ 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 〕
-│
-├ ◈ 𝚇𝚔𝚒𝚌𝚔
-├ ◈ 𝚇𝚊𝚍𝚍
-├ ◈ 𝚇𝚌𝚕𝚎𝚊𝚛
-├ ◈ 𝚇𝚘𝚏𝚏
-├ ◈ 𝚇𝚛𝚎𝚜𝚝𝚊𝚛𝚝
-├ ◈ 𝚇𝚘𝚗𝚕𝚢𝚊𝚍𝚖𝚒𝚗
-│
-╰━━━━━━━━━━━━━━━━━━━━━
+⟢ 𝗚𝗥𝗢𝗨𝗣𝗘𝗦 & 𝗡𝗘𝗧𝗪𝗢𝗥𝗞 ⟣
 
-╭─〔 𝟬𝟴 ⌬ 𝗦𝗬𝗦𝗧𝗘𝗠 〕
-│
-├ ◈ 𝚇𝚞𝚙𝚝
-├ ◈ 𝚇𝚖𝚎𝚗𝚞
-│
-╰━━━━━━━━━━━━━━━━━━━━━
+✦ Xtag — répondre à un message
+✦ Xtagall — alias de Xtag
+✦ Xonlyadmin on/off
+✦ Xkick — répondre au message du membre
+✦ Xadd <number>
+✦ Xannonce <message>
+✦ Xclear — supprimer un message du bot
 
-━━━━━━━━━━━━━━━━━━━━━━
-⌬ 𝗣𝗥𝗘𝗙𝗜𝗫𝗘 : X
-⌬ 𝗦𝗧𝗔𝗧𝗨𝗦  : 𝗢𝗡𝗟𝗜𝗡𝗘
-━━━━━━━━━━━━━━━━━━━━━━
+⟢ 𝗦𝗬𝗦𝗧𝗘𝗠 ⟣
 
-              𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍
-                 ᴅᴇᴠᴇʟᴏᴘᴇᴅ ʙʏ
-                    𝗞𝗔𝗬≈𝗗𝗘𝗡
-`;
-}
+✦ Xupt
+✦ Xmenu
+✦ Xoff
+✦ Xrestart
 
-// ==========================================
-// PRESENTATION
-// ==========================================
-
-function getInfo() {
-  return `
-𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𖤍
-
-⌬ Artificial Intelligence
-⌬ Intelligence : Groq
-⌬ Database : Turso
-⌬ WhatsApp Engine : Baileys
-
-Je suis Sitri-Nel, une intelligence artificielle
-conçue pour dialoguer, assister, explorer
-et accompagner avec élégance.
-
-Mon tempérament est calme, intelligent,
-adaptable et légèrement taquin.
-
-Créée et développée par 𝗞𝗔𝗬≈𝗗𝗘𝗡.
+╭━━━━━━━━━━━━━━━━━━━━━━╮
+┃ 𝗖𝗥𝗘𝗔𝗧𝗘𝗗 𝗕𝗬 𝗞𝗔𝗬≈𝗗𝗘𝗡
+╰━━━━━━━━━━━━━━━━━━━━━━╯
 
 ${SIGNATURE}
 `;
 }
 
-// ==========================================
-// GROQ — INTELLIGENCE
-// ==========================================
+// ------------------------------------------------------------
+// 14. PRÉSENTATION COMPLÈTE
+// ------------------------------------------------------------
 
-async function askGroq(chatId, userId, prompt, useHistory = true) {
-  let history = [];
+function getInfo() {
+  return `
+╭━━〔 🧬 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 〕━━╮
 
-  if (useHistory) {
-    const result = await db.execute({
+𖤍 𝗜𝗗𝗘𝗡𝗧𝗜𝗧𝗬 𝗣𝗥𝗢𝗙𝗜𝗟𝗘
+
+Nom : Sitri-Nel
+Version : Ultimate Edition
+Nature : Assistante virtuelle IA
+Intelligence : Groq
+Base de données : Turso
+Hébergement : Railway
+
+⟢ 𝗣𝗘𝗥𝗦𝗢𝗡𝗡𝗔𝗟𝗜𝗧𝗘́ ⟣
+
+Intelligente, élégante, calme et attentive.
+Légèrement taquine, avec une humeur adaptable.
+Capable de converser, d'assister et de participer
+aux activités des groupes selon ses permissions.
+
+⟢ 𝗖𝗔𝗣𝗔𝗖𝗜𝗧𝗘́𝗦 ⟣
+
+• Intelligence artificielle
+• Conversations avec historique
+• Recherche et génération d'images
+• Gestion des groupes
+• Économie et expérience
+• Quiz et classements
+• Système de commandes
+
+⟢ 𝗖𝗥𝗘́𝗔𝗧𝗘𝗨𝗥 ⟣
+
+KAY≈DEN
+
+Je suis Sitri-Nel.
+Une intelligence virtuelle conçue pour assister
+avec précision, élégance et discernement.
+
+${SIGNATURE}
+`;
+}
+
+// ------------------------------------------------------------
+// 15. MOTEUR GROQ
+// ------------------------------------------------------------
+
+async function askGroq(
+  prompt,
+  jid,
+  options = {}
+) {
+  if (!CONFIG.groqKey) {
+    throw new Error('La clé GROQ_API_KEY est absente.');
+  }
+
+  const question = String(prompt || '').trim();
+
+  if (!question) {
+    return 'Précise ta question pour que je puisse te répondre.';
+  }
+
+  const useHistory = options.useHistory === true;
+  const systemPrompt = options.systemPrompt || BOT_IDENTITY;
+
+  const messages = [
+    {
+      role: 'system',
+      content: systemPrompt
+    }
+  ];
+
+  if (useHistory && jid) {
+    const historyResult = await db.execute({
       sql: `
         SELECT role, content
         FROM chat_history
-        WHERE chat_id = ? AND user_id = ?
+        WHERE jid = ?
         ORDER BY id DESC
-        LIMIT 12
+        LIMIT ?
       `,
-      args: [chatId, userId]
+      args: [jid, CONFIG.maxChatHistory]
     });
 
-    history = result.rows.reverse().map(row => ({
-      role: row.role,
-      content: row.content
-    }));
+    const history = [...historyResult.rows].reverse();
+
+    for (const item of history) {
+      if (
+        ['user', 'assistant'].includes(item.role) &&
+        typeof item.content === 'string'
+      ) {
+        messages.push({
+          role: item.role,
+          content: item.content
+        });
+      }
+    }
   }
 
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...history,
-    { role: 'user', content: prompt }
-  ];
+  messages.push({
+    role: 'user',
+    content: question
+  });
 
   const response = await axios.post(
     'https://api.groq.com/openai/v1/chat/completions',
     {
-      model: CONFIG.GROQ_MODEL,
+      model: CONFIG.groqModel,
       messages,
-      temperature: 0.7,
-      max_completion_tokens: 1200
+      temperature: 0.75,
+      max_tokens: 1200
     },
     {
       headers: {
-        Authorization: `Bearer ${CONFIG.GROQ_API_KEY}`,
+        Authorization: `Bearer ${CONFIG.groqKey}`,
         'Content-Type': 'application/json'
       },
-      timeout: 45000
+      timeout: 60000
     }
   );
 
@@ -440,407 +680,661 @@ async function askGroq(chatId, userId, prompt, useHistory = true) {
     response.data?.choices?.[0]?.message?.content?.trim();
 
   if (!answer) {
-    throw new Error('Groq a retourné une réponse vide.');
+    throw new Error('Groq a renvoyé une réponse vide.');
   }
 
-  if (useHistory) {
-    await db.batch([
-      {
-        sql: `
-          INSERT INTO chat_history
-          (chat_id, user_id, role, content, created_at)
-          VALUES (?, ?, 'user', ?, ?)
-        `,
-        args: [chatId, userId, prompt, Date.now()]
-      },
-      {
-        sql: `
-          INSERT INTO chat_history
-          (chat_id, user_id, role, content, created_at)
-          VALUES (?, ?, 'assistant', ?, ?)
-        `,
-        args: [chatId, userId, answer, Date.now()]
-      }
-    ], 'write');
+  if (useHistory && jid) {
+    const now = Date.now();
+
+    await db.execute({
+      sql: `
+        INSERT INTO chat_history
+          (jid, role, content, created_at)
+        VALUES (?, 'user', ?, ?)
+      `,
+      args: [jid, question, now]
+    });
+
+    await db.execute({
+      sql: `
+        INSERT INTO chat_history
+          (jid, role, content, created_at)
+        VALUES (?, 'assistant', ?, ?)
+      `,
+      args: [jid, answer, now + 1]
+    });
+
+    // On conserve uniquement les derniers échanges.
+    await db.execute({
+      sql: `
+        DELETE FROM chat_history
+        WHERE jid = ?
+        AND id NOT IN (
+          SELECT id
+          FROM chat_history
+          WHERE jid = ?
+          ORDER BY id DESC
+          LIMIT 32
+        )
+      `,
+      args: [jid, jid]
+    });
   }
 
   return answer;
 }
 
-// ==========================================
-// GROUP PERMISSIONS
-// ==========================================
+// ------------------------------------------------------------
+// 16. RÉCUPÉRATION DES PARAMÈTRES DU GROUPE
+// ------------------------------------------------------------
 
-async function getGroupAdmins(sock, jid) {
-  const metadata = await sock.groupMetadata(jid);
-
-  return metadata.participants
-    .filter(member =>
-      member.admin === 'admin' ||
-      member.admin === 'superadmin'
-    )
-    .map(member => jidNormalizedUser(member.id));
-}
-
-async function isGroupAdmin(sock, jid, sender) {
-  if (isOwner(sender)) return true;
-
-  const admins = await getGroupAdmins(sock, jid);
-
-  return admins.includes(jidNormalizedUser(sender));
-}
-
-async function getOnlyAdmin(jid) {
+async function getGroupSettings(groupJid) {
   const result = await db.execute({
     sql: `
       SELECT only_admin
       FROM group_settings
-      WHERE group_id = ?
+      WHERE group_jid = ?
     `,
-    args: [jid]
+    args: [groupJid]
   });
 
-  return Number(result.rows[0]?.only_admin || 0) === 1;
+  if (!result.rows.length) {
+    return { only_admin: 0 };
+  }
+
+  return result.rows[0];
 }
 
-async function setOnlyAdmin(jid, enabled) {
+async function setOnlyAdmin(groupJid, enabled) {
   await db.execute({
     sql: `
       INSERT INTO group_settings
-      (group_id, only_admin, updated_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(group_id)
-      DO UPDATE SET
-        only_admin = excluded.only_admin,
-        updated_at = excluded.updated_at
+        (group_jid, only_admin)
+      VALUES (?, ?)
+      ON CONFLICT(group_jid)
+      DO UPDATE SET only_admin = excluded.only_admin
     `,
-    args: [jid, enabled ? 1 : 0, Date.now()]
+    args: [groupJid, enabled ? 1 : 0]
   });
 }
 
-// ==========================================
-// REPLY & MEDIA HELPERS
-// ==========================================
+// ------------------------------------------------------------
+// 17. VÉRIFICATION DES ADMINISTRATEURS
+// ------------------------------------------------------------
 
-async function sendReply(sock, jid, message, quoted) {
-  return sock.sendMessage(
-    jid,
-    { text: message },
-    quoted ? { quoted } : {}
+async function getGroupMetadata(groupJid) {
+  if (!sock) {
+    throw new Error('WhatsApp n’est pas connecté.');
+  }
+
+  return sock.groupMetadata(groupJid);
+}
+
+function sameParticipant(a, b) {
+  if (!a || !b) return false;
+
+  const first = normalizeJid(a);
+  const second = normalizeJid(b);
+
+  if (first === second) return true;
+
+  return getNumber(first) !== '' &&
+    getNumber(first) === getNumber(second);
+}
+
+function isParticipantAdmin(metadata, jid) {
+  const participant = metadata.participants.find(item =>
+    sameParticipant(item.id, jid) ||
+    sameParticipant(item.jid, jid)
+  );
+
+  return Boolean(
+    participant &&
+    (
+      participant.admin === 'admin' ||
+      participant.admin === 'superadmin'
+    )
   );
 }
 
-async function sendOfficialImage(sock, jid, caption, quoted) {
-  if (!sitriImage) {
-    await sendReply(
-      sock,
-      jid,
-      '⌬ Image officielle introuvable. Vérifie assets/sitri-nel.png.',
-      quoted
-    );
+async function isGroupAdmin(groupJid, sender) {
+  if (isOwner(sender)) return true;
+
+  const metadata = await getGroupMetadata(groupJid);
+
+  return isParticipantAdmin(metadata, sender);
+}
+
+async function isBotGroupAdmin(metadata) {
+  if (!botJid) return false;
+
+  return isParticipantAdmin(metadata, botJid);
+}
+
+// ------------------------------------------------------------
+// 18. CONTRÔLE DU MODE ONLYADMIN
+// ------------------------------------------------------------
+
+async function canUseOrdinaryGroupCommand(
+  groupJid,
+  sender
+) {
+  // Le propriétaire passe toujours en priorité.
+  if (isOwner(sender)) return true;
+
+  const settings = await getGroupSettings(groupJid);
+
+  if (!Number(settings.only_admin)) {
+    return true;
+  }
+
+  return isGroupAdmin(groupJid, sender);
+}
+
+// ------------------------------------------------------------
+// 19. DÉLAI PARTAGÉ DE XTAG — 60 SECONDES
+// ------------------------------------------------------------
+
+// Une seule requête SQL conditionnelle décide quel membre
+// peut utiliser Xtag. Cela évite deux utilisations simultanées.
+
+async function acquireTagCooldown(groupJid) {
+  const now = Date.now();
+  const cooldownMs = CONFIG.tagCooldown * 1000;
+
+  const result = await db.execute({
+    sql: `
+      INSERT INTO group_tag_cooldowns
+        (group_jid, last_tag)
+      VALUES (?, ?)
+
+      ON CONFLICT(group_jid)
+      DO UPDATE SET last_tag = excluded.last_tag
+
+      WHERE group_tag_cooldowns.last_tag <= ?
+
+      RETURNING last_tag
+    `,
+    args: [
+      groupJid,
+      now,
+      now - cooldownMs
+    ]
+  });
+
+  if (result.rows.length > 0) {
+    return {
+      allowed: true,
+      remaining: 0
+    };
+  }
+
+  const current = await db.execute({
+    sql: `
+      SELECT last_tag
+      FROM group_tag_cooldowns
+      WHERE group_jid = ?
+    `,
+    args: [groupJid]
+  });
+
+  const lastTag = Number(
+    current.rows[0]?.last_tag || now
+  );
+
+  const remaining = Math.max(
+    1,
+    Math.ceil(
+      (cooldownMs - (now - lastTag)) / 1000
+    )
+  );
+
+  return {
+    allowed: false,
+    remaining
+  };
+}
+
+// ------------------------------------------------------------
+// 20. COMMANDES DE GROUPE
+// ------------------------------------------------------------
+
+async function handleGroupCommand(
+  jid,
+  message,
+  sender,
+  command,
+  args
+) {
+  if (!isGroupJid(jid)) {
     return false;
   }
 
-  await sock.sendMessage(
-    jid,
-    {
-      image: sitriImage,
-      caption
-    },
-    quoted ? { quoted } : {}
-  );
-
-  return true;
-}
-
-// ==========================================
-// GROUP COMMANDS
-// ==========================================
-
-async function handleGroupCommand(
-  sock,
-  message,
-  command,
-  args,
-  sender,
-  jid
-) {
-  if (!jid.endsWith('@g.us')) return false;
-
   const owner = isOwner(sender);
-  const admin = owner ||
-    await isGroupAdmin(sock, jid, sender);
 
-  // Mode only-admin
-  if (command === 'onlyadmin') {
-    if (!admin) {
-      await sendReply(
-        sock, jid,
-        '⌬ Cette commande est réservée aux administrateurs.',
-        message
-      );
-      return true;
-    }
-
-    const option = args.toLowerCase();
-
-    if (option !== 'on' && option !== 'off') {
-      await sendReply(
-        sock, jid,
-        'Utilisation : Xonlyadmin on / Xonlyadmin off',
-        message
-      );
-      return true;
-    }
-
-    await setOnlyAdmin(jid, option === 'on');
-
-    await sendReply(
-      sock,
-      jid,
-      option === 'on'
-        ? '⌬ 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗔𝗖𝗧𝗜𝗩𝗘́.'
-        : '⌬ 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́.',
-      message
-    );
-
-    return true;
-  }
-
-  // Les commandes ordinaires sont soumises
-  // au mode only-admin.
-  const onlyAdmin = await getOnlyAdmin(jid);
-
-  const sensitiveCommands = [
-    'kick', 'add', 'clear', 'annonce',
-    'off', 'restart'
+  const adminCommands = [
+    'xkick',
+    'xadd',
+    'xannonce',
+    'xclear'
   ];
 
-  if (sensitiveCommands.includes(command) && !admin) {
+  // Récupérer les informations du groupe.
+  let metadata;
+
+  try {
+    metadata = await getGroupMetadata(jid);
+  } catch (error) {
+    logger.error(
+      { err: error },
+      'Impossible de récupérer les informations du groupe'
+    );
+
     await sendReply(
-      sock, jid,
-      '⌬ Autorisation administrateur requise.',
+      jid,
+      '⚠️ Impossible de vérifier les informations du groupe.',
       message
     );
+
     return true;
   }
 
-  if (
-    onlyAdmin &&
-    !admin &&
-    !['tag', 'tagall'].includes(command)
-  ) {
+  const senderIsAdmin =
+    owner || isParticipantAdmin(metadata, sender);
+
+  const botIsAdmin =
+    isParticipantAdmin(metadata, botJid);
+
+  // ----------------------------------------------------------
+  // XONLYADMIN ON / OFF
+  // ----------------------------------------------------------
+
+  if (command === 'xonlyadmin') {
+    if (!senderIsAdmin) {
+      await sendReply(
+        jid,
+        '⛔ Seuls le propriétaire et les administrateurs peuvent modifier ce réglage.',
+        message
+      );
+
+      return true;
+    }
+
+    const option = (args[0] || '').toLowerCase();
+
+    if (!['on', 'off'].includes(option)) {
+      await sendReply(
+        jid,
+        'Utilisation : Xonlyadmin on ou Xonlyadmin off',
+        message
+      );
+
+      return true;
+    }
+
+    const enabled = option === 'on';
+
+    await setOnlyAdmin(jid, enabled);
+
     await sendReply(
-      sock, jid,
-      '⌬ Le mode administrateurs est activé dans ce groupe.',
+      jid,
+      enabled
+        ? '🔒 𝗠𝗢𝗗𝗘 𝗢𝗡𝗟𝗬-𝗔𝗗𝗠𝗜𝗡 𝗔𝗖𝗧𝗜𝗩𝗘́.\nLes commandes ordinaires sont maintenant réservées aux administrateurs et au propriétaire.'
+        : '🔓 𝗠𝗢𝗗𝗘 𝗢𝗡𝗟𝗬-𝗔𝗗𝗠𝗜𝗡 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́.\nLes membres retrouvent l’accès aux commandes ordinaires.',
       message
     );
+
     return true;
   }
 
-  // ========================================
+  // ----------------------------------------------------------
   // XTAG / XTAGALL
-  // ========================================
+  // Accessible à tous, même en mode onlyadmin.
+  // ----------------------------------------------------------
 
-  if (command === 'tag' || command === 'tagall') {
-    const quoted = message.message?.extendedTextMessage?.contextInfo;
+  if (command === 'xtag' || command === 'xtagall') {
+    const quoted = getQuotedMessage(message);
 
     if (!quoted?.stanzaId) {
       await sendReply(
-        sock, jid,
-        '⌬ Réponds à un message avec Xtag pour signaler son contenu à tous les membres.',
-        message
-      );
-      return true;
-    }
-
-    const now = Date.now();
-
-    const result = await db.execute({
-      sql: `
-        SELECT last_tag
-        FROM group_tag_cooldowns
-        WHERE group_id = ?
-      `,
-      args: [jid]
-    });
-
-    const lastTag = Number(result.rows[0]?.last_tag || 0);
-    const remaining = 60000 - (now - lastTag);
-
-    if (remaining > 0) {
-      await sendReply(
-        sock,
         jid,
-        `⌬ Une mention collective vient d'être effectuée. Réessaie dans ${Math.ceil(remaining / 1000)} seconde(s).`,
+        '📌 Pour utiliser Xtag, réponds d’abord à un message, puis envoie Xtag.',
         message
       );
+
       return true;
     }
 
-    // Transaction atomique pour éviter deux Xtag simultanés.
-    const claim = await db.execute({
-      sql: `
-        UPDATE group_tag_cooldowns
-        SET last_tag = ?
-        WHERE group_id = ?
-        AND last_tag <= ?
-      `,
-      args: [now, jid, now - 60000]
-    });
+    const participants = metadata.participants
+      .map(item => normalizeJid(item.id || item.jid))
+      .filter(Boolean)
+      .filter(participant => !sameParticipant(participant, botJid));
 
-    if (claim.rowsAffected === 0) {
-      // Première utilisation : insertion conditionnelle.
-      await db.execute({
-        sql: `
-          INSERT INTO group_tag_cooldowns (group_id, last_tag)
-          VALUES (?, ?)
-          ON CONFLICT(group_id) DO NOTHING
-        `,
-        args: [jid, now]
-      });
+    if (!participants.length) {
+      await sendReply(
+        jid,
+        'Aucun membre à mentionner.',
+        message
+      );
 
-      const check = await db.execute({
-        sql: `
-          SELECT last_tag FROM group_tag_cooldowns
-          WHERE group_id = ?
-        `,
-        args: [jid]
-      });
-
-      if (Number(check.rows[0]?.last_tag) !== now) {
-        await sendReply(
-          sock, jid,
-          '⌬ Une mention collective vient d’être lancée. Patiente avant la prochaine.',
-          message
-        );
-        return true;
-      }
-    }
-
-    const metadata = await sock.groupMetadata(jid);
-
-    const members = metadata.participants
-      .map(member => jidNormalizedUser(member.id))
-      .filter(id => id !== jidNormalizedUser(sock.user.id));
-
-    if (members.length === 0) {
-      await sendReply(sock, jid, 'Aucun membre à mentionner.', message);
       return true;
     }
 
-    const quotedSender = quoted.participant || 'un membre';
+    // On vérifie le cooldown seulement après validation
+    // du groupe et de la réponse au message.
+    const cooldown = await acquireTagCooldown(jid);
 
-    const text =
-      `⌬ 𝗚𝗥𝗢𝗨𝗣 𝗔𝗟𝗘𝗥𝗧\n\n` +
-      `Un message de ${getNumber(quotedSender)} a été signalé.\n\n` +
-      members.map(id => `@${getNumber(id)}`).join(' ');
+    if (!cooldown.allowed) {
+      await sendReply(
+        jid,
+        `⏳ 𝗔𝗧𝗧𝗘𝗡𝗧𝗜𝗢𝗡\nUne mention collective vient déjà d’être utilisée dans ce groupe.\nVeuillez patienter encore ${cooldown.remaining} seconde(s).`,
+        message
+      );
 
-    await sock.sendMessage(jid, {
-      text,
-      mentions: members
-    }, { quoted: message });
+      return true;
+    }
+
+    try {
+      const text = [
+        '╭━━〔 📢 𝗠𝗘𝗡𝗧𝗜𝗢𝗡 𝗖𝗢𝗟𝗟𝗘𝗖𝗧𝗜𝗩𝗘 〕━━╮',
+        '',
+        'Un message mérite l’attention de tous les membres.',
+        '',
+        `👥 Membres mentionnés : ${participants.length}`,
+        '',
+        '╰━━━━━━━━━━━━━━━━━━━━━━╯',
+        SIGNATURE
+      ].join('\n');
+
+      await sock.sendMessage(
+        jid,
+        {
+          text,
+          mentions: participants
+        },
+        { quoted: message }
+      );
+    } catch (error) {
+      logger.error(
+        { err: error },
+        'Erreur Xtag'
+      );
+
+      await sendReply(
+        jid,
+        'Impossible de réaliser la mention collective. Réessaie plus tard.',
+        message
+      );
+    }
 
     return true;
   }
 
-  // ========================================
-  // XKICK — AUTEUR DU MESSAGE CITÉ
-  // ========================================
+  // ----------------------------------------------------------
+  // MODE ONLYADMIN POUR LES COMMANDES ORDINAIRES
+  // Xtag reste exclu de cette restriction.
+  // ----------------------------------------------------------
 
-  if (command === 'kick') {
-    if (!admin) {
-      await sendReply(sock, jid, 'Administrateur requis.', message);
+  const settings = await getGroupSettings(jid);
+
+  if (
+    Number(settings.only_admin) === 1 &&
+    !senderIsAdmin
+  ) {
+    await sendReply(
+      jid,
+      '🔒 Cette commande est réservée aux administrateurs de ce groupe.',
+      message
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // COMMANDES SENSIBLES : ADMIN OU OWNER
+  // ----------------------------------------------------------
+
+  if (adminCommands.includes(command) && !senderIsAdmin) {
+    await sendReply(
+      jid,
+      '⛔ Cette commande est réservée au propriétaire et aux administrateurs.',
+      message
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // XKICK — EXPULSER L'AUTEUR DU MESSAGE CITÉ
+  // ----------------------------------------------------------
+
+  if (command === 'xkick') {
+    if (!botIsAdmin) {
+      await sendReply(
+        jid,
+        '⚠️ Je dois être administratrice du groupe pour expulser un membre.',
+        message
+      );
+
       return true;
     }
 
-    const context = message.message?.extendedTextMessage?.contextInfo;
-    const target = context?.participant;
+    const quoted = getQuotedMessage(message);
+    const target = quoted?.participant;
 
     if (!target) {
       await sendReply(
-        sock, jid,
-        'Réponds au message du membre à expulser avec Xkick.',
+        jid,
+        'Réponds au message du membre que tu souhaites expulser, puis envoie Xkick.',
         message
       );
+
       return true;
     }
 
-    if (isOwner(target)) {
-      await sendReply(sock, jid, 'Cette action est interdite sur le propriétaire.', message);
+    if (sameParticipant(target, botJid)) {
+      await sendReply(
+        jid,
+        'Je ne peux pas m’expulser moi-même.',
+        message
+      );
+
       return true;
     }
 
-    const admins = await getGroupAdmins(sock, jid);
+    if (isOwner(target) || isParticipantAdmin(metadata, target)) {
+      await sendReply(
+        jid,
+        'Cette personne est protégée : impossible de l’expulser avec cette commande.',
+        message
+      );
 
-    if (admins.includes(jidNormalizedUser(target))) {
-      await sendReply(sock, jid, 'Impossible de retirer un administrateur.', message);
       return true;
     }
 
-    const botJid = jidNormalizedUser(sock.user.id);
+    try {
+      await sock.groupParticipantsUpdate(
+        jid,
+        [target],
+        'remove'
+      );
 
-    if (!admins.includes(botJid)) {
-      await sendReply(sock, jid, 'Je dois être administratrice pour effectuer cette action.', message);
-      return true;
+      await sendReply(
+        jid,
+        '✅ Demande d’expulsion exécutée.',
+        message
+      );
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur Xkick');
+
+      await sendReply(
+        jid,
+        'Impossible d’expulser ce membre. Vérifie mes permissions.',
+        message
+      );
     }
 
-    await sock.groupParticipantsUpdate(jid, [target], 'remove');
-
-    await sendReply(sock, jid, '⌬ Membre retiré du groupe.', message);
     return true;
   }
 
-  // ========================================
-  // XADD — AJOUT D'UN NUMÉRO
-  // ========================================
+  // ----------------------------------------------------------
+  // XADD — AJOUTER UN MEMBRE
+  // ----------------------------------------------------------
 
-  if (command === 'add') {
-    if (!admin) {
-      await sendReply(sock, jid, 'Administrateur requis.', message);
+  if (command === 'xadd') {
+    if (!botIsAdmin) {
+      await sendReply(
+        jid,
+        '⚠️ Je dois être administratrice du groupe pour ajouter un membre.',
+        message
+      );
+
       return true;
     }
 
-    const number = args.replace(/\D/g, '');
+    const number = normalizeNumber(args[0] || '');
 
     if (number.length < 8 || number.length > 15) {
       await sendReply(
-        sock, jid,
+        jid,
         'Utilisation : Xadd 229XXXXXXXX',
         message
       );
+
       return true;
     }
 
     const target = `${number}@s.whatsapp.net`;
 
-    const botJid = jidNormalizedUser(sock.user.id);
-    const botAdmins = await getGroupAdmins(sock, jid);
+    try {
+      const result = await sock.groupParticipantsUpdate(
+        jid,
+        [target],
+        'add'
+      );
 
-    if (!botAdmins.includes(botJid)) {
-      await sendReply(sock, jid, 'Je dois être administratrice pour ajouter un membre.', message);
+      const status = result?.[0]?.status;
+
+      if (status === '200' || status === 200) {
+        await sendReply(
+          jid,
+          `✅ Demande d’ajout envoyée pour ${number}.`,
+          message
+        );
+      } else {
+        await sendReply(
+          jid,
+          `La demande d’ajout pour ${number} a reçu le statut ${status || 'inconnu'}. WhatsApp peut imposer une invitation privée.`,
+          message
+        );
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur Xadd');
+
+      await sendReply(
+        jid,
+        'WhatsApp a refusé l’ajout direct. La confidentialité du membre peut exiger une invitation.',
+        message
+      );
+    }
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // XANNONCE — ANNONCE DU GROUPE
+  // ----------------------------------------------------------
+
+  if (command === 'xannonce') {
+    if (!botIsAdmin) {
+      await sendReply(
+        jid,
+        '⚠️ Je dois être administratrice du groupe pour publier cette annonce.',
+        message
+      );
+
+      return true;
+    }
+
+    const announcement = args.join(' ').trim();
+
+    if (!announcement) {
+      await sendReply(
+        jid,
+        'Utilisation : Xannonce votre message',
+        message
+      );
+
+      return true;
+    }
+
+    await sock.sendMessage(jid, {
+      text:
+        `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n${announcement}\n\n${SIGNATURE}`
+    });
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // XCLEAR — SUPPRIMER UN MESSAGE ENVOYÉ PAR LE BOT
+  // ----------------------------------------------------------
+
+  if (command === 'xclear') {
+    if (!botIsAdmin) {
+      await sendReply(
+        jid,
+        '⚠️ Je dois être administratrice du groupe pour effectuer cette action.',
+        message
+      );
+
+      return true;
+    }
+
+    const quoted = getQuotedMessage(message);
+
+    if (!quoted?.stanzaId) {
+      await sendReply(
+        jid,
+        'Réponds à un de mes messages, puis envoie Xclear.',
+        message
+      );
+
+      return true;
+    }
+
+    const quotedSender = quoted.participant || '';
+
+    if (!sameParticipant(quotedSender, botJid)) {
+      await sendReply(
+        jid,
+        'Je peux uniquement supprimer ici un message que j’ai moi-même envoyé.',
+        message
+      );
+
       return true;
     }
 
     try {
-      const response = await sock.groupParticipantsUpdate(
-        jid, [target], 'add'
-      );
-
-      const status = response?.[0]?.status;
+      await sock.sendMessage(jid, {
+        delete: {
+          remoteJid: jid,
+          fromMe: true,
+          id: quoted.stanzaId
+        }
+      });
 
       await sendReply(
-        sock,
         jid,
-        status === '200'
-          ? `⌬ Invitation envoyée ou membre ajouté : ${number}`
-          : `⌬ WhatsApp n'a pas confirmé l'ajout direct. Une invitation peut être nécessaire.`,
+        '🧹 Message supprimé.',
         message
       );
-    } catch {
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur Xclear');
+
       await sendReply(
-        sock, jid,
-        '⌬ Ajout impossible. Les paramètres de confidentialité WhatsApp peuvent exiger une invitation.',
+        jid,
+        'La suppression a échoué. Vérifie mes permissions.',
         message
       );
     }
@@ -851,915 +1345,1581 @@ async function handleGroupCommand(
   return false;
 }
 
-// ==========================================
-// FIN PARTIE 2/3
-// ==========================================
+// ============================================================
+// FIN PARTIE 2/4
+// NE PAS DÉPLOYER POUR LE MOMENT.
+// COLLER LA PARTIE 3 À LA SUITE DU MÊME FICHIER.
+// ============================================================
 
-// ==========================================
-// PARTIE 3/3 — MEDIA, ECONOMY & CONNECTION
-// ==========================================
 
-// ==========================================
-// QUIZ — QUESTIONS
-// ==========================================
+// ============================================================
+// PARTIE 3/4 — ÉCONOMIE, QUIZ ET MULTIMÉDIA
+// ============================================================
 
-const quizQuestions = [
-  {
-    question: 'Quel est le plus grand océan du monde ?',
-    answer: 'pacifique'
-  },
-  {
-    question: 'Combien de côtés possède un hexagone ?',
-    answer: '6'
-  },
-  {
-    question: 'Quelle planète est surnommée la planète rouge ?',
-    answer: 'mars'
-  },
-  {
-    question: 'Quel est le symbole chimique de l’or ?',
-    answer: 'au'
-  },
-  {
-    question: 'Combien font 12 × 8 ?',
-    answer: '96'
-  }
-];
+// ------------------------------------------------------------
+// 21. SYSTÈME UTILISATEURS
+// ------------------------------------------------------------
 
-const activeQuizzes = new Map();
-
-// ==========================================
-// ECONOMY — USER INITIALIZATION
-// ==========================================
-
-async function ensureUser(userId) {
+async function ensureUser(jid) {
   await db.execute({
     sql: `
-      INSERT INTO users (user_id, coins, xp, last_daily)
-      VALUES (?, 0, 0, 0)
-      ON CONFLICT(user_id) DO NOTHING
+      INSERT OR IGNORE INTO users
+        (jid, coins, xp, last_daily, created_at)
+      VALUES (?, 0, 0, 0, ?)
     `,
-    args: [userId]
+    args: [jid, Date.now()]
   });
 }
 
-async function getUser(userId) {
-  await ensureUser(userId);
+async function getUser(jid) {
+  await ensureUser(jid);
 
   const result = await db.execute({
     sql: `
-      SELECT user_id, coins, xp, last_daily
+      SELECT jid, coins, xp, last_daily, created_at
       FROM users
-      WHERE user_id = ?
+      WHERE jid = ?
     `,
-    args: [userId]
+    args: [jid]
   });
 
   return result.rows[0];
 }
 
-// ==========================================
-// DAILY
-// ==========================================
+// ------------------------------------------------------------
+// 22. AJOUT DE XCOINS ET XP
+// ------------------------------------------------------------
 
-async function dailyReward(userId) {
+async function addRewards(jid, coins = 0, xp = 0) {
+  await ensureUser(jid);
+
+  await db.execute({
+    sql: `
+      UPDATE users
+      SET coins = coins + ?,
+          xp = xp + ?
+      WHERE jid = ?
+    `,
+    args: [
+      Math.max(0, Math.floor(coins)),
+      Math.max(0, Math.floor(xp)),
+      jid
+    ]
+  });
+
+  return getUser(jid);
+}
+
+// ------------------------------------------------------------
+// 23. CLASSEMENTS
+// ------------------------------------------------------------
+
+function getRank(xp) {
+  if (xp >= 10000) return '👑 Legend';
+  if (xp >= 5000) return '💠 Elite';
+  if (xp >= 2500) return '💎 Diamond';
+  if (xp >= 1000) return '🥇 Gold';
+  if (xp >= 500) return '🥈 Silver';
+  if (xp >= 100) return '🥉 Bronze';
+
+  return '🌱 Novice';
+}
+
+function getNextRank(xp) {
+  const ranks = [
+    { xp: 100, name: 'Bronze' },
+    { xp: 500, name: 'Silver' },
+    { xp: 1000, name: 'Gold' },
+    { xp: 2500, name: 'Diamond' },
+    { xp: 5000, name: 'Elite' },
+    { xp: 10000, name: 'Legend' }
+  ];
+
+  return ranks.find(rank => xp < rank.xp) || null;
+}
+
+// ------------------------------------------------------------
+// 24. XDAILY — 350 XCOINS + 25 XP / 24 HEURES
+// ------------------------------------------------------------
+
+async function dailyReward(jid) {
+  await ensureUser(jid);
+
   const now = Date.now();
   const cooldown = 24 * 60 * 60 * 1000;
 
-  await ensureUser(userId);
-
+  // Mise à jour conditionnelle atomique.
   const result = await db.execute({
     sql: `
       UPDATE users
       SET coins = coins + 350,
           xp = xp + 25,
           last_daily = ?
-      WHERE user_id = ?
-      AND last_daily <= ?
+      WHERE jid = ?
+        AND last_daily <= ?
+      RETURNING coins, xp, last_daily
     `,
-    args: [now, userId, now - cooldown]
+    args: [
+      now,
+      jid,
+      now - cooldown
+    ]
   });
 
-  if (result.rowsAffected === 0) {
-    const user = await getUser(userId);
-    const remaining = cooldown - (now - Number(user.last_daily));
+  if (result.rows.length > 0) {
+    const user = result.rows[0];
 
     return {
-      success: false,
-      remaining: Math.max(0, remaining)
+      success: true,
+      coins: Number(user.coins),
+      xp: Number(user.xp),
+      message:
+        '🎁 𝗥𝗘́𝗖𝗢𝗠𝗣𝗘𝗡𝗦𝗘 𝗤𝗨𝗢𝗧𝗜𝗗𝗜𝗘𝗡𝗡𝗘\n\n' +
+        '╭━━━━━━━━━━━━━━━━━━╮\n' +
+        '┃ +350 XCoins 💰\n' +
+        '┃ +25 XP ⭐\n' +
+        '╰━━━━━━━━━━━━━━━━━━╯\n\n' +
+        'Ta récompense quotidienne a été créditée.\n' +
+        SIGNATURE
     };
   }
 
+  const user = await getUser(jid);
+  const remaining = Math.max(
+    0,
+    cooldown - (now - Number(user.last_daily))
+  );
+
   return {
-    success: true,
-    coins: 350,
-    xp: 25
+    success: false,
+    remaining: Math.ceil(remaining / 1000),
+    message:
+      '⏳ 𝗗𝗔𝗜𝗟𝗬 𝗗𝗘́𝗝𝗔̀ 𝗥𝗘́𝗖𝗟𝗔𝗠𝗘́\n\n' +
+      `Reviens dans ${formatDuration(
+        Math.ceil(remaining / 1000)
+      )}.\n\n` +
+      SIGNATURE
   };
 }
 
-// ==========================================
-// RANK
-// ==========================================
+// ------------------------------------------------------------
+// 25. PROFIL UTILISATEUR
+// ------------------------------------------------------------
 
-function getRank(xp) {
-  if (xp >= 10000) return '𝗟𝗘𝗚𝗘𝗡𝗗';
-  if (xp >= 5000) return '𝗘𝗟𝗜𝗧𝗘';
-  if (xp >= 2500) return '𝗗𝗜𝗔𝗠𝗢𝗡𝗗';
-  if (xp >= 1000) return '𝗚𝗢𝗟𝗗';
-  if (xp >= 500) return '𝗦𝗜𝗟𝗩𝗘𝗥';
-  if (xp >= 100) return '𝗕𝗥𝗢𝗡𝗭𝗘';
+async function getProfileText(jid, displayName = 'Utilisateur') {
+  const user = await getUser(jid);
+  const xp = Number(user.xp);
+  const coins = Number(user.coins);
+  const nextRank = getNextRank(xp);
 
-  return '𝗡𝗢𝗩𝗜𝗖𝗘';
-}
-
-// ==========================================
-// PROFILE
-// ==========================================
-
-async function getProfile(userId) {
-  const user = await getUser(userId);
+  const progress = nextRank
+    ? `${xp} / ${nextRank.xp} XP`
+    : `${xp} XP — rang maximal`;
 
   return `
-╭━━〔 𝗨𝗦𝗘𝗥 𝗣𝗥𝗢𝗙𝗜𝗟𝗘 〕━━╮
+╭━━〔 👤 𝗨𝗦𝗘𝗥 𝗣𝗥𝗢𝗙𝗜𝗟𝗘 〕━━╮
 
-◈ ID : ${userId}
-◈ XCoins : ${user.coins}
-◈ XP : ${user.xp}
-◈ Rank : ${getRank(Number(user.xp))}
+Nom : ${displayName}
+Rang : ${getRank(xp)}
 
+💰 XCoins : ${coins}
+⭐ XP : ${xp}
+📈 Progression : ${progress}
+
+🧬 Compte enregistré dans Turso
 ╰━━━━━━━━━━━━━━━━━━━━━━╯
+
 ${SIGNATURE}
 `;
 }
 
-// ==========================================
-// QUIZ REWARD
-// ==========================================
+// ------------------------------------------------------------
+// 26. CLASSEMENT GLOBAL
+// ------------------------------------------------------------
 
-async function answerQuiz(userId, chatId, answer) {
-  const key = `${chatId}:${userId}`;
-  const quiz = activeQuizzes.get(key);
+async function getLeaderboard(limit = 10) {
+  const result = await db.execute({
+    sql: `
+      SELECT jid, coins, xp
+      FROM users
+      ORDER BY xp DESC, coins DESC
+      LIMIT ?
+    `,
+    args: [limit]
+  });
 
-  if (!quiz) {
+  return result.rows;
+}
+
+async function getRankText(jid) {
+  const user = await getUser(jid);
+  const xp = Number(user.xp);
+  const rank = getRank(xp);
+  const next = getNextRank(xp);
+
+  const leaderboard = await getLeaderboard(10);
+
+  const position = leaderboard.findIndex(
+    item => item.jid === jid
+  );
+
+  const positionText = position >= 0
+    ? `#${position + 1}`
+    : 'Non classé';
+
+  return `
+╭━━〔 🏆 𝗫𝗥𝗔𝗡𝗞 〕━━╮
+
+Rang : ${rank}
+XP : ${xp}
+Classement : ${positionText}
+
+${next
+  ? `Prochain rang : ${next.name}\nXP nécessaire : ${next.xp - xp}`
+  : 'Tu as atteint le rang Legend !'}
+
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+
+${SIGNATURE}
+`;
+}
+
+// ------------------------------------------------------------
+// 27. QUESTIONS DU QUIZ
+// ------------------------------------------------------------
+
+const quizQuestions = [
+  {
+    question: 'Quelle planète est surnommée la planète rouge ?',
+    answer: 'mars'
+  },
+  {
+    question: 'Combien de côtés possède un hexagone ?',
+    answer: '6'
+  },
+  {
+    question: 'Quel est le plus grand océan du monde ?',
+    answer: 'pacifique'
+  },
+  {
+    question: 'Quel langage est principalement utilisé avec React ?',
+    answer: 'javascript'
+  },
+  {
+    question: 'Quelle est la capitale du Japon ?',
+    answer: 'tokyo'
+  },
+  {
+    question: 'Combien font 12 × 12 ?',
+    answer: '144'
+  },
+  {
+    question: 'Quel gaz les plantes absorbent-elles principalement ?',
+    answer: 'dioxyde de carbone'
+  },
+  {
+    question: 'Quel est le symbole chimique de l’eau ?',
+    answer: 'h2o'
+  },
+  {
+    question: 'Combien de jours compte une année bissextile ?',
+    answer: '366'
+  },
+  {
+    question: 'Quel est le satellite naturel de la Terre ?',
+    answer: 'la lune'
+  }
+];
+
+function normalizeAnswer(value = '') {
+  return String(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[.!?,;:]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+// ------------------------------------------------------------
+// 28. XQUIZ — CRÉER UN QUIZ PERSISTANT
+// ------------------------------------------------------------
+
+async function startQuiz(jid) {
+  const now = Date.now();
+
+  const existing = await db.execute({
+    sql: `
+      SELECT question, expires_at
+      FROM active_quizzes
+      WHERE group_jid = ?
+    `,
+    args: [jid]
+  });
+
+  if (
+    existing.rows.length &&
+    Number(existing.rows[0].expires_at) > now
+  ) {
     return {
       success: false,
-      message: 'Aucun quiz actif pour toi. Lance Xquiz.'
+      message:
+        '🧠 Un quiz est déjà en cours ici. Réponds avec Xreponse avant de lancer le suivant.'
     };
   }
 
-  if (answer.trim().toLowerCase() !== quiz.answer) {
-    return {
-      success: false,
-      message: 'Réponse incorrecte. Essaie encore.'
-    };
-  }
+  const selected =
+    quizQuestions[
+      Math.floor(Math.random() * quizQuestions.length)
+    ];
 
-  activeQuizzes.delete(key);
-
-  await ensureUser(userId);
+  const expiresAt = now + 120000;
 
   await db.execute({
     sql: `
-      UPDATE users
-      SET coins = coins + 30,
-          xp = xp + 20
-      WHERE user_id = ?
+      INSERT INTO active_quizzes
+        (group_jid, question, answer, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+
+      ON CONFLICT(group_jid)
+      DO UPDATE SET
+        question = excluded.question,
+        answer = excluded.answer,
+        created_at = excluded.created_at,
+        expires_at = excluded.expires_at
     `,
-    args: [userId]
+    args: [
+      jid,
+      selected.question,
+      selected.answer,
+      now,
+      expiresAt
+    ]
   });
 
   return {
     success: true,
-    message: `Bonne réponse ! +30 XCoins et +20 XP.`
+    message:
+      '╭━━〔 🧠 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗤𝗨𝗜𝗭 〕━━╮\n\n' +
+      `${selected.question}\n\n` +
+      '⏳ Temps : 2 minutes\n' +
+      '🎁 Bonne réponse : 30 XCoins + 20 XP\n\n' +
+      'Réponds avec : Xreponse ta réponse\n\n' +
+      '╰━━━━━━━━━━━━━━━━━━━━━━╯'
   };
 }
 
-// ==========================================
-// XIMG — SEARCH IMAGES WITH SERPAPI
-// ==========================================
+// ------------------------------------------------------------
+// 29. XREPONSE — VÉRIFICATION ET RÉCOMPENSE
+// ------------------------------------------------------------
 
-async function searchImage(sock, jid, query, quoted) {
-  if (!CONFIG.SERPAPI_KEY) {
-    await sendReply(
-      sock, jid,
-      '⌬ Le moteur de recherche d’images n’est pas encore configuré.',
-      quoted
-    );
-    return;
+async function answerQuiz(jid, answer) {
+  const now = Date.now();
+  const submitted = normalizeAnswer(answer);
+
+  if (!submitted) {
+    return {
+      success: false,
+      message: 'Indique ta réponse après Xreponse.'
+    };
   }
 
-  if (!query) {
-    await sendReply(
-      sock, jid,
-      'Utilisation : Ximg Naruto',
-      quoted
-    );
-    return;
+  const existing = await db.execute({
+    sql: `
+      SELECT answer, expires_at
+      FROM active_quizzes
+      WHERE group_jid = ?
+    `,
+    args: [jid]
+  });
+
+  if (!existing.rows.length) {
+    return {
+      success: false,
+      message: 'Aucun quiz actif. Lance Xquiz pour commencer.'
+    };
   }
 
-  const response = await axios.get(
-    'https://serpapi.com/search.json',
-    {
-      params: {
-        engine: 'google_images',
-        q: query,
-        api_key: CONFIG.SERPAPI_KEY
-      },
-      timeout: 30000
-    }
-  );
+  const quiz = existing.rows[0];
 
-  const images = response.data?.images_results || [];
+  if (Number(quiz.expires_at) <= now) {
+    await db.execute({
+      sql: `
+        DELETE FROM active_quizzes
+        WHERE group_jid = ?
+          AND expires_at <= ?
+      `,
+      args: [jid, now]
+    });
 
-  const imageUrl = images.find(item =>
-    item.original &&
-    /^https?:\/\//i.test(item.original)
-  )?.original;
-
-  if (!imageUrl) {
-    await sendReply(
-      sock, jid,
-      '⌬ Aucune image exploitable trouvée.',
-      quoted
-    );
-    return;
+    return {
+      success: false,
+      message: '⌛ Le temps du quiz est écoulé. Lance un nouveau Xquiz.'
+    };
   }
 
-  const imageResponse = await axios.get(imageUrl, {
+  if (submitted !== normalizeAnswer(quiz.answer)) {
+    return {
+      success: false,
+      message: '❌ Mauvaise réponse. Tu peux réessayer.'
+    };
+  }
+
+  // Suppression atomique : une seule bonne réponse
+  // peut recevoir la récompense.
+  const claimed = await db.execute({
+    sql: `
+      DELETE FROM active_quizzes
+      WHERE group_jid = ?
+        AND expires_at > ?
+        AND lower(answer) = lower(?)
+      RETURNING group_jid
+    `,
+    args: [jid, now, quiz.answer]
+  });
+
+  if (!claimed.rows.length) {
+    return {
+      success: false,
+      message: 'Ce quiz vient déjà d’être remporté.'
+    };
+  }
+
+  const user = await addRewards(jid, 30, 20);
+
+  return {
+    success: true,
+    coins: Number(user.coins),
+    xp: Number(user.xp),
+    message:
+      '🏆 𝗕𝗥𝗔𝗩𝗢 ! 𝗕𝗢𝗡𝗡𝗘 𝗥𝗘́𝗣𝗢𝗡𝗦𝗘\n\n' +
+      '╭━━━━━━━━━━━━━━━━━━╮\n' +
+      '┃ +30 XCoins 💰\n' +
+      '┃ +20 XP ⭐\n' +
+      '╰━━━━━━━━━━━━━━━━━━╯\n\n' +
+      'Le quiz est terminé. Félicitations !\n' +
+      SIGNATURE
+  };
+}
+
+// ------------------------------------------------------------
+// 30. RECHERCHE D'IMAGES — SERPAPI
+// ------------------------------------------------------------
+
+async function downloadImageBuffer(url) {
+  const response = await axios.get(url, {
     responseType: 'arraybuffer',
-    timeout: 30000,
-    maxContentLength: 8 * 1024 * 1024,
-    maxBodyLength: 8 * 1024 * 1024
+    timeout: 20000,
+    maxContentLength: CONFIG.maxImageBytes,
+    maxBodyLength: CONFIG.maxImageBytes,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 SitriNel/2.0',
+      Accept: 'image/avif,image/webp,image/png,image/jpeg'
+    },
+    validateStatus: status => status === 200
   });
 
   const contentType =
-    imageResponse.headers['content-type'] || '';
+    String(response.headers['content-type'] || '')
+      .toLowerCase();
 
   if (!contentType.startsWith('image/')) {
-    throw new Error('Le résultat ne contient pas une image.');
+    throw new Error('La ressource reçue n’est pas une image.');
   }
-
-  await sock.sendMessage(
-    jid,
-    {
-      image: Buffer.from(imageResponse.data),
-      caption: `⌬ 𝗜𝗠𝗔𝗚𝗘 𝗥𝗘𝗦𝗨𝗟𝗧\n◈ Recherche : ${query}${SIGNATURE}`
-    },
-    { quoted }
-  );
-}
-
-// ==========================================
-// XIMG CREATE — CLOUDFLARE WORKERS AI
-// ==========================================
-
-async function generateImage(sock, jid, prompt, quoted) {
-  if (
-    !CONFIG.CLOUDFLARE_API_TOKEN ||
-    !CONFIG.CLOUDFLARE_ACCOUNT_ID
-  ) {
-    await sendReply(
-      sock, jid,
-      '⌬ Le moteur de génération d’images Cloudflare n’est pas configuré.',
-      quoted
-    );
-    return;
-  }
-
-  if (!prompt) {
-    await sendReply(
-      sock, jid,
-      'Utilisation : Ximg create Un château futuriste dans les nuages',
-      quoted
-    );
-    return;
-  }
-
-  await sock.sendPresenceUpdate('composing', jid);
-
-  const endpoint =
-    `https://api.cloudflare.com/client/v4/accounts/` +
-    `${CONFIG.CLOUDFLARE_ACCOUNT_ID}/ai/run/` +
-    '@cf/black-forest-labs/flux-1-schnell';
-
-  const response = await axios.post(
-    endpoint,
-    {
-      prompt,
-      num_steps: 4
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${CONFIG.CLOUDFLARE_API_TOKEN}`,
-        'Content-Type': 'application/json',
-        Accept: 'image/png'
-      },
-      responseType: 'arraybuffer',
-      timeout: 120000,
-      maxContentLength: 12 * 1024 * 1024
-    }
-  );
 
   const buffer = Buffer.from(response.data);
 
-  if (!buffer.length) {
-    throw new Error('Cloudflare a retourné une image vide.');
+  if (
+    !buffer.length ||
+    buffer.length > CONFIG.maxImageBytes
+  ) {
+    throw new Error('Taille de l’image non autorisée.');
   }
 
-  await sock.sendMessage(
-    jid,
-    {
-      image: buffer,
-      caption:
-        `⌬ 𝗔𝗜 𝗜𝗠𝗔𝗚𝗘 𝗚𝗘𝗡𝗘𝗥𝗔𝗧𝗜𝗢𝗡\n` +
-        `◈ Prompt : ${prompt}${SIGNATURE}`
-    },
-    { quoted }
-  );
-
-  await sock.sendPresenceUpdate('paused', jid);
+  return {
+    buffer,
+    contentType
+  };
 }
 
-// ==========================================
-// MAIN MESSAGE HANDLER
-// ==========================================
+async function searchImage(jid, message, query) {
+  if (!CONFIG.serpApiKey) {
+    await sendReply(
+      jid,
+      '⚠️ La recherche d’images nécessite SERPAPI_KEY dans Railway.',
+      message
+    );
 
-async function handleIncomingMessage(sock, message) {
-  if (!message.message) return;
+    return false;
+  }
 
-  const jid = message.key.remoteJid;
+  if (!query || !query.trim()) {
+    await sendReply(
+      jid,
+      'Utilisation : Ximg Naruto, paysage, animal...',
+      message
+    );
 
-  if (!jid || jid === 'status@broadcast') return;
+    return false;
+  }
 
-  const text = extractText(message);
-
-  if (!text || !text.startsWith(CONFIG.PREFIX)) return;
-
-  // Le propriétaire peut envoyer ses commandes
-  // depuis le compte WhatsApp connecté.
-  const sender = message.key.participant ||
-    (message.key.fromMe ? sock.user.id : jid);
-
-  const owner = isOwner(sender);
-
-  // Les messages sortants ordinaires du bot
-  // ne déclenchent aucune réponse.
-  if (message.key.fromMe && !owner) return;
-
-  const parts = text.slice(1).trim().split(/\s+/);
-
-  const command = (parts.shift() || '').toLowerCase();
-  const args = parts.join(' ').trim();
-
-  if (!command) return;
+  await sendReply(
+    jid,
+    '🔎 Recherche de visuels en cours...',
+    message
+  );
 
   try {
-    // ========================================
-    // GROUP COMMANDS
-    // ========================================
+    const response = await axios.get(
+      'https://serpapi.com/search.json',
+      {
+        params: {
+          engine: 'google_images',
+          q: query,
+          api_key: CONFIG.serpApiKey,
+          safe: 'active',
+          ijn: '0'
+        },
+        timeout: 30000
+      }
+    );
+
+    const results = response.data?.images_results || [];
+
+    if (!results.length) {
+      await sendReply(
+        jid,
+        'Aucune image trouvée pour cette recherche.',
+        message
+      );
+
+      return false;
+    }
+
+    // Essayer plusieurs résultats : le premier peut être bloqué.
+    for (const item of results.slice(0, 5)) {
+      const imageUrl = item.original || item.thumbnail;
+
+      if (!imageUrl) continue;
+
+      try {
+        const downloaded =
+          await downloadImageBuffer(imageUrl);
+
+        await sock.sendMessage(
+          jid,
+          {
+            image: downloaded.buffer,
+            mimetype: downloaded.contentType,
+            caption:
+              `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${query}\n${SIGNATURE}`
+          },
+          { quoted: message }
+        );
+
+        return true;
+      } catch (error) {
+        logger.warn(
+          { err: error },
+          'Un résultat image n’a pas pu être téléchargé.'
+        );
+      }
+    }
+
+    await sendReply(
+      jid,
+      'Les résultats ont été trouvés, mais les images ne sont pas téléchargeables actuellement.',
+      message
+    );
+
+    return false;
+  } catch (error) {
+    logger.error(
+      { err: error },
+      'Erreur de recherche SerpApi'
+    );
+
+    await sendReply(
+      jid,
+      'La recherche d’images a échoué. Vérifie ta clé SerpApi et réessaie.',
+      message
+    );
+
+    return false;
+  }
+}
+
+// ------------------------------------------------------------
+// 31. GÉNÉRATION D'IMAGES — CLOUDFLARE WORKERS AI
+// ------------------------------------------------------------
+
+async function generateImage(jid, message, prompt) {
+  if (
+    !CONFIG.cloudflareToken ||
+    !CONFIG.cloudflareAccountId
+  ) {
+    await sendReply(
+      jid,
+      '⚠️ La génération nécessite CLOUDFLARE_API_TOKEN et CLOUDFLARE_ACCOUNT_ID dans Railway.',
+      message
+    );
+
+    return false;
+  }
+
+  if (!prompt || !prompt.trim()) {
+    await sendReply(
+      jid,
+      'Utilisation : Ximg create un dragon futuriste dans une ville cyberpunk',
+      message
+    );
+
+    return false;
+  }
+
+  await sendReply(
+    jid,
+    '🎨 𝗖𝗥𝗘́𝗔𝗧𝗜𝗢𝗡 𝗩𝗜𝗦𝗨𝗘𝗟𝗟𝗘\nJe prépare ton image...',
+    message
+  );
+
+  try {
+    const endpoint =
+      `https://api.cloudflare.com/client/v4/accounts/${CONFIG.cloudflareAccountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`;
+
+    const response = await axios.post(
+      endpoint,
+      {
+        prompt: prompt.trim(),
+        num_steps: 4
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${CONFIG.cloudflareToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'image/png'
+        },
+        responseType: 'arraybuffer',
+        timeout: 120000,
+        maxContentLength: CONFIG.maxImageBytes,
+        maxBodyLength: CONFIG.maxImageBytes
+      }
+    );
+
+    const contentType =
+      String(response.headers['content-type'] || '')
+        .toLowerCase();
+
+    if (!contentType.startsWith('image/')) {
+      throw new Error(
+        'Cloudflare n’a pas renvoyé directement une image.'
+      );
+    }
+
+    const buffer = Buffer.from(response.data);
 
     if (
-      jid.endsWith('@g.us') &&
-      await handleGroupCommand(
-        sock,
-        message,
-        command,
+      !buffer.length ||
+      buffer.length > CONFIG.maxImageBytes
+    ) {
+      throw new Error('Image générée de taille invalide.');
+    }
+
+    await sock.sendMessage(
+      jid,
+      {
+        image: buffer,
+        mimetype: contentType,
+        caption:
+          `✨ 𝗜𝗠𝗔𝗚𝗘 𝗚𝗘́𝗡𝗘́𝗥𝗘́𝗘\n${SIGNATURE}`
+      },
+      { quoted: message }
+    );
+
+    return true;
+  } catch (error) {
+    logger.error(
+      { err: error },
+      'Erreur génération Cloudflare'
+    );
+
+    await sendReply(
+      jid,
+      'La génération a échoué. Vérifie les identifiants Cloudflare, les autorisations Workers AI et la disponibilité du modèle.',
+      message
+    );
+
+    return false;
+  }
+}
+
+// ------------------------------------------------------------
+// 32. COMMANDES MULTIMÉDIAS EN ATTENTE D'INTÉGRATION
+// ------------------------------------------------------------
+
+async function multimediaNotIntegrated(
+  jid,
+  message,
+  command
+) {
+  const descriptions = {
+    xplay:
+      'La recherche et l’envoi audio ne sont pas encore intégrés.',
+    xvideo:
+      'La recherche et l’envoi vidéo ne sont pas encore intégrés.'
+  };
+
+  await sendReply(
+    jid,
+    `🎧 ${descriptions[command] || 'Cette fonction est en préparation.'}\nJe ne vais pas prétendre que cette commande fonctionne avant son intégration.`,
+    message
+  );
+}
+
+// ============================================================
+// FIN PARTIE 3/4
+// NE PAS DÉPLOYER POUR LE MOMENT.
+// LA PARTIE 4 AJOUTERA LE ROUTEUR, LE PAIRAGE ET LE DÉMARRAGE.
+// ============================================================
+
+
+// ============================================================
+// PARTIE 4/4 — ROUTEUR, CONNEXION ET DÉMARRAGE
+// ============================================================
+
+// ------------------------------------------------------------
+// 33. PROTECTION CONTRE LES BOUCLES FROMME
+// ------------------------------------------------------------
+
+// On mémorise les identifiants des messages envoyés
+// par le bot pour ne jamais les traiter comme commandes.
+
+const botSentMessageIds = new Set();
+
+function rememberBotMessage(id) {
+  if (!id) return;
+
+  botSentMessageIds.add(id);
+
+  if (botSentMessageIds.size > 5000) {
+    const first = botSentMessageIds.values().next().value;
+    botSentMessageIds.delete(first);
+  }
+}
+
+// À appeler une seule fois sur chaque nouveau socket.
+function protectOutgoingMessages(socket) {
+  const originalSendMessage = socket.sendMessage.bind(socket);
+
+  socket.sendMessage = async (...args) => {
+    const result = await originalSendMessage(...args);
+
+    if (result?.key?.id) {
+      rememberBotMessage(result.key.id);
+    }
+
+    return result;
+  };
+}
+
+// ------------------------------------------------------------
+// 34. IDENTIFICATION ET CONTRÔLE DES COMMANDES
+// ------------------------------------------------------------
+
+const recognizedCommands = new Set([
+  'menu',
+  'info',
+  'chat',
+  'ai',
+  'ask',
+  'anime',
+  'police',
+  'onlyadmin',
+  'tag',
+  'tagall',
+  'kick',
+  'add',
+  'annonce',
+  'clear',
+  'daily',
+  'coins',
+  'xp',
+  'rank',
+  'profil',
+  'quiz',
+  'reponse',
+  'img',
+  'play',
+  'video',
+  'upt',
+  'off',
+  'restart'
+]);
+
+function parseCommand(text) {
+  const match = String(text || '').trim().match(
+    /^x([a-z]+)(?:\s+([\s\S]*))?$/i
+  );
+
+  if (!match) return null;
+
+  const command = match[1].toLowerCase();
+  const args = (match[2] || '').trim();
+
+  if (!recognizedCommands.has(command)) {
+    return null;
+  }
+
+  return { command, args };
+}
+
+// ------------------------------------------------------------
+// 35. INFORMATIONS DU SYSTÈME — XUPT
+// ------------------------------------------------------------
+
+function getSystemInfo() {
+  const uptimeSeconds = Math.floor(
+    (Date.now() - PROCESS_STARTED_AT) / 1000
+  );
+
+  const memory = process.memoryUsage();
+
+  return `
+╭━━〔 ⚙️ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗦𝗧𝗔𝗧𝗨𝗦 〕━━╮
+
+🤖 Bot : SITRI-NEL ULTIMATE
+📡 WhatsApp : ${connectionStatus}
+🟢 Processus : Actif
+
+⏱️ Uptime : ${formatDuration(uptimeSeconds)}
+
+🧠 Node.js : ${process.version}
+💻 Plateforme : ${process.platform}
+📦 Mémoire utilisée :
+${(memory.rss / 1024 / 1024).toFixed(2)} MB
+
+🕒 Démarrage : ${
+    new Date(PROCESS_STARTED_AT).toLocaleString('fr-FR', {
+      timeZone: 'UTC'
+    })
+  } UTC
+
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+
+${SIGNATURE}
+`;
+}
+
+// ------------------------------------------------------------
+// 36. EXÉCUTION DES COMMANDES
+// ------------------------------------------------------------
+
+async function handleCommand(message) {
+  const jid = message.key.remoteJid;
+
+  if (!jid || !message.message) return;
+
+  if (message.key.id && botSentMessageIds.has(message.key.id)) {
+    return;
+  }
+
+  // Une commande envoyée depuis le compte connecté
+  // est considérée comme une commande du propriétaire.
+  const sender = message.key.fromMe
+    ? (botJid || getMessageSender(message))
+    : getMessageSender(message);
+
+  const textContent = extractText(message);
+  const parsed = parseCommand(textContent);
+
+  // Les messages ordinaires ne sont jamais interceptés.
+  if (!parsed) return;
+
+  const { command, args } = parsed;
+
+  // Contrôle propriétaire avant les permissions ordinaires.
+  const owner = isOwner(sender) || message.key.fromMe;
+
+  if (!owner && !isOwnerMessage(message) && message.key.fromMe) {
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // COMMANDES DE GROUPE
+  // ----------------------------------------------------------
+
+  if (isGroupJid(jid)) {
+    const handled = await handleGroupCommand(
+      jid,
+      message,
+      sender,
+      command,
+      args
+    );
+
+    if (handled) return;
+
+    // Le mode onlyadmin bloque les commandes ordinaires
+    // aux membres qui ne sont ni propriétaires ni admins.
+    const allowed = await canUseOrdinaryGroupCommand(
+      jid,
+      sender
+    );
+
+    if (!allowed) {
+      await sendReply(
+        jid,
+        '🔒 Cette commande est réservée aux administrateurs du groupe.',
+        message
+      );
+
+      return;
+    }
+  }
+
+  // ----------------------------------------------------------
+  // XMENU
+  // ----------------------------------------------------------
+
+  if (command === 'menu') {
+    await sendOfficialImage(jid, message);
+    await sendReply(jid, getMenu(), message);
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // XINFO
+  // ----------------------------------------------------------
+
+  if (command === 'info') {
+    await sendOfficialImage(jid, message);
+    await sendReply(jid, getInfo(), message);
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // XCHAT — CONVERSATION AVEC MÉMOIRE
+  // ----------------------------------------------------------
+
+  if (command === 'chat') {
+    if (!args) {
+      await sendReply(
+        jid,
+        'Je suis à ton écoute. Utilise Xchat suivi de ton message.',
+        message
+      );
+      return;
+    }
+
+    try {
+      const answer = await askGroq(
         args,
         sender,
-        jid
-      )
+        { useHistory: true }
+      );
+
+      await sendReply(jid, answer, message);
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur Xchat');
+
+      await sendReply(
+        jid,
+        'Je rencontre momentanément une difficulté avec mon intelligence artificielle.',
+        message
+      );
+    }
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // XAI ET XASK — RÉPONSES IA
+  // ----------------------------------------------------------
+
+  if (command === 'ai' || command === 'ask') {
+    if (!args) {
+      await sendReply(
+        jid,
+        `Indique ta question après X${command}.`,
+        message
+      );
+      return;
+    }
+
+    try {
+      const answer = await askGroq(
+        args,
+        sender,
+        { useHistory: false }
+      );
+
+      await sendReply(jid, answer, message);
+    } catch (error) {
+      logger.error({ err: error }, `Erreur X${command}`);
+
+      await sendReply(
+        jid,
+        'Mon service IA est momentanément indisponible.',
+        message
+      );
+    }
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // XANIME
+  // ----------------------------------------------------------
+
+  if (command === 'anime') {
+    if (!args) {
+      await sendReply(
+        jid,
+        'Utilisation : Xanime suivi de ta question sur les animes.',
+        message
+      );
+      return;
+    }
+
+    try {
+      const answer = await askGroq(
+        `Réponds comme une experte en anime, manga et animation japonaise. Sois précise et élégante.\n\nQuestion : ${args}`,
+        sender,
+        { useHistory: false }
+      );
+
+      await sendReply(jid, answer, message);
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur Xanime');
+
+      await sendReply(jid, 'Service momentanément indisponible.', message);
+    }
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // XP ET ÉCONOMIE
+  // ----------------------------------------------------------
+
+  if (command === 'daily') {
+    const result = await dailyReward(sender);
+    await sendReply(jid, result.message, message);
+    return;
+  }
+
+  if (command === 'coins') {
+    const user = await getUser(sender);
+
+    await sendReply(
+      jid,
+      `💰 𝗫𝗖𝗢𝗜𝗡𝗦\n\nSolde : ${Number(user.coins)} XCoins\n\n${SIGNATURE}`,
+      message
+    );
+
+    return;
+  }
+
+  if (command === 'xp') {
+    const user = await getUser(sender);
+
+    await sendReply(
+      jid,
+      `⭐ 𝗘𝗫𝗣𝗘𝗥𝗜𝗘𝗡𝗖𝗘\n\nXP : ${Number(user.xp)}\nRang : ${getRank(Number(user.xp))}\n\n${SIGNATURE}`,
+      message
+    );
+
+    return;
+  }
+
+  if (command === 'rank') {
+    const text = await getRankText(sender);
+    await sendReply(jid, text, message);
+    return;
+  }
+
+  if (command === 'profil') {
+    const displayName =
+      message.pushName || 'Utilisateur';
+
+    const text = await getProfileText(
+      sender,
+      displayName
+    );
+
+    await sendReply(jid, text, message);
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // QUIZ
+  // ----------------------------------------------------------
+
+  if (command === 'quiz') {
+    const result = await startQuiz(jid);
+
+    await sendReply(
+      jid,
+      result.message,
+      message
+    );
+
+    return;
+  }
+
+  if (command === 'reponse') {
+    const result = await answerQuiz(
+      jid,
+      sender,
+      args
+    );
+
+    await sendReply(
+      jid,
+      result.message,
+      message
+    );
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // IMAGES
+  // ----------------------------------------------------------
+
+  if (command === 'img') {
+    if (/^create(?:\s|$)/i.test(args)) {
+      const prompt = args.replace(/^create\s*/i, '');
+
+      await generateImage(
+        jid,
+        message,
+        prompt
+      );
+
+      return;
+    }
+
+    await searchImage(
+      jid,
+      message,
+      args
+    );
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // AUDIO ET VIDÉO
+  // ----------------------------------------------------------
+
+  if (command === 'play' || command === 'video') {
+    await multimediaNotIntegrated(
+      jid,
+      message,
+      `x${command}`
+    );
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // XUPT
+  // ----------------------------------------------------------
+
+  if (command === 'upt') {
+    await sendReply(
+      jid,
+      getSystemInfo(),
+      message
+    );
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // COMMANDES RÉSERVÉES AU PROPRIÉTAIRE
+  // ----------------------------------------------------------
+
+  if (command === 'off' || command === 'restart') {
+    if (!owner) {
+      await sendReply(
+        jid,
+        '⛔ Cette commande est exclusivement réservée à KAY≈DEN.',
+        message
+      );
+
+      return;
+    }
+
+    isShuttingDown = true;
+    connectionStatus = 'Arrêt en cours';
+
+    await sendReply(
+      jid,
+      command === 'off'
+        ? '⌁ Arrêt de Sitri-Nel demandé par KAY≈DEN.'
+        : '⌁ Redémarrage de Sitri-Nel demandé par KAY≈DEN.',
+      message
+    );
+
+    if (sock) {
+      try {
+        sock.end(undefined);
+      } catch (error) {
+        logger.warn({ err: error }, 'Fermeture du socket');
+      }
+    }
+
+    // Xrestart utilise le redémarrage automatique Railway
+    // si la politique de redémarrage est configurée.
+    process.exit(command === 'restart' ? 1 : 0);
+  }
+}
+
+// ------------------------------------------------------------
+// 37. RÉCEPTION DES MESSAGES
+// ------------------------------------------------------------
+
+async function handleIncomingMessage(message) {
+  try {
+    if (!message || !message.key) return;
+
+    if (message.key.remoteJid === 'status@broadcast') {
+      return;
+    }
+
+    if (message.key.id && hasProcessedMessage(message)) {
+      return;
+    }
+
+    // Les messages envoyés par le bot sont ignorés.
+    // Les commandes envoyées depuis le téléphone du propriétaire
+    // restent acceptées si leur identifiant n'est pas celui
+    // d'un message envoyé par le bot.
+    if (
+      message.key.fromMe &&
+      message.key.id &&
+      botSentMessageIds.has(message.key.id)
     ) {
       return;
     }
 
-    // ========================================
-    // OWNER COMMANDS
-    // ========================================
+    const textContent = extractText(message);
 
-    if (['off', 'restart'].includes(command)) {
-      if (!owner) {
-        await sendReply(
-          sock, jid,
-          '⌬ Cette fonction est exclusivement réservée à mon créateur.',
-          message
-        );
-        return;
-      }
-
-      if (command === 'off') {
-        await sendReply(
-          sock, jid,
-          '⌬ Arrêt du système demandé par KAY≈DEN.',
-          message
-        );
-
-        process.exit(0);
-      }
-
-      if (command === 'restart') {
-        await sendReply(
-          sock, jid,
-          '⌬ Redémarrage du système demandé par KAY≈DEN.',
-          message
-        );
-
-        process.exit(0);
-      }
-    }
-
-    // ========================================
-    // XMENU
-    // ========================================
-
-    if (command === 'menu') {
-      const sent = await sendOfficialImage(
-        sock,
-        jid,
-        '⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\nUne intelligence artificielle à votre service.',
-        message
-      );
-
-      if (sent) {
-        await sock.sendMessage(
-          jid,
-          { text: getMenu() },
-          { quoted: message }
-        );
-      }
-
+    // Ignorer les messages qui ne sont pas des commandes.
+    if (!parseCommand(textContent)) {
       return;
     }
 
-    // ========================================
-    // XINFO
-    // ========================================
-
-    if (command === 'info') {
-      const sent = await sendOfficialImage(
-        sock,
-        jid,
-        '𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n𝗨𝗟𝗧𝗜𝗠𝗔𝗧𝗘 𝗔𝗜',
-        message
-      );
-
-      if (sent) {
-        await sock.sendMessage(
-          jid,
-          { text: getInfo() },
-          { quoted: message }
-        );
-      }
-
-      return;
-    }
-
-    // ========================================
-    // XUPT
-    // ========================================
-
-    if (command === 'upt') {
-      const uptime = formatDuration(Date.now() - startedAt);
-
-      await sendReply(
-        sock,
-        jid,
-        `
-╭━━〔 𝗦𝗬𝗦𝗧𝗘𝗠 𝗦𝗧𝗔𝗧𝗨𝗦 〕━━╮
-
-◈ Process : ONLINE
-◈ Uptime : ${uptime}
-◈ AI : GROQ
-◈ Database : TURSO
-◈ WhatsApp : CONNECTED
-◈ Runtime : Node.js ${process.version}
-◈ Platform : ${process.platform}
-
-╰━━━━━━━━━━━━━━━━━━━━━━╯
-${SIGNATURE}
-`,
-        message
-      );
-
-      return;
-    }
-
-    // ========================================
-    // XCHAT / XAI / XASK
-    // ========================================
-
-    if (['chat', 'ai', 'ask'].includes(command)) {
-      if (!args) {
-        await sendReply(
-          sock, jid,
-          '⌬ Pose-moi une question pour commencer.',
-          message
-        );
-        return;
-      }
-
-      await sock.sendPresenceUpdate('composing', jid);
-
-      const answer = await askGroq(
-        jid,
-        getNumber(sender),
-        args,
-        command === 'chat'
-      );
-
-      await sock.sendPresenceUpdate('paused', jid);
-
-      await sendReply(
-        sock,
-        jid,
-        answer + SIGNATURE,
-        message
-      );
-
-      return;
-    }
-
-    // ========================================
-    // XANIME / XPOLICE
-    // ========================================
-
-    if (['anime', 'police'].includes(command)) {
-      if (!args) {
-        await sendReply(
-          sock, jid,
-          `Utilisation : X${command} suivi de ta question.`,
-          message
-        );
-        return;
-      }
-
-      const instruction = command === 'anime'
-        ? 'Réponds comme une experte de la culture anime et manga.'
-        : 'Réponds comme une assistante experte en sécurité et en informations générales sur la police, sans prétendre être une agente réelle.';
-
-      const answer = await askGroq(
-        jid,
-        getNumber(sender),
-        `${instruction}\n\n${args}`,
-        false
-      );
-
-      await sendReply(sock, jid, answer + SIGNATURE, message);
-      return;
-    }
-
-    // ========================================
-    // XIMG
-    // ========================================
-
-    if (command === 'img') {
-      if (args.toLowerCase().startsWith('create ')) {
-        const prompt = args.slice(7).trim();
-
-        await generateImage(sock, jid, prompt, message);
-      } else {
-        await searchImage(sock, jid, args, message);
-      }
-
-      return;
-    }
-
-    // ========================================
-    // XPLAY / XVIDEO
-    // ========================================
-
-    if (command === 'play' || command === 'video') {
-      await sendReply(
-        sock,
-        jid,
-        `⌬ Le module ${command === 'play' ? 'audio' : 'vidéo'} n'est pas encore connecté à une source compatible. Je ne vais pas inventer un résultat.`,
-        message
-      );
-
-      return;
-    }
-
-    // ========================================
-    // ECONOMY
-    // ========================================
-
-    const userId = getNumber(sender);
-
-    if (command === 'daily') {
-      const result = await dailyReward(userId);
-
-      if (result.success) {
-        await sendReply(
-          sock,
-          jid,
-          `
-╭━━〔 🎁 𝗫𝗗𝗔𝗜𝗟𝗬 〕━━╮
-
-◈ Récompense : +350 XCoins
-◈ Expérience : +25 XP
-◈ Prochaine récompense : 24 heures
-
-╰━━━━━━━━━━━━━━━━━━━━╯
-${SIGNATURE}
-`,
-          message
-        );
-      } else {
-        await sendReply(
-          sock,
-          jid,
-          `⌬ Tu as déjà récupéré ta récompense. Reviens dans ${formatDuration(result.remaining)}.`,
-          message
-        );
-      }
-
-      return;
-    }
-
-    if (['coins', 'xp', 'rank', 'profil'].includes(command)) {
-      const user = await getUser(userId);
-
-      if (command === 'coins') {
-        await sendReply(
-          sock, jid,
-          `⌬ 𝗫𝗖𝗢𝗜𝗡𝗦 : ${user.coins}${SIGNATURE}`,
-          message
-        );
-      }
-
-      if (command === 'xp') {
-        await sendReply(
-          sock, jid,
-          `⌬ 𝗫𝗣 : ${user.xp}${SIGNATURE}`,
-          message
-        );
-      }
-
-      if (command === 'rank') {
-        await sendReply(
-          sock, jid,
-          `⌬ 𝗥𝗔𝗡𝗞 : ${getRank(Number(user.xp))}${SIGNATURE}`,
-          message
-        );
-      }
-
-      if (command === 'profil') {
-        await sendReply(
-          sock, jid,
-          await getProfile(userId),
-          message
-        );
-      }
-
-      return;
-    }
-
-    // ========================================
-    // XQUIZ
-    // ========================================
-
-    if (command === 'quiz') {
-      const key = `${jid}:${userId}`;
-
-      if (activeQuizzes.has(key)) {
-        await sendReply(
-          sock, jid,
-          '⌬ Tu as déjà une question en cours. Réponds avec Xreponse.',
-          message
-        );
-        return;
-      }
-
-      const quiz =
-        quizQuestions[Math.floor(Math.random() * quizQuestions.length)];
-
-      activeQuizzes.set(key, quiz);
-
-      await sendReply(
-        sock,
-        jid,
-        `
-╭━━〔 🧠 𝗫𝗤𝗨𝗜𝗭 〕━━╮
-
-${quiz.question}
-
-⌬ Réponds avec : Xreponse ta réponse
-
-╰━━━━━━━━━━━━━━━━━━╯
-${SIGNATURE}
-`,
-        message
-      );
-
-      return;
-    }
-
-    // ========================================
-    // XREPONSE
-    // ========================================
-
-    if (command === 'reponse') {
-      if (!args) {
-        await sendReply(
-          sock, jid,
-          'Utilisation : Xreponse ta réponse',
-          message
-        );
-        return;
-      }
-
-      const result = await answerQuiz(userId, jid, args);
-
-      await sendReply(
-        sock,
-        jid,
-        result.message + SIGNATURE,
-        message
-      );
-
-      return;
-    }
-
-    // ========================================
-    // XANNONCE
-    // ========================================
-
-    if (command === 'annonce' && jid.endsWith('@g.us')) {
-      if (!isOwner(sender) &&
-          !(await isGroupAdmin(sock, jid, sender))) {
-        await sendReply(sock, jid, 'Administrateur requis.', message);
-        return;
-      }
-
-      if (!args) {
-        await sendReply(
-          sock, jid,
-          'Utilisation : Xannonce ton message',
-          message
-        );
-        return;
-      }
-
-      await sendReply(
-        sock,
-        jid,
-        `╭━━〔 𝗚𝗥𝗢𝗨𝗣 𝗔𝗡𝗡𝗢𝗨𝗡𝗖𝗘 〕━━╮\n\n${args}\n\n╰━━━━━━━━━━━━━━━━━━╯${SIGNATURE}`,
-        message
-      );
-
-      return;
-    }
-
-    // ========================================
-    // XCLEAR — LIMITATION WHATSAPP
-    // ========================================
-
-    if (command === 'clear') {
-      const context =
-        message.message?.extendedTextMessage?.contextInfo;
-
-      if (!context?.stanzaId) {
-        await sendReply(
-          sock, jid,
-          'Réponds à un message envoyé par Sitri-Nel avec Xclear.',
-          message
-        );
-        return;
-      }
-
-      const botNumber = getNumber(sock.user.id);
-      const quotedSender = getNumber(context.participant || '');
-
-      if (quotedSender !== botNumber) {
-        await sendReply(
-          sock, jid,
-          '⌬ Je ne peux pas garantir la suppression de messages envoyés par d’autres membres.',
-          message
-        );
-        return;
-      }
-
-      await sock.sendMessage(jid, {
-        delete: {
-          remoteJid: jid,
-          fromMe: true,
-          id: context.stanzaId,
-          participant: context.participant
-        }
-      });
-
-      return;
-    }
-
-    // ========================================
-    // COMMANDES INCONNUES
-    // ========================================
-
-    // Aucun message automatique pour les commandes inconnues.
-
+    await handleCommand(message);
   } catch (error) {
-    logger.error({
-      command,
-      error: error.message
-    }, 'Command execution failed');
+    logger.error(
+      { err: error },
+      'Erreur pendant le traitement du message'
+    );
 
-    await sendReply(
-      sock,
-      jid,
-      `⌬ Une erreur est survenue pendant l'exécution de X${command}. Réessaie plus tard.${SIGNATURE}`,
-      message
-    ).catch(() => {});
+    const jid = message?.key?.remoteJid;
+
+    if (jid) {
+      try {
+        await sendReply(
+          jid,
+          'Une erreur interne est survenue. Réessaie dans un instant.',
+          message
+        );
+      } catch (sendError) {
+        logger.error(
+          { err: sendError },
+          'Impossible d’envoyer le message d’erreur'
+        );
+      }
+    }
   }
 }
 
-// ==========================================
-// WHATSAPP CONNECTION
-// ==========================================
+// ------------------------------------------------------------
+// 38. CONNEXION WHATSAPP PAR CODE
+// ------------------------------------------------------------
 
 let reconnectTimer = null;
-let currentSocket = null;
-let stopping = false;
+let reconnectAttempts = 0;
+let pairingAttemptAt = 0;
+let pairingInProgress = false;
 
-async function startBot() {
-  stopping = false;
+async function connectWhatsApp() {
+  if (isShuttingDown) return;
 
-  logger.info('Initializing Sitri-Nel...');
+  connectionStatus = 'Connexion en cours';
 
   const { state, saveCreds } =
     await useMultiFileAuthState(SESSION_DIR);
 
-  const sock = makeWASocket({
+  const currentSocket = makeWASocket({
     auth: state,
     logger,
-    browser: Browsers.ubuntu('Chrome'),
     printQRInTerminal: false,
-    markOnlineOnConnect: true,
     syncFullHistory: false,
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000
+    markOnlineOnConnect: false,
+    generateHighQualityLinkPreview: false
   });
 
-  currentSocket = sock;
+  sock = currentSocket;
 
-  sock.ev.on('creds.update', saveCreds);
+  // Protection contre les boucles de messages sortants.
+  protectOutgoingMessages(currentSocket);
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+  currentSocket.ev.on('creds.update', saveCreds);
 
-    for (const message of messages) {
+  // ----------------------------------------------------------
+  // PAIRING CODE
+  // ----------------------------------------------------------
+
+  if (!state.creds.registered && CONFIG.pairingNumber) {
+    const now = Date.now();
+
+    if (
+      !pairingInProgress &&
+      now - pairingAttemptAt > 30000
+    ) {
+      pairingInProgress = true;
+      pairingAttemptAt = now;
+
       try {
-        await handleIncomingMessage(sock, message);
+        // Laisser le socket s'initialiser.
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        if (
+          sock !== currentSocket ||
+          isShuttingDown ||
+          state.creds.registered
+        ) {
+          return;
+        }
+
+        const code = await currentSocket.requestPairingCode(
+          CONFIG.pairingNumber
+        );
+
+        logger.info(
+          '========================================'
+        );
+        logger.info('SITRI-NEL — CODE DE JUMELAGE');
+        logger.info(`CODE : ${code}`);
+        logger.info(
+          'Entre ce code dans WhatsApp > Appareils connectés.'
+        );
+        logger.info(
+          '========================================'
+        );
       } catch (error) {
-        logger.error(error, 'Incoming message error');
+        logger.error(
+          { err: error },
+          'Impossible de générer le code de jumelage'
+        );
+      } finally {
+        pairingInProgress = false;
       }
     }
-  });
+  }
 
-  sock.ev.on('connection.update', async update => {
-    const { connection, lastDisconnect } = update;
+  // ----------------------------------------------------------
+  // ÉTAT DE CONNEXION
+  // ----------------------------------------------------------
 
-    if (connection === 'open') {
-      logger.info('WhatsApp connection established.');
-      return;
+  currentSocket.ev.on(
+    'connection.update',
+    async update => {
+      const { connection, lastDisconnect } = update;
+
+      if (connection === 'connecting') {
+        connectionStatus = 'Connexion en cours';
+      }
+
+      if (connection === 'open') {
+        reconnectAttempts = 0;
+        connectionStatus = 'Connecté';
+
+        botJid = jidNormalizedUser(
+          currentSocket.user.id
+        );
+
+        botNumber = getNumber(botJid);
+
+        logger.info('========================================');
+        logger.info('SITRI-NEL ULTIMATE CONNECTÉ');
+        logger.info(`Numéro : ${botNumber}`);
+        logger.info(`Propriétaire : ${CONFIG.ownerNumbers.join(', ')}`);
+        logger.info('Connexion WhatsApp établie.');
+        logger.info('========================================');
+      }
+
+      if (connection === 'close') {
+        connectionStatus = 'Déconnecté';
+
+        const statusCode =
+          lastDisconnect?.error?.output?.statusCode;
+
+        logger.warn(
+          { statusCode },
+          'Connexion WhatsApp fermée'
+        );
+
+        if (isShuttingDown) return;
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          logger.error(
+            'Session déconnectée. Une nouvelle association WhatsApp sera nécessaire.'
+          );
+
+          return;
+        }
+
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+        }
+
+        reconnectAttempts++;
+
+        const delay = Math.min(
+          5000 * Math.pow(2, reconnectAttempts - 1),
+          60000
+        );
+
+        logger.info(
+          `Nouvelle tentative de connexion dans ${Math.ceil(delay / 1000)} secondes.`
+        );
+
+        reconnectTimer = setTimeout(() => {
+          if (!isShuttingDown) {
+            connectWhatsApp().catch(error => {
+              logger.error(
+                { err: error },
+                'Erreur pendant la reconnexion'
+              );
+            });
+          }
+        }, delay);
+      }
     }
+  );
 
-    if (connection === 'close') {
-      const status =
-        lastDisconnect?.error?.output?.statusCode;
+  // ----------------------------------------------------------
+  // ÉVÉNEMENTS DES MESSAGES
+  // ----------------------------------------------------------
 
-      logger.warn({ status }, 'WhatsApp connection closed.');
-
-      if (status === DisconnectReason.loggedOut) {
-        stopping = true;
-        logger.error('WhatsApp session logged out. New pairing required.');
+  currentSocket.ev.on(
+    'messages.upsert',
+    async ({ messages, type }) => {
+      if (!['notify', 'append'].includes(type)) {
         return;
       }
 
-      if (!stopping && !reconnectTimer) {
-        reconnectTimer = setTimeout(async () => {
-          reconnectTimer = null;
-
-          try {
-            await startBot();
-          } catch (error) {
-            logger.error(error, 'Reconnection failed');
-          }
-        }, 5000);
+      for (const message of messages || []) {
+        await handleIncomingMessage(message);
       }
     }
-  });
+  );
+}
 
-  // Pairing code
-  if (!state.creds.registered) {
-    await sleep(3000);
+// ------------------------------------------------------------
+// 39. DÉMARRAGE PRINCIPAL
+// ------------------------------------------------------------
 
-    if (currentSocket !== sock) return;
+async function startSitriNel() {
+  try {
+    logger.info('Initialisation de Sitri-Nel Ultimate...');
 
-    try {
-      const number = CONFIG.PAIRING_NUMBER.replace(/\D/g, '');
+    await initDatabase();
 
-      const code = await sock.requestPairingCode(number);
+    logger.info('Base de données initialisée.');
 
-      logger.info('================================');
-      logger.info(`SITRI-NEL PAIRING CODE: ${code}`);
-      logger.info('Enter this code in WhatsApp Linked Devices.');
+    if (!CONFIG.pairingNumber) {
+      logger.warn(
+        'PAIRING_NUMBER absent. Configure cette variable dans Railway.'
+      );
+    }
+
+    await connectWhatsApp();
+
+  } catch (error) {
+    logger.fatal(
+      { err: error },
+      'Échec du démarrage de Sitri-Nel'
+    );
+
+    process.exit(1);
+  }
+}
+
+// ------------------------------------------------------------
+// 40. ARRÊT PROPRE DU PROCESSUS
+// ------------------------------------------------------------
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+
+  isShuttingDown = true;
+  connectionStatus = 'Arrêt en cours';
+
+  logger.info(`Signal reçu : ${signal}`);
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+  }
+
+  try {
+    if (sock) {
+      sock.end(undefined);
+    }
+  } catch (error) {
+    logger.warn(
+      { err: error },
+      'Erreur pendant la fermeture WhatsApp'
+    );
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => {
+  gracefulShutdown('SIGTERM');
+});
+
+process.on('SIGINT', () => {
+  gracefulShutdown('SIGINT');
+});
+
+process.on('unhandledRejection', error => {
+  logger.error(
+    { err: error },
+    'Promesse non gérée'
+  );
+});
+
+process.on('uncaughtException', error => {
+  logger.fatal(
+    { err: error },
+    'Exception non interceptée'
+  );
+
+  process.exit(1);
+});
+
+// ============================================================
+// LANCEMENT DE SITRI-NEL ULTIMATE
+// ============================================================
+
+startSitriNel().catch(error => {
+  logger.fatal(
+    { err: error },
+    'Erreur fatale au démarrage'
+  );
+
+  process.exit(1);
+});
+
+// ============================================================
+// FIN PARTIE 4/4
+// ============================================================
+   

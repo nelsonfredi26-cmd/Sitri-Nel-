@@ -62,7 +62,7 @@ fs.mkdirSync(SESSION_DIR, { recursive: true });
 // ------------------------------------------------------------
 
 function readOwnerNumbers() {
-  const raw = process.env.OWNER_NUMBERS || '2290159418685';
+  const raw = process.env.OWNER_NUMBERS || '22959418685,2290159418685';
 
   return raw
     .split(',')
@@ -577,6 +577,7 @@ function formatAIReply(raw) {
 
   return `⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\n${body.trim()}\n\n𖤍 𝗞𝗔𝗬≈𝗗𝗘𝗡`;
 }
+
 // ------------------------------------------------------------
 // 14. ENVOI DE MESSAGES
 // ------------------------------------------------------------
@@ -753,9 +754,8 @@ async function askGroq(prompt, jid, options = {}) {
 
   if (!prompt || !String(prompt).trim()) {
     throw new Error('La question est vide.');
-  }
-
-  const useHistory = options.useHistory === true;
+       }
+   const useHistory = options.useHistory === true;
 
   let history = [];
 
@@ -857,7 +857,6 @@ async function askGroq(prompt, jid, options = {}) {
 
   return cleanAnswer;
 }
-
 // ------------------------------------------------------------
 // 17. PARAMÈTRES DES GROUPES
 // ------------------------------------------------------------
@@ -1327,7 +1326,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
   }
 
   return false;
-     }
+}
 
 // ------------------------------------------------------------
 // 21. UTILISATEURS, XCOINS ET XP
@@ -1631,30 +1630,6 @@ async function answerQuiz(chatJid, userJid, answer) {
     });
 
     return {
-      success: false,
-      message: '⌛ Le temps du quiz est écoulé. Lance un nouveau Xquiz.'
-    };
-  }
-
-  if (submitted !== normalizeAnswer(quiz.answer)) {
-    return { success: false, message: '❌ Mauvaise réponse. Tu peux réessayer.' };
-  }
-
-  // Suppression conditionnelle : un seul gagnant possible.
-  const claimed = await db.execute({
-    sql: `DELETE FROM active_quizzes
-          WHERE group_jid = ? AND expires_at > ?
-          RETURNING group_jid`,
-    args: [chatJid, now]
-  });
-
-  if (!claimed.rows.length) {
-    return { success: false, message: 'Ce quiz vient déjà d’être remporté.' };
-  }
-
-  const user = await addRewards(userJid, 30, 20);
-
-  return {
     success: true,
     coins: Number(user.coins),
     xp: Number(user.xp),
@@ -1668,9 +1643,8 @@ async function answerQuiz(chatJid, userJid, answer) {
       '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
       SIGNATURE
   };
-}
-
-// ------------------------------------------------------------
+  }
+   // ------------------------------------------------------------
 // 23. IMAGES : RECHERCHE ET GÉNÉRATION
 // ------------------------------------------------------------
 
@@ -1710,7 +1684,10 @@ async function searchImage(jid, message, query) {
   if (!CONFIG.serpApiKey) {
     await sendReply(
       jid,
-      '⚠️ La recherche d’images nécessite SERPAPI_KEY dans les variables Railway.',
+      moduleMessage(
+        '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
+        "Le service Ximg n'est pas encore relié à son fournisseur externe."
+      ),
       message
     );
 
@@ -1720,7 +1697,7 @@ async function searchImage(jid, message, query) {
   if (!query || !query.trim()) {
     await sendReply(jid, 'Utilisation : Ximg Naruto, paysage, animal...', message);
     return false;
-  }
+     }
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
@@ -1787,6 +1764,7 @@ async function searchImage(jid, message, query) {
   }
 }
 
+
 async function generateImage(jid, message, prompt) {
   if (!CONFIG.cloudflareToken || !CONFIG.cloudflareAccountId) {
     await sendReply(
@@ -1806,7 +1784,7 @@ async function generateImage(jid, message, prompt) {
     );
 
     return false;
-  }
+ }
 
   await sendReply(
     jid,
@@ -1883,9 +1861,8 @@ async function multimediaNotIntegrated(jid, message, command) {
     `🎧 ${descriptions[command] || 'Cette fonction est en préparation.'}\n\nJe préfère signaler honnêtement qu’une intégration manque plutôt que prétendre qu’elle fonctionne.\n\n${SIGNATURE}`,
     message
   );
-           }
-
-// ------------------------------------------------------------
+}
+   // ------------------------------------------------------------
 // 24. ROUTEUR : ANALYSE DES COMMANDES
 // ------------------------------------------------------------
 
@@ -2031,6 +2008,9 @@ async function handleQuizCommand(jid, message, sender, command, args) {
     return true;
   }
 
+  return false;
+}
+
 async function handleAICommand(jid, message, command, args) {
   if (!['chat', 'ai', 'ask', 'anime', 'police'].includes(command)) {
     return false;
@@ -2049,7 +2029,10 @@ async function handleAICommand(jid, message, command, args) {
   if (!CONFIG.groqKey) {
     await sendReply(
       jid,
-      '⚠️ Le service IA n’est pas configuré. Vérifie GROQ_API_KEY dans Railway.',
+      moduleMessage(
+        '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
+        'Le service IA n’est pas encore relié à son fournisseur externe.'
+      ),
       message
     );
 
@@ -2064,9 +2047,9 @@ async function handleAICommand(jid, message, command, args) {
 
   if (command === 'police') {
     prompt = `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
-}
-     
-    let answer;
+  }
+
+  let answer;
 
   try {
     answer = await askGroq(prompt, jid, { useHistory: command === 'chat' });
@@ -2107,6 +2090,17 @@ async function handleAICommand(jid, message, command, args) {
 
   return true;
 }
+
+async function handleImageCommand(jid, message, args) {
+  if (!args) {
+    await sendReply(
+      jid,
+      'Utilisation :\nXimg Naruto\n\nPour créer une image :\nXimg create un dragon futuriste bleu',
+      message
+    );
+
+    return true;
+  }
 
   if (/^create\s+/i.test(args)) {
     const prompt = args.replace(/^create\s+/i, '').trim();
@@ -2551,3 +2545,4 @@ startBot().catch(error => {
 
   scheduleReconnect();
 });
+     

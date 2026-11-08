@@ -5,11 +5,29 @@
 // Créé et développé par KAY≈DEN
 // ============================================================
 
-import makeWASocket, {
+import * as Baileys from '@whiskeysockets/baileys';
+
+const makeWASocket =
+  typeof Baileys.default === 'function'
+    ? Baileys.default
+    : typeof Baileys.makeWASocket === 'function'
+      ? Baileys.makeWASocket
+      : typeof Baileys.default?.default === 'function'
+        ? Baileys.default.default
+        : null;
+
+const {
   DisconnectReason,
   useMultiFileAuthState,
   jidNormalizedUser
-} from '@whiskeysockets/baileys';
+} = Baileys;
+
+if (typeof makeWASocket !== 'function') {
+  throw new TypeError(
+    'Export makeWASocket introuvable. Exports disponibles : ' +
+    Object.keys(Baileys).join(', ')
+  );
+}
 
 import pino from 'pino';
 import { createClient } from '@libsql/client';

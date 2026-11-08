@@ -1321,8 +1321,8 @@ async function handleGroupCommand(
 
       await sendReply(
         jid,
-        'Impossible d'expulser ce membre. Vérifie les permissions WhatsApp.',
-        message)
+        "Impossible d'expulser ce membre. Vérifie les permissions WhatsApp.",
+        message
       );
     }
 

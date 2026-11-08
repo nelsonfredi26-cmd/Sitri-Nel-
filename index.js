@@ -78,7 +78,7 @@ const CONFIG = {
   ownerNumbers: readOwnerNumbers(),
   radoxKey: cleanEnv(process.env.RADOX_API_KEY),
 radoxModel: cleanEnv(process.env.RADOX_MODEL) || 'claude-sonnet-4.6',
-radoxBase: 'https://radoxai.com/v1',
+radoxBase: (cleanEnv(process.env.RADOX_BASE_URL) || 'https://radoxai.com/v1').replace(/\/+$/, ''),
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
@@ -745,8 +745,29 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. INTELLIGENCE ARTIFICIELLE — GROQ
+// 16. INTELLIGENCE ARTIFICIELLE — RADOX AI
 // ------------------------------------------------------------
+
+// Liste des modèles accessibles avec la clé Radox (si le service la propose).
+async function listRadoxModels() {
+  try {
+    const result = await axios.get(`${CONFIG.radoxBase}/models`, {
+      headers: { Authorization: `Bearer ${CONFIG.radoxKey}` },
+      timeout: 20000
+    });
+
+    return (result.data?.data || [])
+      .map(item => item.id)
+      .filter(id => id && !/embed|whisper|tts|image|moderation/i.test(id));
+  } catch (error) {
+    logger.warn(
+      { status: error?.response?.status, error: error?.message },
+      'Liste des modèles Radox indisponible.'
+    );
+
+    return [];
+  }
+}
 
 async function askRadox(prompt, jid, options = {}) {
   if (!CONFIG.radoxKey) {
@@ -780,37 +801,39 @@ async function askRadox(prompt, jid, options = {}) {
     { role: 'user', content: String(prompt).trim() }
   ];
 
-    const models = [
-    ...new Set([
-      CONFIG.radoxModel,
-      'claude-sonnet-4.6'
-    ])
-  ];
+  const tried = new Set();
+
+  const callModel = async model => {
+    tried.add(model);
+
+    return axios.post(
+      `${CONFIG.radoxBase}/chat/completions`,
+      { model, messages, temperature: 0.75, max_tokens: 1200 },
+      {
+        headers: {
+          Authorization: `Bearer ${CONFIG.radoxKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000
+      }
+    );
+  };
 
   let response = null;
   let lastError = null;
 
-  for (const model of models) {
-    try {
-            response = await axios.post(
-        `${CONFIG.radoxBase}/chat/completions`,
-        { model, messages, temperature: 0.75, max_tokens: 1200 },
-        {
-          headers: {
-                        Authorization: `Bearer ${CONFIG.radoxKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 60000
-        }
-      );
+  // 1. Modèle configuré (variable RADOX_MODEL) puis modèle par défaut.
+  const knownModels = [...new Set([CONFIG.radoxModel, 'claude-sonnet-4.6'])];
 
+  for (const model of knownModels) {
+    try {
+      response = await callModel(model);
       break;
     } catch (error) {
       lastError = error;
 
       const status = error?.response?.status;
 
-      // Modèle refusé ou retiré : on essaie le suivant.
       if (status !== 400 && status !== 404) throw error;
 
       logger.warn(
@@ -820,12 +843,35 @@ async function askRadox(prompt, jid, options = {}) {
     }
   }
 
+  // 2. Si refusé : on demande à Radox la liste de ses modèles.
+  if (!response) {
+    const available = await listRadoxModels();
+
+    logger.info({ available }, 'Modèles Radox disponibles pour cette clé.');
+
+    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
+      try {
+        response = await callModel(model);
+        CONFIG.radoxModel = model;
+
+        logger.info(`Modèle Radox utilisé : ${model}`);
+        break;
+      } catch (error) {
+        lastError = error;
+
+        const status = error?.response?.status;
+
+        if (status !== 400 && status !== 404) throw error;
+      }
+    }
+  }
+
   if (!response) throw lastError || new Error('Radox indisponible.');
 
   const answer = response.data?.choices?.[0]?.message?.content;
 
   if (!answer || !String(answer).trim()) {
-    new Error('Radox a renvoyé une réponse vide...')
+    throw new Error('Radox a renvoyé une réponse vide.');
   }
 
   const cleanAnswer = String(answer).trim();
@@ -1935,7 +1981,7 @@ function getUptimeText() {
 ◈ 𝗖𝗢𝗡𝗡𝗘𝗫𝗜𝗢𝗡
 ├ WhatsApp : ${sock ? 'Initialisé' : 'Indisponible'}
 ├ Base de données : ${USE_TURSO ? 'Turso' : 'SQLite local'}
-└ IA Groq : ${CONFIG.groqKey ? 'Configurée' : 'Non configurée'}
+└ IA Radox : ${CONFIG.radoxKey ? 'Configurée' : 'Non configurée'}
 
 ${SIGNATURE}
 `.trim();
@@ -2053,7 +2099,7 @@ async function handleAICommand(jid, message, command, args) {
     return true;
   }
 
-  if (!CONFIG.groqKey) {
+  if (!CONFIG.radoxKey) {
     await sendReply(
       jid,
       moduleMessage(
@@ -2079,13 +2125,13 @@ async function handleAICommand(jid, message, command, args) {
   let answer;
 
   try {
-    answer = await askGroq(prompt, jid, { useHistory: command === 'chat' });
+    answer = await askRadox(prompt, jid, { useHistory: command === 'chat' });
   } catch (error) {
     const status = error?.response?.status;
 
     logger.error(
       { status, data: error?.response?.data, error: error?.message },
-      'Erreur Groq.'
+      'Erreur Radox.'
     );
 
     const reasons = {

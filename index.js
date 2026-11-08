@@ -1,8 +1,7 @@
-
 /* ============================================================
-   ⌬ SITRI-NEL ULTIMATE EDITION
-   PARTIE 1/4 — CORE SYSTEM
+   ⌬ SITRI-NEL ULTIMATE EDITION — VERSION CORRIGÉE
    Créé et développé par KAY≈DEN
+   Fichier unique : index.js
    ============================================================ */
 
 // ------------------------------------------------------------
@@ -17,7 +16,6 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Compatibilité avec les différentes formes d'export Baileys.
 const makeWASocket =
   typeof Baileys.default === 'function'
     ? Baileys.default
@@ -35,7 +33,10 @@ if (typeof makeWASocket !== 'function') {
 
 const {
   DisconnectReason,
-  useMultiFileAuthState
+  useMultiFileAuthState,
+  initAuthCreds,
+  BufferJSON,
+  proto
 } = Baileys;
 
 const jidNormalizedUser =
@@ -52,10 +53,7 @@ const ROOT_DIR = path.dirname(__filename);
 
 const SESSION_DIR = path.join(ROOT_DIR, 'session');
 const IMAGE_PATH = path.join(ROOT_DIR, 'sitri-nel.png');
-const LOCAL_DATABASE_PATH = path.join(
-  ROOT_DIR,
-  'sitri-nel.db'
-);
+const LOCAL_DATABASE_PATH = path.join(ROOT_DIR, 'sitri-nel.db');
 
 fs.mkdirSync(SESSION_DIR, { recursive: true });
 
@@ -73,35 +71,21 @@ function readOwnerNumbers() {
 }
 
 const CONFIG = {
-  pairingNumber: String(
-    process.env.PAIRING_NUMBER || ''
-  ).replace(/\D/g, ''),
-
+  pairingNumber: String(process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
   ownerNumbers: readOwnerNumbers(),
-
   groqKey: process.env.GROQ_API_KEY || '',
-
-  groqModel:
-    process.env.GROQ_MODEL ||
-    'llama-3.3-70b-versatile',
-
+  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
   tursoUrl: process.env.TURSO_DATABASE_URL || '',
-
   tursoToken: process.env.TURSO_AUTH_TOKEN || '',
-
   serpApiKey: process.env.SERPAPI_KEY || '',
-
-  cloudflareToken:
-    process.env.CLOUDFLARE_API_TOKEN || '',
-
-  cloudflareAccountId:
-    process.env.CLOUDFLARE_ACCOUNT_ID || '',
-
+  cloudflareToken: process.env.CLOUDFLARE_API_TOKEN || '',
+  cloudflareAccountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
   maxImageBytes: 8 * 1024 * 1024,
-
   maxChatHistory: 16,
-
-  tagCooldown: 60
+  tagCooldown: 60,
+  // Messages plus vieux que cette durée (ms) sont ignorés
+  // (évite de rejouer d'anciennes commandes après reconnexion).
+  maxMessageAge: 2 * 60 * 1000
 };
 
 // ------------------------------------------------------------
@@ -110,45 +94,35 @@ const CONFIG = {
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
-
   timestamp: pino.stdTimeFunctions.isoTime,
-
   redact: {
-    paths: [
-      'password',
-      'token',
-      'authorization',
-      'api_key',
-      'creds',
-      'auth'
-    ],
+    paths: ['password', 'token', 'authorization', 'api_key', 'creds', 'auth'],
     censor: '[MASQUÉ]'
   }
 });
+
+// Logger séparé et silencieux pour Baileys (évite les logs géants).
+const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
 
 // ------------------------------------------------------------
 // 05. ÉTAT DU BOT
 // ------------------------------------------------------------
 
 let sock = null;
-
 let botJid = '';
+let botLid = '';
 let botNumber = '';
-
 let connectionStatus = 'Non connecté';
-
 let isShuttingDown = false;
 
 const PROCESS_STARTED_AT = Date.now();
-
 const processedMessages = new Set();
-
 const activeRequests = new Set();
 
 const SIGNATURE = '𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
 
 // ------------------------------------------------------------
-// 06. IDENTITÉ OFFICIELLE DE SITRI-NEL
+// 06. IDENTITÉ DE SITRI-NEL
 // ------------------------------------------------------------
 
 const BOT_IDENTITY = `
@@ -189,86 +163,58 @@ La signature peut être ajoutée lorsqu'elle est pertinente.
 // 07. BASE DE DONNÉES TURSO
 // ------------------------------------------------------------
 
-// Turso est prioritaire.
-// Le fichier local sert uniquement de solution de secours.
-// Attention : le stockage local Railway peut être éphémère.
-
-const USE_TURSO = Boolean(
-  CONFIG.tursoUrl && CONFIG.tursoToken
-);
+const USE_TURSO = Boolean(CONFIG.tursoUrl && CONFIG.tursoToken);
 
 const db = createClient(
   USE_TURSO
-    ? {
-        url: CONFIG.tursoUrl,
-        authToken: CONFIG.tursoToken
-      }
-    : {
-        url: `file:${LOCAL_DATABASE_PATH}`
-      }
+    ? { url: CONFIG.tursoUrl, authToken: CONFIG.tursoToken }
+    : { url: `file:${LOCAL_DATABASE_PATH}` }
 );
 
 if (!USE_TURSO) {
   logger.warn(
-    'TURSO non configuré : utilisation temporaire de SQLite local. Les données peuvent être perdues sur Railway.'
+    'TURSO non configuré : SQLite local temporaire. Les données et la session seront perdues à chaque redéploiement Railway.'
   );
 }
 
-// ------------------------------------------------------------
-// 08. INITIALISATION ET STRUCTURE DE LA BASE
-// ------------------------------------------------------------
-
 async function initDatabase() {
   const statements = [
-    `
-      CREATE TABLE IF NOT EXISTS users (
+    `CREATE TABLE IF NOT EXISTS users (
         jid TEXT PRIMARY KEY,
         coins INTEGER NOT NULL DEFAULT 0,
         xp INTEGER NOT NULL DEFAULT 0,
         last_daily INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
-      )
-    `,
-
-    `
-      CREATE TABLE IF NOT EXISTS group_settings (
+      )`,
+    `CREATE TABLE IF NOT EXISTS group_settings (
         group_jid TEXT PRIMARY KEY,
         only_admin INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0
-      )
-    `,
-
-    `
-      CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
+      )`,
+    `CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
         group_jid TEXT PRIMARY KEY,
         last_tag INTEGER NOT NULL DEFAULT 0
-      )
-    `,
-
-    `
-      CREATE TABLE IF NOT EXISTS chat_history (
+      )`,
+    `CREATE TABLE IF NOT EXISTS chat_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         jid TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         created_at INTEGER NOT NULL
-      )
-    `,
-
-    `
-      CREATE INDEX IF NOT EXISTS idx_chat_history_jid
-      ON chat_history(jid, id)
-    `,
-
-    `
-      CREATE TABLE IF NOT EXISTS active_quizzes (
+      )`,
+    `CREATE INDEX IF NOT EXISTS idx_chat_history_jid
+      ON chat_history(jid, id)`,
+    `CREATE TABLE IF NOT EXISTS active_quizzes (
         group_jid TEXT PRIMARY KEY,
         question TEXT NOT NULL,
         answer TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
-      )
-    `
+      )`,
+    `CREATE TABLE IF NOT EXISTS auth_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`
   ];
 
   for (const sql of statements) {
@@ -279,14 +225,117 @@ async function initDatabase() {
 }
 
 // ------------------------------------------------------------
+// 08. SESSION WHATSAPP STOCKÉE DANS TURSO
+// ------------------------------------------------------------
+// La session survit ainsi aux redéploiements Railway :
+// plus besoin de relier le bot à chaque fois.
+
+async function useDatabaseAuthState() {
+  const readData = async key => {
+    const result = await db.execute({
+      sql: 'SELECT value FROM auth_state WHERE key = ?',
+      args: [key]
+    });
+
+    if (!result.rows.length) return null;
+
+    try {
+      return JSON.parse(String(result.rows[0].value), BufferJSON.reviver);
+    } catch {
+      return null;
+    }
+  };
+
+  const writeData = (key, value) =>
+    db.execute({
+      sql: `INSERT INTO auth_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [key, JSON.stringify(value, BufferJSON.replacer)]
+    });
+
+  const creds = (await readData('creds')) || initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+
+          await Promise.all(
+            ids.map(async id => {
+              let value = await readData(`${type}-${id}`);
+
+              if (type === 'app-state-sync-key' && value) {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+              }
+
+              data[id] = value;
+            })
+          );
+
+          return data;
+        },
+
+        set: async data => {
+          const statements = [];
+
+          for (const category of Object.keys(data)) {
+            for (const id of Object.keys(data[category])) {
+              const value = data[category][id];
+              const key = `${category}-${id}`;
+
+              statements.push(
+                value
+                  ? {
+                      sql: `INSERT INTO auth_state (key, value) VALUES (?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+                      args: [key, JSON.stringify(value, BufferJSON.replacer)]
+                    }
+                  : {
+                      sql: 'DELETE FROM auth_state WHERE key = ?',
+                      args: [key]
+                    }
+              );
+            }
+          }
+
+          if (statements.length) {
+            await db.batch(statements, 'write');
+          }
+        }
+      }
+    },
+
+    saveCreds: () => writeData('creds', creds)
+  };
+}
+
+async function clearAuthState() {
+  try {
+    if (USE_TURSO) {
+      await db.execute('DELETE FROM auth_state');
+    }
+
+    for (const file of fs.readdirSync(SESSION_DIR)) {
+      fs.rmSync(path.join(SESSION_DIR, file), {
+        recursive: true,
+        force: true
+      });
+    }
+
+    logger.warn('Ancienne session supprimée. Un nouveau jumelage sera demandé.');
+  } catch (error) {
+    logger.error({ error: error?.message }, 'Impossible de nettoyer la session.');
+  }
+}
+
+// ------------------------------------------------------------
 // 09. NORMALISATION DES NUMÉROS ET JID
 // ------------------------------------------------------------
 
 function normalizeNumber(value = '') {
-  return String(value)
-    .split('@')[0]
-    .split(':')[0]
-    .replace(/\D/g, '');
+  return String(value).split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
 function normalizeJid(jid = '') {
@@ -307,6 +356,17 @@ function isGroupJid(jid = '') {
   return String(jid).endsWith('@g.us');
 }
 
+// Préfère l'identifiant téléphone (@s.whatsapp.net) à l'identifiant LID.
+function pickPhoneJid(...candidates) {
+  const list = candidates.filter(Boolean).map(String);
+
+  return (
+    list.find(item => item.endsWith('@s.whatsapp.net')) ||
+    list[0] ||
+    ''
+  );
+}
+
 // ------------------------------------------------------------
 // 10. IDENTIFICATION DU PROPRIÉTAIRE
 // ------------------------------------------------------------
@@ -316,80 +376,66 @@ function isOwner(jid = '') {
 
   if (!normalized) return false;
 
-  // Le compte WhatsApp connecté est reconnu.
-  if (
-    botJid &&
-    normalized === normalizeJid(botJid)
-  ) {
-    return true;
-  }
+  if (botJid && normalized === normalizeJid(botJid)) return true;
+  if (botLid && normalized === normalizeJid(botLid)) return true;
 
-  const number = getNumber(normalized);
-
-  return CONFIG.ownerNumbers.includes(number);
+  return CONFIG.ownerNumbers.includes(getNumber(normalized));
 }
 
 function getMessageSender(message) {
   const key = message?.key || {};
 
-  // Les commandes envoyées depuis le compte connecté
-  // appartiennent au propriétaire.
   if (key.fromMe) {
     return normalizeJid(
-      botJid ||
-      key.participant ||
-      key.remoteJid ||
-      ''
+      botJid || key.participant || key.remoteJid || ''
     );
   }
 
-  return normalizeJid(
-    key.participant ||
-    key.remoteJid ||
-    ''
-  );
+  const isGroup = isGroupJid(key.remoteJid);
+
+  const raw = isGroup
+    ? pickPhoneJid(key.participantPn, key.participantAlt, key.participant)
+    : pickPhoneJid(key.senderPn, key.remoteJidAlt, key.remoteJid);
+
+  return normalizeJid(raw);
 }
 
 function isOwnerMessage(message) {
   if (!message?.key?.fromMe) return false;
 
-  return isOwner(
-    botJid || getMessageSender(message)
-  );
+  return isOwner(botJid || getMessageSender(message));
 }
 
 // ------------------------------------------------------------
 // 11. EXTRACTION DU CONTENU DES MESSAGES
 // ------------------------------------------------------------
 
-function getMessageContent(message) {
-  return message?.message || null;
-}
+function unwrapContent(message) {
+  let content = message?.message || null;
 
-function extractText(message) {
-  let content = getMessageContent(message);
+  if (!content) return null;
 
-  if (!content) return '';
-
-  // Déballage des messages enveloppés.
   for (let i = 0; i < 5; i++) {
     if (content.ephemeralMessage?.message) {
       content = content.ephemeralMessage.message;
-      continue;
-    }
-
-    if (content.viewOnceMessage?.message) {
+    } else if (content.viewOnceMessage?.message) {
       content = content.viewOnceMessage.message;
-      continue;
-    }
-
-    if (content.viewOnceMessageV2?.message) {
+    } else if (content.viewOnceMessageV2?.message) {
       content = content.viewOnceMessageV2.message;
-      continue;
+    } else if (content.documentWithCaptionMessage?.message) {
+      content = content.documentWithCaptionMessage.message;
+    } else {
+      break;
     }
-
-    break;
   }
+
+  return content;
+}
+
+function extractText(message) {
+  const content = unwrapContent(message);
+
+  if (!content) return '';
 
   return (
     content.conversation ||
@@ -404,28 +450,10 @@ function extractText(message) {
   ).trim();
 }
 
-// ------------------------------------------------------------
-// 12. INFORMATIONS SUR LES MESSAGES CITÉS
-// ------------------------------------------------------------
-
 function getQuotedMessage(message) {
-  let content = getMessageContent(message);
+  const content = unwrapContent(message);
 
   if (!content) return null;
-
-  for (let i = 0; i < 5; i++) {
-    if (content.ephemeralMessage?.message) {
-      content = content.ephemeralMessage.message;
-      continue;
-    }
-
-    if (content.viewOnceMessage?.message) {
-      content = content.viewOnceMessage.message;
-      continue;
-    }
-
-    break;
-  }
 
   const messageTypes = [
     'extendedTextMessage',
@@ -439,16 +467,14 @@ function getQuotedMessage(message) {
   for (const type of messageTypes) {
     const context = content[type]?.contextInfo;
 
-    if (context?.stanzaId) {
-      return context;
-    }
+    if (context?.stanzaId) return context;
   }
 
   return null;
 }
 
 // ------------------------------------------------------------
-// 13. PROTECTION CONTRE LES DOUBLONS
+// 12. PROTECTION CONTRE LES DOUBLONS
 // ------------------------------------------------------------
 
 function hasProcessedMessage(message) {
@@ -456,66 +482,23 @@ function hasProcessedMessage(message) {
 
   if (!id) return false;
 
-  if (processedMessages.has(id)) {
-    return true;
-  }
+  if (processedMessages.has(id)) return true;
 
   processedMessages.add(id);
 
   if (processedMessages.size > 5000) {
-    const oldest =
-      processedMessages.values().next().value;
-
-    processedMessages.delete(oldest);
+    processedMessages.delete(processedMessages.values().next().value);
   }
 
   return false;
 }
 
 // ------------------------------------------------------------
-// 14. FORMATAGE FUTURISTE
-// ------------------------------------------------------------
-
-function toBoldUnicode(value = '') {
-  const normal = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const boldUpper = '𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭';
-
-  const lower = 'abcdefghijklmnopqrstuvwxyz';
-  const boldLower = '𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇';
-
-  const digits = '0123456789';
-  const boldDigits = '𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵';
-
-  return Array.from(String(value), char => {
-    let index = normal.indexOf(char);
-
-    if (index !== -1) return boldUpper[index];
-
-    index = lower.indexOf(char);
-
-    if (index !== -1) return boldLower[index];
-
-    index = digits.indexOf(char);
-
-    if (index !== -1) return boldDigits[index];
-
-    return char;
-  }).join('');
-}
-
-function futuristic(value = '') {
-  return toBoldUnicode(value);
-}
-
-// ------------------------------------------------------------
-// 15. FORMATAGE DU TEMPS
+// 13. FORMATAGE
 // ------------------------------------------------------------
 
 function formatDuration(totalSeconds = 0) {
-  let seconds = Math.max(
-    0,
-    Math.floor(Number(totalSeconds) || 0)
-  );
+  let seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
 
   const days = Math.floor(seconds / 86400);
   seconds %= 86400;
@@ -531,58 +514,30 @@ function formatDuration(totalSeconds = 0) {
   if (days) parts.push(`${days} j`);
   if (hours) parts.push(`${hours} h`);
   if (minutes) parts.push(`${minutes} min`);
-
-  if (seconds || parts.length === 0) {
-    parts.push(`${seconds} s`);
-  }
+  if (seconds || parts.length === 0) parts.push(`${seconds} s`);
 
   return parts.join(' ');
 }
 
 // ------------------------------------------------------------
-// 16. ENVOI DE MESSAGES
+// 14. ENVOI DE MESSAGES
 // ------------------------------------------------------------
 
 async function sendText(jid, text, options = {}) {
-  if (!sock) {
-    throw new Error('Socket WhatsApp indisponible.');
-  }
+  if (!sock) throw new Error('Socket WhatsApp indisponible.');
+  if (!jid) throw new Error('Destinataire manquant.');
 
-  if (!jid) {
-    throw new Error('Destinataire manquant.');
-  }
-
-  return sock.sendMessage(
-    jid,
-    {
-      text: String(text)
-    },
-    options
-  );
+  return sock.sendMessage(jid, { text: String(text) }, options);
 }
 
 async function sendReply(jid, text, message) {
-  if (!sock) {
-    throw new Error('Socket WhatsApp indisponible.');
-  }
+  if (!message) return sendText(jid, text);
 
-  if (!message) {
-    return sendText(jid, text);
-  }
-
-  return sendText(jid, text, {
-    quoted: message
-  });
+  return sendText(jid, text, { quoted: message });
 }
 
-// ------------------------------------------------------------
-// 17. IMAGE OFFICIELLE DE SITRI-NEL
-// ------------------------------------------------------------
-
 async function sendOfficialImage(jid, message = null) {
-  if (!sock) {
-    throw new Error('Socket WhatsApp indisponible.');
-  }
+  if (!sock) throw new Error('Socket WhatsApp indisponible.');
 
   if (!fs.existsSync(IMAGE_PATH)) {
     await sendReply(
@@ -594,43 +549,23 @@ async function sendOfficialImage(jid, message = null) {
     return false;
   }
 
-  const imageBuffer = await fs.promises.readFile(
-    IMAGE_PATH
-  );
+  const imageBuffer = await fs.promises.readFile(IMAGE_PATH);
 
   if (!imageBuffer.length) {
     throw new Error('Le fichier sitri-nel.png est vide.');
   }
 
-  const options = message
-    ? { quoted: message }
-    : {};
-
   await sock.sendMessage(
     jid,
-    {
-      image: imageBuffer,
-      mimetype: 'image/png'
-    },
-    options
+    { image: imageBuffer, mimetype: 'image/png' },
+    message ? { quoted: message } : {}
   );
 
   return true;
 }
 
-// ============================================================
-// FIN PARTIE 1/4
-// NE PAS DÉPLOYER : LES PARTIES 2, 3 ET 4 SONT NÉCESSAIRES.
-// ============================================================
-
-
-/* ============================================================
-   ⌬ SITRI-NEL ULTIMATE EDITION
-   PARTIE 2/4 — AI, MENU ET GESTION DES GROUPES
-   ============================================================ */
-
 // ------------------------------------------------------------
-// 18. MENU OFFICIEL
+// 15. MENU ET PRÉSENTATION
 // ------------------------------------------------------------
 
 function getMenu() {
@@ -692,10 +627,6 @@ ${SIGNATURE}
 `;
 }
 
-// ------------------------------------------------------------
-// 19. PRÉSENTATION OFFICIELLE
-// ------------------------------------------------------------
-
 function getInfo() {
   return `
 ╭━━〔 🧬 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 〕━━╮
@@ -732,14 +663,12 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 20. INTELLIGENCE ARTIFICIELLE — GROQ
+// 16. INTELLIGENCE ARTIFICIELLE — GROQ
 // ------------------------------------------------------------
 
 async function askGroq(prompt, jid, options = {}) {
   if (!CONFIG.groqKey) {
-    throw new Error(
-      'GROQ_API_KEY absent des variables Railway.'
-    );
+    throw new Error('GROQ_API_KEY absent des variables Railway.');
   }
 
   if (!prompt || !String(prompt).trim()) {
@@ -752,34 +681,21 @@ async function askGroq(prompt, jid, options = {}) {
 
   if (useHistory) {
     const result = await db.execute({
-      sql: `
-        SELECT role, content
-        FROM chat_history
-        WHERE jid = ?
-        ORDER BY id DESC
-        LIMIT ?
-      `,
+      sql: `SELECT role, content FROM chat_history
+            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
       args: [jid, CONFIG.maxChatHistory]
     });
 
-    history = result.rows
-      .reverse()
-      .map(item => ({
-        role: item.role,
-        content: item.content
-      }));
+    history = result.rows.reverse().map(item => ({
+      role: item.role,
+      content: item.content
+    }));
   }
 
   const messages = [
-    {
-      role: 'system',
-      content: BOT_IDENTITY
-    },
+    { role: 'system', content: BOT_IDENTITY },
     ...history,
-    {
-      role: 'user',
-      content: String(prompt).trim()
-    }
+    { role: 'user', content: String(prompt).trim() }
   ];
 
   const response = await axios.post(
@@ -799,13 +715,10 @@ async function askGroq(prompt, jid, options = {}) {
     }
   );
 
-  const answer =
-    response.data?.choices?.[0]?.message?.content;
+  const answer = response.data?.choices?.[0]?.message?.content;
 
   if (!answer || !String(answer).trim()) {
-    throw new Error(
-      'Groq a renvoyé une réponse vide.'
-    );
+    throw new Error('Groq a renvoyé une réponse vide.');
   }
 
   const cleanAnswer = String(answer).trim();
@@ -814,36 +727,24 @@ async function askGroq(prompt, jid, options = {}) {
     const now = Date.now();
 
     await db.execute({
-      sql: `
-        INSERT INTO chat_history
-          (jid, role, content, created_at)
-        VALUES (?, 'user', ?, ?)
-      `,
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'user', ?, ?)`,
       args: [jid, String(prompt).trim(), now]
     });
 
     await db.execute({
-      sql: `
-        INSERT INTO chat_history
-          (jid, role, content, created_at)
-        VALUES (?, 'assistant', ?, ?)
-      `,
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'assistant', ?, ?)`,
       args: [jid, cleanAnswer, now + 1]
     });
 
-    // Garder uniquement les 32 derniers messages.
     await db.execute({
-      sql: `
-        DELETE FROM chat_history
-        WHERE jid = ?
-          AND id NOT IN (
-            SELECT id
-            FROM chat_history
+      sql: `DELETE FROM chat_history
             WHERE jid = ?
-            ORDER BY id DESC
-            LIMIT 32
-          )
-      `,
+              AND id NOT IN (
+                SELECT id FROM chat_history
+                WHERE jid = ? ORDER BY id DESC LIMIT 32
+              )`,
       args: [jid, jid]
     });
   }
@@ -852,60 +753,42 @@ async function askGroq(prompt, jid, options = {}) {
 }
 
 // ------------------------------------------------------------
-// 21. PARAMÈTRES DES GROUPES
+// 17. PARAMÈTRES DES GROUPES
 // ------------------------------------------------------------
 
 async function getGroupSettings(groupJid) {
   const result = await db.execute({
-    sql: `
-      SELECT group_jid, only_admin
-      FROM group_settings
-      WHERE group_jid = ?
-    `,
+    sql: `SELECT group_jid, only_admin FROM group_settings
+          WHERE group_jid = ?`,
     args: [groupJid]
   });
 
   if (!result.rows.length) {
-    return {
-      group_jid: groupJid,
-      only_admin: 0
-    };
+    return { group_jid: groupJid, only_admin: 0 };
   }
 
   return result.rows[0];
 }
 
 async function setOnlyAdmin(groupJid, enabled) {
-  const now = Date.now();
-
   await db.execute({
-    sql: `
-      INSERT INTO group_settings
-        (group_jid, only_admin, updated_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(group_jid)
-      DO UPDATE SET
-        only_admin = excluded.only_admin,
-        updated_at = excluded.updated_at
-    `,
-    args: [
-      groupJid,
-      enabled ? 1 : 0,
-      now
-    ]
+    sql: `INSERT INTO group_settings (group_jid, only_admin, updated_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(group_jid) DO UPDATE SET
+            only_admin = excluded.only_admin,
+            updated_at = excluded.updated_at`,
+    args: [groupJid, enabled ? 1 : 0, Date.now()]
   });
 
   return true;
 }
 
 // ------------------------------------------------------------
-// 22. MÉTADONNÉES ET PERMISSIONS WHATSAPP
+// 18. MÉTADONNÉES ET PERMISSIONS WHATSAPP
 // ------------------------------------------------------------
 
 async function getGroupMetadata(groupJid) {
-  if (!sock) {
-    throw new Error('Connexion WhatsApp indisponible.');
-  }
+  if (!sock) throw new Error('Connexion WhatsApp indisponible.');
 
   return sock.groupMetadata(groupJid);
 }
@@ -922,9 +805,7 @@ function sameParticipant(a, b) {
   const secondNumber = getNumber(second);
 
   return Boolean(
-    firstNumber &&
-    secondNumber &&
-    firstNumber === secondNumber
+    firstNumber && secondNumber && firstNumber === secondNumber
   );
 }
 
@@ -932,41 +813,34 @@ function isParticipantAdmin(metadata, jid) {
   const participants = metadata?.participants || [];
 
   return participants.some(item => {
-    const participantJid = item.id || item.jid;
+    if (!item.admin) return false;
 
-    return (
-      sameParticipant(participantJid, jid) &&
-      Boolean(item.admin)
+    return [item.id, item.jid, item.phoneNumber, item.lid].some(candidate =>
+      sameParticipant(candidate, jid)
     );
   });
 }
 
-async function isGroupAdmin(groupJid, sender) {
-  const metadata = await getGroupMetadata(groupJid);
-
-  return isParticipantAdmin(metadata, sender);
-}
-
 function isBotGroupAdmin(metadata) {
-  return isParticipantAdmin(metadata, botJid);
+  return (
+    isParticipantAdmin(metadata, botJid) ||
+    (botLid ? isParticipantAdmin(metadata, botLid) : false)
+  );
 }
 
-// ------------------------------------------------------------
-// 23. AUTORISATIONS : PROPRIÉTAIRE PRIORITAIRE
-// ------------------------------------------------------------
+function isBotParticipant(jid) {
+  return (
+    sameParticipant(jid, botJid) ||
+    (botLid ? sameParticipant(jid, botLid) : false)
+  );
+}
 
-async function canUseOrdinaryGroupCommand(
-  groupJid,
-  sender
-) {
-  // Le propriétaire passe toujours en premier.
+async function canUseOrdinaryGroupCommand(groupJid, sender) {
   if (isOwner(sender)) return true;
 
   const settings = await getGroupSettings(groupJid);
 
-  if (!Number(settings.only_admin)) {
-    return true;
-  }
+  if (!Number(settings.only_admin)) return true;
 
   const metadata = await getGroupMetadata(groupJid);
 
@@ -974,84 +848,57 @@ async function canUseOrdinaryGroupCommand(
 }
 
 // ------------------------------------------------------------
-// 24. DÉLAI ANTI-SPAM PARTAGÉ POUR XTAG
+// 19. DÉLAI ANTI-SPAM PARTAGÉ POUR XTAG
 // ------------------------------------------------------------
 
 async function acquireTagCooldown(groupJid) {
   const now = Date.now();
-
   const cooldownMs = CONFIG.tagCooldown * 1000;
 
-  // Mise à jour atomique pour empêcher deux membres
-  // de contourner simultanément le délai.
   const result = await db.execute({
-    sql: `
-      INSERT INTO group_tag_cooldowns
-        (group_jid, last_tag)
-      VALUES (?, ?)
-
-      ON CONFLICT(group_jid)
-      DO UPDATE SET
-        last_tag = excluded.last_tag
-
-      WHERE group_tag_cooldowns.last_tag <= ?
-
-      RETURNING last_tag
-    `,
-    args: [
-      groupJid,
-      now,
-      now - cooldownMs
-    ]
+    sql: `INSERT INTO group_tag_cooldowns (group_jid, last_tag)
+          VALUES (?, ?)
+          ON CONFLICT(group_jid) DO UPDATE SET
+            last_tag = excluded.last_tag
+          WHERE group_tag_cooldowns.last_tag <= ?
+          RETURNING last_tag`,
+    args: [groupJid, now, now - cooldownMs]
   });
 
   if (result.rows.length) {
-    return {
-      allowed: true,
-      remaining: 0
-    };
+    return { allowed: true, remaining: 0 };
   }
 
   const previous = await db.execute({
-    sql: `
-      SELECT last_tag
-      FROM group_tag_cooldowns
-      WHERE group_jid = ?
-    `,
+    sql: `SELECT last_tag FROM group_tag_cooldowns WHERE group_jid = ?`,
     args: [groupJid]
   });
 
-  const lastTag = Number(
-    previous.rows[0]?.last_tag || 0
-  );
-
-  const remaining = Math.max(
-    0,
-    Math.ceil(
-      (cooldownMs - (now - lastTag)) / 1000
-    )
-  );
+  const lastTag = Number(previous.rows[0]?.last_tag || 0);
 
   return {
     allowed: false,
-    remaining
+    remaining: Math.max(
+      0,
+      Math.ceil((cooldownMs - (now - lastTag)) / 1000)
+    )
   };
 }
 
 // ------------------------------------------------------------
-// 25. GESTION DES COMMANDES DE GROUPE
+// 20. COMMANDES DE GROUPE
 // ------------------------------------------------------------
 
-async function handleGroupCommand(
-  jid,
-  message,
-  sender,
-  command,
-  args
-) {
-  if (!isGroupJid(jid)) {
-    return false;
-  }
+async function handleGroupCommand(jid, message, sender, command, args) {
+  if (!isGroupJid(jid)) return false;
+
+  const groupCommands = [
+    'onlyadmin', 'xonlyadmin', 'tag', 'tagall',
+    'kick', 'add', 'annonce', 'clear'
+  ];
+
+  // Évite des appels WhatsApp inutiles pour les autres commandes.
+  if (!groupCommands.includes(command)) return false;
 
   const owner = isOwner(sender);
 
@@ -1060,10 +907,7 @@ async function handleGroupCommand(
   try {
     metadata = await getGroupMetadata(jid);
   } catch (error) {
-    logger.error(
-      { err: error },
-      'Impossible de récupérer les informations du groupe.'
-    );
+    logger.error({ err: error }, 'Impossible de récupérer les informations du groupe.');
 
     await sendReply(
       jid,
@@ -1074,16 +918,12 @@ async function handleGroupCommand(
     return true;
   }
 
-  const senderIsAdmin =
-    owner || isParticipantAdmin(metadata, sender);
-
+  const senderIsAdmin = owner || isParticipantAdmin(metadata, sender);
   const botIsAdmin = isBotGroupAdmin(metadata);
 
-  // ----------------------------------------------------------
-  // XONLYADMIN ON / OFF
-  // ----------------------------------------------------------
+  // ---------------- XONLYADMIN ----------------
 
-  if (command === 'xonlyadmin') {
+  if (command === 'onlyadmin') {
     if (!senderIsAdmin) {
       await sendReply(
         jid,
@@ -1094,17 +934,10 @@ async function handleGroupCommand(
       return true;
     }
 
-    const value = String(args || '')
-      .trim()
-      .toLowerCase();
+    const value = String(args || '').trim().toLowerCase();
 
     if (!['on', 'off'].includes(value)) {
-      await sendReply(
-        jid,
-        'Utilisation : Xonlyadmin on ou Xonlyadmin off',
-        message
-      );
-
+      await sendReply(jid, 'Utilisation : Xonlyadmin on ou Xonlyadmin off', message);
       return true;
     }
 
@@ -1123,15 +956,9 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // XTAG / XTAGALL
-  // Ces deux commandes restent accessibles à tous.
-  // ----------------------------------------------------------
+  // ---------------- XTAG / XTAGALL ----------------
 
-  if (
-    command === 'xtag' ||
-    command === 'xtagall'
-  ) {
+  if (command === 'tag' || command === 'tagall') {
     const quoted = getQuotedMessage(message);
 
     if (!quoted?.stanzaId) {
@@ -1144,22 +971,13 @@ async function handleGroupCommand(
       return true;
     }
 
-    const participants = metadata.participants || [];
-
-    const mentions = participants
+    const mentions = (metadata.participants || [])
       .map(item => item.id || item.jid)
       .filter(Boolean)
-      .filter(participant =>
-        !sameParticipant(participant, botJid)
-      );
+      .filter(participant => !isBotParticipant(participant));
 
     if (!mentions.length) {
-      await sendReply(
-        jid,
-        'Aucun membre à mentionner.',
-        message
-      );
-
+      await sendReply(jid, 'Aucun membre à mentionner.', message);
       return true;
     }
 
@@ -1197,10 +1015,7 @@ async function handleGroupCommand(
         { quoted: message }
       );
     } catch (error) {
-      logger.error(
-        { err: error },
-        'Échec de la mention collective.'
-      );
+      logger.error({ err: error }, 'Échec de la mention collective.');
 
       await sendReply(
         jid,
@@ -1212,16 +1027,11 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // MODE ADMINISTRATEUR POUR LES AUTRES COMMANDES
-  // ----------------------------------------------------------
+  // ---------------- COMMANDES SENSIBLES ----------------
 
   const settings = await getGroupSettings(jid);
 
-  if (
-    Number(settings.only_admin) &&
-    !senderIsAdmin
-  ) {
+  if (Number(settings.only_admin) && !senderIsAdmin) {
     await sendReply(
       jid,
       '🔒 Cette commande est réservée aux administrateurs du groupe.',
@@ -1231,21 +1041,7 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // COMMANDES SENSIBLES
-  // ----------------------------------------------------------
-
-  const adminCommands = [
-    'xkick',
-    'xadd',
-    'xannonce',
-    'xclear'
-  ];
-
-  if (
-    adminCommands.includes(command) &&
-    !senderIsAdmin
-  ) {
+  if (!senderIsAdmin) {
     await sendReply(
       jid,
       '⛔ Autorisation refusée. Cette commande est réservée aux administrateurs et au propriétaire.',
@@ -1255,10 +1051,7 @@ async function handleGroupCommand(
     return true;
   }
 
-  if (
-    adminCommands.includes(command) &&
-    !botIsAdmin
-  ) {
+  if (!botIsAdmin) {
     await sendReply(
       jid,
       '⚠️ Sitri-Nel doit être administratrice du groupe pour effectuer cette action.',
@@ -1268,13 +1061,10 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // XKICK — EXPULSER L'AUTEUR DU MESSAGE CITÉ
-  // ----------------------------------------------------------
+  // ---------------- XKICK ----------------
 
-  if (command === 'xkick') {
+  if (command === 'kick') {
     const quoted = getQuotedMessage(message);
-
     const target = quoted?.participant;
 
     if (!target) {
@@ -1288,7 +1078,7 @@ async function handleGroupCommand(
     }
 
     if (
-      sameParticipant(target, botJid) ||
+      isBotParticipant(target) ||
       isOwner(target) ||
       isParticipantAdmin(metadata, target)
     ) {
@@ -1302,11 +1092,7 @@ async function handleGroupCommand(
     }
 
     try {
-      await sock.groupParticipantsUpdate(
-        jid,
-        [target],
-        'remove'
-      );
+      await sock.groupParticipantsUpdate(jid, [target], 'remove');
 
       await sendReply(
         jid,
@@ -1314,10 +1100,7 @@ async function handleGroupCommand(
         message
       );
     } catch (error) {
-      logger.error(
-        { err: error },
-        'Erreur Xkick'
-      );
+      logger.error({ err: error }, 'Erreur Xkick');
 
       await sendReply(
         jid,
@@ -1329,44 +1112,27 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // XADD — TENTER D'AJOUTER UN MEMBRE
-  // ----------------------------------------------------------
+  // ---------------- XADD ----------------
 
-  if (command === 'xadd') {
+  if (command === 'add') {
     const number = normalizeNumber(args);
 
-    if (
-      !number ||
-      number.length < 8 ||
-      number.length > 15
-    ) {
-      await sendReply(
-        jid,
-        'Utilisation : Xadd 229XXXXXXXXXX',
-        message
-      );
-
+    if (!number || number.length < 8 || number.length > 15) {
+      await sendReply(jid, 'Utilisation : Xadd 229XXXXXXXXXX', message);
       return true;
     }
-
-    const targetJid = `${number}@s.whatsapp.net`;
 
     try {
       const result = await sock.groupParticipantsUpdate(
         jid,
-        [targetJid],
+        [`${number}@s.whatsapp.net`],
         'add'
       );
 
       const status = result?.[0]?.status;
 
-      if (status === '200') {
-        await sendReply(
-          jid,
-          `✅ Demande d'ajout envoyée pour ${number}.`,
-          message
-        );
+      if (String(status) === '200') {
+        await sendReply(jid, `✅ Demande d'ajout envoyée pour ${number}.`, message);
       } else {
         await sendReply(
           jid,
@@ -1375,10 +1141,7 @@ async function handleGroupCommand(
         );
       }
     } catch (error) {
-      logger.warn(
-        { err: error },
-        'Échec de Xadd'
-      );
+      logger.warn({ err: error }, 'Échec de Xadd');
 
       await sendReply(
         jid,
@@ -1390,20 +1153,13 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // XANNONCE — ANNONCE DU GROUPE
-  // ----------------------------------------------------------
+  // ---------------- XANNONCE ----------------
 
-  if (command === 'xannonce') {
+  if (command === 'annonce') {
     const announcement = String(args || '').trim();
 
     if (!announcement) {
-      await sendReply(
-        jid,
-        'Utilisation : Xannonce Votre annonce ici',
-        message
-      );
-
+      await sendReply(jid, 'Utilisation : Xannonce Votre annonce ici', message);
       return true;
     }
 
@@ -1411,9 +1167,7 @@ async function handleGroupCommand(
       jid,
       {
         text:
-          `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n` +
-          `${announcement}\n\n` +
-          `${SIGNATURE}`
+          `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n${announcement}\n\n${SIGNATURE}`
       },
       { quoted: message }
     );
@@ -1421,11 +1175,9 @@ async function handleGroupCommand(
     return true;
   }
 
-  // ----------------------------------------------------------
-  // XCLEAR — SUPPRESSION LIMITÉE AUX MESSAGES DU BOT
-  // ----------------------------------------------------------
+  // ---------------- XCLEAR ----------------
 
-  if (command === 'xclear') {
+  if (command === 'clear') {
     const quoted = getQuotedMessage(message);
 
     if (!quoted?.stanzaId) {
@@ -1438,7 +1190,8 @@ async function handleGroupCommand(
       return true;
     }
 
-    if (!quoted.fromMe) {
+    // contextInfo n'a pas de champ fromMe : on compare l'auteur au bot.
+    if (!isBotParticipant(quoted.participant)) {
       await sendReply(
         jid,
         'Pour des raisons de permissions WhatsApp, Xclear ne supprime ici que les messages envoyés par Sitri-Nel.',
@@ -1449,68 +1202,37 @@ async function handleGroupCommand(
     }
 
     try {
-      await sock.sendMessage(
-        jid,
-        {
-          delete: {
-            remoteJid: jid,
-            fromMe: true,
-            id: quoted.stanzaId
-          }
+      await sock.sendMessage(jid, {
+        delete: {
+          remoteJid: jid,
+          fromMe: true,
+          id: quoted.stanzaId
         }
-      );
+      });
 
-      await sendReply(
-        jid,
-        '🧹 Message de Sitri-Nel supprimé.',
-        message
-      );
+      await sendReply(jid, '🧹 Message de Sitri-Nel supprimé.', message);
     } catch (error) {
-      logger.error(
-        { err: error },
-        'Erreur Xclear'
-      );
+      logger.error({ err: error }, 'Erreur Xclear');
 
-      await sendReply(
-        jid,
-        'Impossible de supprimer ce message.',
-        message
-      );
+      await sendReply(jid, 'Impossible de supprimer ce message.', message);
     }
 
     return true;
   }
 
   return false;
-}
-
-// ============================================================
-// FIN PARTIE 2/4
-// LA PARTIE 3 AJOUTERA L'ÉCONOMIE, LES QUIZ ET LE MULTIMÉDIA.
-// NE PAS DÉPLOYER POUR LE MOMENT.
-// ============================================================
-
-
-/* ============================================================
-   ⌬ SITRI-NEL ULTIMATE EDITION
-   PARTIE 3/4 — ÉCONOMIE, QUIZ ET MULTIMÉDIA
-   ============================================================ */
+     }
 
 // ------------------------------------------------------------
-// 26. SYSTÈME UTILISATEURS
+// 21. UTILISATEURS, XCOINS ET XP
 // ------------------------------------------------------------
 
 async function ensureUser(jid) {
-  if (!jid) {
-    throw new Error('Identifiant utilisateur manquant.');
-  }
+  if (!jid) throw new Error('Identifiant utilisateur manquant.');
 
   await db.execute({
-    sql: `
-      INSERT OR IGNORE INTO users
-        (jid, coins, xp, last_daily, created_at)
-      VALUES (?, 0, 0, 0, ?)
-    `,
+    sql: `INSERT OR IGNORE INTO users (jid, coins, xp, last_daily, created_at)
+          VALUES (?, 0, 0, 0, ?)`,
     args: [jid, Date.now()]
   });
 }
@@ -1519,54 +1241,31 @@ async function getUser(jid) {
   await ensureUser(jid);
 
   const result = await db.execute({
-    sql: `
-      SELECT jid, coins, xp, last_daily, created_at
-      FROM users
-      WHERE jid = ?
-    `,
+    sql: `SELECT jid, coins, xp, last_daily, created_at
+          FROM users WHERE jid = ?`,
     args: [jid]
   });
 
   if (!result.rows.length) {
-    throw new Error('Utilisateur introuvable dans Turso.');
+    throw new Error('Utilisateur introuvable dans la base de données.');
   }
 
   return result.rows[0];
 }
 
-// ------------------------------------------------------------
-// 27. AJOUT DE XCOINS ET XP
-// ------------------------------------------------------------
-
 async function addRewards(jid, coins = 0, xp = 0) {
   await ensureUser(jid);
 
-  const safeCoins = Math.max(
-    0,
-    Math.floor(Number(coins) || 0)
-  );
-
-  const safeXp = Math.max(
-    0,
-    Math.floor(Number(xp) || 0)
-  );
+  const safeCoins = Math.max(0, Math.floor(Number(coins) || 0));
+  const safeXp = Math.max(0, Math.floor(Number(xp) || 0));
 
   await db.execute({
-    sql: `
-      UPDATE users
-      SET coins = coins + ?,
-          xp = xp + ?
-      WHERE jid = ?
-    `,
+    sql: `UPDATE users SET coins = coins + ?, xp = xp + ? WHERE jid = ?`,
     args: [safeCoins, safeXp, jid]
   });
 
   return getUser(jid);
 }
-
-// ------------------------------------------------------------
-// 28. SYSTÈME DE RANGS
-// ------------------------------------------------------------
 
 function getRank(xp) {
   xp = Number(xp) || 0;
@@ -1594,10 +1293,6 @@ function getNextRank(xp) {
   return ranks.find(rank => xp < rank.xp) || null;
 }
 
-// ------------------------------------------------------------
-// 29. XDAILY — RÉCOMPENSE TOUTES LES 24 HEURES
-// ------------------------------------------------------------
-
 async function dailyReward(jid) {
   await ensureUser(jid);
 
@@ -1605,15 +1300,10 @@ async function dailyReward(jid) {
   const cooldown = 24 * 60 * 60 * 1000;
 
   const result = await db.execute({
-    sql: `
-      UPDATE users
-      SET coins = coins + 350,
-          xp = xp + 25,
-          last_daily = ?
-      WHERE jid = ?
-        AND last_daily <= ?
-      RETURNING coins, xp, last_daily
-    `,
+    sql: `UPDATE users
+          SET coins = coins + 350, xp = xp + 25, last_daily = ?
+          WHERE jid = ? AND last_daily <= ?
+          RETURNING coins, xp, last_daily`,
     args: [now, jid, now - cooldown]
   });
 
@@ -1656,19 +1346,11 @@ async function dailyReward(jid) {
   };
 }
 
-// ------------------------------------------------------------
-// 30. PROFIL UTILISATEUR
-// ------------------------------------------------------------
-
-async function getProfileText(
-  jid,
-  displayName = 'Utilisateur'
-) {
+async function getProfileText(jid, displayName = 'Utilisateur') {
   const user = await getUser(jid);
 
   const xp = Number(user.xp);
   const coins = Number(user.coins);
-
   const nextRank = getNextRank(xp);
 
   const progress = nextRank
@@ -1688,7 +1370,7 @@ Rang : ${getRank(xp)}
 📈 Progression :
 ${progress}
 
-🧬 Données enregistrées dans Turso.
+🧬 Données enregistrées dans la base.
 
 ╰━━━━━━━━━━━━━━━━━━━━━━╯
 
@@ -1696,23 +1378,12 @@ ${SIGNATURE}
 `;
 }
 
-// ------------------------------------------------------------
-// 31. CLASSEMENT GLOBAL
-// ------------------------------------------------------------
-
 async function getLeaderboard(limit = 10) {
-  const safeLimit = Math.min(
-    50,
-    Math.max(1, Math.floor(Number(limit) || 10))
-  );
+  const safeLimit = Math.min(50, Math.max(1, Math.floor(Number(limit) || 10)));
 
   const result = await db.execute({
-    sql: `
-      SELECT jid, coins, xp
-      FROM users
-      ORDER BY xp DESC, coins DESC
-      LIMIT ?
-    `,
+    sql: `SELECT jid, coins, xp FROM users
+          ORDER BY xp DESC, coins DESC LIMIT ?`,
     args: [safeLimit]
   });
 
@@ -1726,10 +1397,7 @@ async function getRankText(jid) {
   const next = getNextRank(xp);
 
   const leaderboard = await getLeaderboard(50);
-
-  const position = leaderboard.findIndex(
-    item => item.jid === jid
-  );
+  const position = leaderboard.findIndex(item => item.jid === jid);
 
   return `
 ╭━━〔 🏆 𝗫𝗥𝗔𝗡𝗞 〕━━╮
@@ -1737,11 +1405,7 @@ async function getRankText(jid) {
 Rang : ${getRank(xp)}
 XP : ${xp}
 
-Classement : ${
-    position >= 0
-      ? `#${position + 1}`
-      : 'Non classé'
-  }
+Classement : ${position >= 0 ? `#${position + 1}` : 'Non classé'}
 
 ${
   next
@@ -1756,70 +1420,25 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 32. QUESTIONS DU QUIZ
+// 22. QUIZ
 // ------------------------------------------------------------
 
 const quizQuestions = [
-  {
-    question: 'Quelle planète est surnommée la planète rouge ?',
-    answer: 'mars'
-  },
-  {
-    question: 'Combien de côtés possède un hexagone ?',
-    answer: '6'
-  },
-  {
-    question: 'Quel est le plus grand océan du monde ?',
-    answer: 'pacifique'
-  },
-  {
-    question: 'Quel langage est principalement utilisé avec React ?',
-    answer: 'javascript'
-  },
-  {
-    question: 'Quelle est la capitale du Japon ?',
-    answer: 'tokyo'
-  },
-  {
-    question: 'Combien font 12 × 12 ?',
-    answer: '144'
-  },
-  {
-    question: 'Quel gaz les plantes absorbent-elles principalement ?',
-    answer: 'dioxyde de carbone'
-  },
-  {
-    question: 'Quel est le symbole chimique de l’eau ?',
-    answer: 'h2o'
-  },
-  {
-    question: 'Combien de jours compte une année bissextile ?',
-    answer: '366'
-  },
-  {
-    question: 'Quel est le satellite naturel de la Terre ?',
-    answer: 'la lune'
-  },
-  {
-    question: 'Quelle est la capitale du Bénin ?',
-    answer: 'porto-novo'
-  },
-  {
-    question: 'Combien de continents compte-t-on généralement ?',
-    answer: '7'
-  },
-  {
-    question: 'Quel animal est surnommé le roi de la savane ?',
-    answer: 'lion'
-  },
-  {
-    question: 'Quelle étoile est au centre de notre système solaire ?',
-    answer: 'soleil'
-  },
-  {
-    question: 'Combien font 15 × 4 ?',
-    answer: '60'
-  }
+  { question: 'Quelle planète est surnommée la planète rouge ?', answer: 'mars' },
+  { question: 'Combien de côtés possède un hexagone ?', answer: '6' },
+  { question: 'Quel est le plus grand océan du monde ?', answer: 'pacifique' },
+  { question: 'Quel langage est principalement utilisé avec React ?', answer: 'javascript' },
+  { question: 'Quelle est la capitale du Japon ?', answer: 'tokyo' },
+  { question: 'Combien font 12 × 12 ?', answer: '144' },
+  { question: 'Quel gaz les plantes absorbent-elles principalement ?', answer: 'dioxyde de carbone' },
+  { question: 'Quel est le symbole chimique de l’eau ?', answer: 'h2o' },
+  { question: 'Combien de jours compte une année bissextile ?', answer: '366' },
+  { question: 'Quel est le satellite naturel de la Terre ?', answer: 'la lune' },
+  { question: 'Quelle est la capitale du Bénin ?', answer: 'porto-novo' },
+  { question: 'Combien de continents compte-t-on généralement ?', answer: '7' },
+  { question: 'Quel animal est surnommé le roi de la savane ?', answer: 'lion' },
+  { question: 'Quelle étoile est au centre de notre système solaire ?', answer: 'soleil' },
+  { question: 'Combien font 15 × 4 ?', answer: '60' }
 ];
 
 function normalizeAnswer(value = '') {
@@ -1832,29 +1451,15 @@ function normalizeAnswer(value = '') {
     .replace(/\s+/g, ' ');
 }
 
-// ------------------------------------------------------------
-// 33. XQUIZ — CRÉATION D'UN QUIZ
-// ------------------------------------------------------------
-
-// chatJid identifie la conversation.
-// Le gagnant sera identifié séparément lors de Xreponse.
-
 async function startQuiz(chatJid) {
   const now = Date.now();
 
   const existing = await db.execute({
-    sql: `
-      SELECT question, expires_at
-      FROM active_quizzes
-      WHERE group_jid = ?
-    `,
+    sql: `SELECT question, expires_at FROM active_quizzes WHERE group_jid = ?`,
     args: [chatJid]
   });
 
-  if (
-    existing.rows.length &&
-    Number(existing.rows[0].expires_at) > now
-  ) {
+  if (existing.rows.length && Number(existing.rows[0].expires_at) > now) {
     return {
       success: false,
       message:
@@ -1863,32 +1468,18 @@ async function startQuiz(chatJid) {
   }
 
   const selected =
-    quizQuestions[
-      Math.floor(Math.random() * quizQuestions.length)
-    ];
-
-  const expiresAt = now + 120000;
+    quizQuestions[Math.floor(Math.random() * quizQuestions.length)];
 
   await db.execute({
-    sql: `
-      INSERT INTO active_quizzes
-        (group_jid, question, answer, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?)
-
-      ON CONFLICT(group_jid)
-      DO UPDATE SET
-        question = excluded.question,
-        answer = excluded.answer,
-        created_at = excluded.created_at,
-        expires_at = excluded.expires_at
-    `,
-    args: [
-      chatJid,
-      selected.question,
-      selected.answer,
-      now,
-      expiresAt
-    ]
+    sql: `INSERT INTO active_quizzes
+            (group_jid, question, answer, created_at, expires_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(group_jid) DO UPDATE SET
+            question = excluded.question,
+            answer = excluded.answer,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at`,
+    args: [chatJid, selected.question, selected.answer, now, now + 120000]
   });
 
   return {
@@ -1904,91 +1495,55 @@ async function startQuiz(chatJid) {
   };
 }
 
-// ------------------------------------------------------------
-// 34. XREPONSE — VALIDATION ET RÉCOMPENSE
-// ------------------------------------------------------------
-
-// chatJid = conversation où le quiz a été lancé.
-// userJid = participant qui répond.
-
 async function answerQuiz(chatJid, userJid, answer) {
   const now = Date.now();
   const submitted = normalizeAnswer(answer);
 
   if (!submitted) {
-    return {
-      success: false,
-      message: 'Indique ta réponse après Xreponse.'
-    };
+    return { success: false, message: 'Indique ta réponse après Xreponse.' };
   }
 
   if (!userJid) {
-    return {
-      success: false,
-      message: 'Impossible d’identifier le participant.'
-    };
+    return { success: false, message: 'Impossible d’identifier le participant.' };
   }
 
   const existing = await db.execute({
-    sql: `
-      SELECT answer, expires_at
-      FROM active_quizzes
-      WHERE group_jid = ?
-    `,
+    sql: `SELECT answer, expires_at FROM active_quizzes WHERE group_jid = ?`,
     args: [chatJid]
   });
 
   if (!existing.rows.length) {
-    return {
-      success: false,
-      message: 'Aucun quiz actif. Lance Xquiz pour commencer.'
-    };
+    return { success: false, message: 'Aucun quiz actif. Lance Xquiz pour commencer.' };
   }
 
   const quiz = existing.rows[0];
 
   if (Number(quiz.expires_at) <= now) {
     await db.execute({
-      sql: `
-        DELETE FROM active_quizzes
-        WHERE group_jid = ?
-          AND expires_at <= ?
-      `,
+      sql: `DELETE FROM active_quizzes WHERE group_jid = ? AND expires_at <= ?`,
       args: [chatJid, now]
     });
 
     return {
       success: false,
-      message:
-        '⌛ Le temps du quiz est écoulé. Lance un nouveau Xquiz.'
+      message: '⌛ Le temps du quiz est écoulé. Lance un nouveau Xquiz.'
     };
   }
 
   if (submitted !== normalizeAnswer(quiz.answer)) {
-    return {
-      success: false,
-      message: '❌ Mauvaise réponse. Tu peux réessayer.'
-    };
+    return { success: false, message: '❌ Mauvaise réponse. Tu peux réessayer.' };
   }
 
-  // Une seule personne peut réclamer le quiz.
-  // La suppression conditionnelle empêche les doubles gains.
-
+  // Suppression conditionnelle : un seul gagnant possible.
   const claimed = await db.execute({
-    sql: `
-      DELETE FROM active_quizzes
-      WHERE group_jid = ?
-        AND expires_at > ?
-      RETURNING group_jid
-    `,
+    sql: `DELETE FROM active_quizzes
+          WHERE group_jid = ? AND expires_at > ?
+          RETURNING group_jid`,
     args: [chatJid, now]
   });
 
   if (!claimed.rows.length) {
-    return {
-      success: false,
-      message: 'Ce quiz vient déjà d’être remporté.'
-    };
+    return { success: false, message: 'Ce quiz vient déjà d’être remporté.' };
   }
 
   const user = await addRewards(userJid, 30, 20);
@@ -2010,7 +1565,7 @@ async function answerQuiz(chatJid, userJid, answer) {
 }
 
 // ------------------------------------------------------------
-// 35. TÉLÉCHARGEMENT ET VALIDATION DES IMAGES
+// 23. IMAGES : RECHERCHE ET GÉNÉRATION
 // ------------------------------------------------------------
 
 async function downloadImageBuffer(url) {
@@ -2030,9 +1585,7 @@ async function downloadImageBuffer(url) {
     validateStatus: status => status === 200
   });
 
-  const contentType = String(
-    response.headers['content-type'] || ''
-  ).toLowerCase();
+  const contentType = String(response.headers['content-type'] || '').toLowerCase();
 
   if (!contentType.startsWith('image/')) {
     throw new Error('La ressource reçue n’est pas une image.');
@@ -2040,22 +1593,12 @@ async function downloadImageBuffer(url) {
 
   const buffer = Buffer.from(response.data);
 
-  if (
-    !buffer.length ||
-    buffer.length > CONFIG.maxImageBytes
-  ) {
+  if (!buffer.length || buffer.length > CONFIG.maxImageBytes) {
     throw new Error('Taille de l’image non autorisée.');
   }
 
-  return {
-    buffer,
-    contentType
-  };
+  return { buffer, contentType };
 }
-
-// ------------------------------------------------------------
-// 36. XIMG — RECHERCHE D'IMAGES SERPAPI
-// ------------------------------------------------------------
 
 async function searchImage(jid, message, query) {
   if (!CONFIG.serpApiKey) {
@@ -2069,50 +1612,30 @@ async function searchImage(jid, message, query) {
   }
 
   if (!query || !query.trim()) {
-    await sendReply(
-      jid,
-      'Utilisation : Ximg Naruto, paysage, animal...',
-      message
-    );
-
+    await sendReply(jid, 'Utilisation : Ximg Naruto, paysage, animal...', message);
     return false;
   }
 
-  await sendReply(
-    jid,
-    '🔎 Recherche de visuels en cours...',
-    message
-  );
+  await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
   try {
-    const response = await axios.get(
-      'https://serpapi.com/search.json',
-      {
-        params: {
-          engine: 'google_images',
-          q: query.trim(),
-          api_key: CONFIG.serpApiKey,
-          safe: 'active',
-          ijn: '0'
-        },
-        timeout: 30000
-      }
-    );
+    const response = await axios.get('https://serpapi.com/search.json', {
+      params: {
+        engine: 'google_images',
+        q: query.trim(),
+        api_key: CONFIG.serpApiKey,
+        safe: 'active',
+        ijn: '0'
+      },
+      timeout: 30000
+    });
 
     const results = response.data?.images_results || [];
 
     if (!results.length) {
-      await sendReply(
-        jid,
-        'Aucune image trouvée pour cette recherche.',
-        message
-      );
-
+      await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
       return false;
     }
-
-    // Plusieurs résultats sont essayés car certaines sources
-    // refusent les téléchargements automatiques.
 
     for (const item of results.slice(0, 5)) {
       const imageUrl = item.original || item.thumbnail;
@@ -2120,26 +1643,21 @@ async function searchImage(jid, message, query) {
       if (!imageUrl) continue;
 
       try {
-        const downloaded =
-          await downloadImageBuffer(imageUrl);
+        const downloaded = await downloadImageBuffer(imageUrl);
 
         await sock.sendMessage(
           jid,
           {
             image: downloaded.buffer,
             mimetype: downloaded.contentType,
-            caption:
-              `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${query.trim()}\n\n${SIGNATURE}`
+            caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${query.trim()}\n\n${SIGNATURE}`
           },
           { quoted: message }
         );
 
         return true;
       } catch (error) {
-        logger.warn(
-          { err: error },
-          'Résultat SerpApi non téléchargeable.'
-        );
+        logger.warn({ err: error }, 'Résultat SerpApi non téléchargeable.');
       }
     }
 
@@ -2150,12 +1668,8 @@ async function searchImage(jid, message, query) {
     );
 
     return false;
-
   } catch (error) {
-    logger.error(
-      { err: error },
-      'Erreur de recherche SerpApi.'
-    );
+    logger.error({ err: error }, 'Erreur de recherche SerpApi.');
 
     await sendReply(
       jid,
@@ -2167,15 +1681,8 @@ async function searchImage(jid, message, query) {
   }
 }
 
-// ------------------------------------------------------------
-// 37. XIMG CREATE — GÉNÉRATION CLOUDFLARE WORKERS AI
-// ------------------------------------------------------------
-
 async function generateImage(jid, message, prompt) {
-  if (
-    !CONFIG.cloudflareToken ||
-    !CONFIG.cloudflareAccountId
-  ) {
+  if (!CONFIG.cloudflareToken || !CONFIG.cloudflareAccountId) {
     await sendReply(
       jid,
       '⚠️ La génération nécessite CLOUDFLARE_API_TOKEN et CLOUDFLARE_ACCOUNT_ID dans Railway.',
@@ -2207,10 +1714,7 @@ async function generateImage(jid, message, prompt) {
 
     const response = await axios.post(
       endpoint,
-      {
-        prompt: prompt.trim(),
-        num_steps: 4
-      },
+      { prompt: prompt.trim(), num_steps: 4 },
       {
         headers: {
           Authorization: `Bearer ${CONFIG.cloudflareToken}`,
@@ -2224,27 +1728,17 @@ async function generateImage(jid, message, prompt) {
       }
     );
 
-    const contentType = String(
-      response.headers['content-type'] || ''
-    ).toLowerCase();
+    const contentType = String(response.headers['content-type'] || '').toLowerCase();
 
     if (!contentType.startsWith('image/')) {
-      const errorText = Buffer
-        .from(response.data)
-        .toString('utf8')
-        .slice(0, 500);
+      const errorText = Buffer.from(response.data).toString('utf8').slice(0, 500);
 
-      throw new Error(
-        `Cloudflare n'a pas renvoyé une image : ${errorText}`
-      );
+      throw new Error(`Cloudflare n'a pas renvoyé une image : ${errorText}`);
     }
 
     const buffer = Buffer.from(response.data);
 
-    if (
-      !buffer.length ||
-      buffer.length > CONFIG.maxImageBytes
-    ) {
+    if (!buffer.length || buffer.length > CONFIG.maxImageBytes) {
       throw new Error('Image générée de taille invalide.');
     }
 
@@ -2253,19 +1747,14 @@ async function generateImage(jid, message, prompt) {
       {
         image: buffer,
         mimetype: contentType,
-        caption:
-          `✨ 𝗜𝗠𝗔𝗚𝗘 𝗚𝗘́𝗡𝗘́𝗥𝗘́𝗘\n\n${SIGNATURE}`
+        caption: `✨ 𝗜𝗠𝗔𝗚𝗘 𝗚𝗘́𝗡𝗘́𝗥𝗘́𝗘\n\n${SIGNATURE}`
       },
       { quoted: message }
     );
 
     return true;
-
   } catch (error) {
-    logger.error(
-      { err: error },
-      'Erreur de génération Cloudflare.'
-    );
+    logger.error({ err: error }, 'Erreur de génération Cloudflare.');
 
     await sendReply(
       jid,
@@ -2277,20 +1766,10 @@ async function generateImage(jid, message, prompt) {
   }
 }
 
-// ------------------------------------------------------------
-// 38. XPLAY / XVIDEO — INTÉGRATIONS NON ACTIVÉES
-// ------------------------------------------------------------
-
-async function multimediaNotIntegrated(
-  jid,
-  message,
-  command
-) {
+async function multimediaNotIntegrated(jid, message, command) {
   const descriptions = {
-    xplay:
-      'La recherche et l’envoi audio ne sont pas encore intégrés.',
-    xvideo:
-      'La recherche et l’envoi vidéo ne sont pas encore intégrés.'
+    play: 'La recherche et l’envoi audio ne sont pas encore intégrés.',
+    video: 'La recherche et l’envoi vidéo ne sont pas encore intégrés.'
   };
 
   await sendReply(
@@ -2298,41 +1777,14 @@ async function multimediaNotIntegrated(
     `🎧 ${descriptions[command] || 'Cette fonction est en préparation.'}\n\nJe préfère signaler honnêtement qu’une intégration manque plutôt que prétendre qu’elle fonctionne.\n\n${SIGNATURE}`,
     message
   );
-}
-
-// ============================================================
-// FIN PARTIE 3/4
-// LA PARTIE 4 AJOUTERA LE ROUTEUR, LE PAIRAGE,
-// LA RECONNEXION ET LE DÉMARRAGE.
-// NE PAS DÉPLOYER POUR LE MOMENT.
-// ============================================================
-
-/* ============================================================
-   ⌬ SITRI-NEL ULTIMATE EDITION
-   PARTIE 4/4 — ROUTEUR, CONNEXION WHATSAPP ET RAILWAY
-   ============================================================ */
+           }
 
 // ------------------------------------------------------------
-// 34. ÉTAT DE CONNEXION
-// ------------------------------------------------------------
-
-let reconnectTimer = null;
-let startPromise = null;
-let pairingRequested = false;
-let pairingInProgress = false;
-
-let reconnectAttempts = 0;
-
-const RECONNECT_DELAY = 5000;
-
-// ------------------------------------------------------------
-// 35. ANALYSE DES COMMANDES
+// 24. ROUTEUR : ANALYSE DES COMMANDES
 // ------------------------------------------------------------
 
 function parseCommand(text = '') {
-  const match = String(text).trim().match(
-    /^x([a-z]+)(?:\s+([\s\S]*))?$/i
-  );
+  const match = String(text).trim().match(/^x([a-z]+)(?:\s+([\s\S]*))?$/i);
 
   if (!match) return null;
 
@@ -2343,37 +1795,21 @@ function parseCommand(text = '') {
 }
 
 function getDisplayName(message, sender) {
-  return (
-    message?.pushName ||
-    getNumber(sender) ||
-    'Utilisateur'
-  );
+  return message?.pushName || getNumber(sender) || 'Utilisateur';
 }
 
 function getResultText(result, fallback) {
   if (typeof result === 'string') return result;
 
   if (result && typeof result === 'object') {
-    return (
-      result.message ||
-      result.text ||
-      result.reply ||
-      fallback
-    );
+    return result.message || result.text || result.reply || fallback;
   }
 
   return fallback;
 }
 
-// ------------------------------------------------------------
-// 36. INFORMATIONS SYSTÈME
-// ------------------------------------------------------------
-
 function getUptimeText() {
-  const seconds = Math.floor(
-    (Date.now() - PROCESS_STARTED_AT) / 1000
-  );
-
+  const seconds = Math.floor((Date.now() - PROCESS_STARTED_AT) / 1000);
   const memory = process.memoryUsage();
 
   return `
@@ -2396,25 +1832,16 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 37. COMMANDES ÉCONOMIE ET PROFIL
+// 25. ROUTEUR : GROUPES DE COMMANDES
 // ------------------------------------------------------------
 
-async function handleEconomyCommand(
-  jid,
-  message,
-  sender,
-  command,
-  args
-) {
+async function handleEconomyCommand(jid, message, sender, command) {
   if (command === 'daily') {
     const result = await dailyReward(sender);
 
     await sendReply(
       jid,
-      getResultText(
-        result,
-        '🎁 Récompense quotidienne : 350 XCoins et 25 XP si ton délai de 24 heures est écoulé.'
-      ),
+      getResultText(result, '🎁 Récompense quotidienne indisponible.'),
       message
     );
 
@@ -2422,7 +1849,6 @@ async function handleEconomyCommand(
   }
 
   if (command === 'coins') {
-    await ensureUser(sender);
     const user = await getUser(sender);
 
     await sendReply(
@@ -2434,14 +1860,16 @@ async function handleEconomyCommand(
     return true;
   }
 
-  if (command === 'xp') {
-    await ensureUser(sender);
+  if (command === 'p' || command === 'xp') {
     const user = await getUser(sender);
     const xp = Number(user?.xp || 0);
+    const next = getNextRank(xp);
 
     await sendReply(
       jid,
-      `✧ 𝗘𝗫𝗣𝗘́𝗥𝗜𝗘𝗡𝗖𝗘\n\nXP : ${xp}\nRang : ${getRank(xp)}\nProchain rang : ${getNextRank(xp)}\n\n${SIGNATURE}`,
+      `✧ 𝗘𝗫𝗣𝗘́𝗥𝗜𝗘𝗡𝗖𝗘\n\nXP : ${xp}\nRang : ${getRank(xp)}\nProchain rang : ${
+        next ? `${next.name} (${next.xp - xp} XP restants)` : 'rang maximal atteint'
+      }\n\n${SIGNATURE}`,
       message
     );
 
@@ -2453,10 +1881,7 @@ async function handleEconomyCommand(
 
     await sendReply(
       jid,
-      getResultText(
-        result,
-        '🏆 Classement momentanément indisponible.'
-      ),
+      getResultText(result, '🏆 Classement momentanément indisponible.'),
       message
     );
 
@@ -2464,12 +1889,7 @@ async function handleEconomyCommand(
   }
 
   if (command === 'profil') {
-    await ensureUser(sender);
-
-    const profile = await getProfileText(
-      sender,
-      getDisplayName(message, sender)
-    );
+    const profile = await getProfileText(sender, getDisplayName(message, sender));
 
     await sendReply(jid, profile, message);
 
@@ -2479,26 +1899,13 @@ async function handleEconomyCommand(
   return false;
 }
 
-// ------------------------------------------------------------
-// 38. COMMANDES QUIZ
-// ------------------------------------------------------------
-
-async function handleQuizCommand(
-  jid,
-  message,
-  sender,
-  command,
-  args
-) {
+async function handleQuizCommand(jid, message, sender, command, args) {
   if (command === 'quiz') {
     const result = await startQuiz(jid);
 
     await sendReply(
       jid,
-      getResultText(
-        result,
-        '🧠 Réponds avec Xreponse suivi de ta réponse.'
-      ),
+      getResultText(result, '🧠 Réponds avec Xreponse suivi de ta réponse.'),
       message
     );
 
@@ -2507,29 +1914,13 @@ async function handleQuizCommand(
 
   if (command === 'reponse') {
     if (!args) {
-      await sendReply(
-        jid,
-        'Utilisation : Xreponse suivi de ta réponse.',
-        message
-      );
-
+      await sendReply(jid, 'Utilisation : Xreponse suivi de ta réponse.', message);
       return true;
     }
 
-    const result = await answerQuiz(
-      jid,
-      sender,
-      args
-    );
+    const result = await answerQuiz(jid, sender, args);
 
-    await sendReply(
-      jid,
-      getResultText(
-        result,
-        'La réponse a été traitée.'
-      ),
-      message
-    );
+    await sendReply(jid, getResultText(result, 'La réponse a été traitée.'), message);
 
     return true;
   }
@@ -2537,19 +1928,8 @@ async function handleQuizCommand(
   return false;
 }
 
-// ------------------------------------------------------------
-// 39. COMMANDES IA
-// ------------------------------------------------------------
-
-async function handleAICommand(
-  jid,
-  message,
-  command,
-  args
-) {
-  if (
-    !['chat', 'ai', 'ask', 'anime', 'police'].includes(command)
-  ) {
+async function handleAICommand(jid, message, command, args) {
+  if (!['chat', 'ai', 'ask', 'anime', 'police'].includes(command)) {
     return false;
   }
 
@@ -2576,32 +1956,24 @@ async function handleAICommand(
   let prompt = args;
 
   if (command === 'anime') {
-    prompt =
-      `Tu es spécialiste des animés, mangas et personnages fictifs. Réponds avec précision et distingue les faits des théories.\n\n${args}`;
+    prompt = `Tu es spécialiste des animés, mangas et personnages fictifs. Réponds avec précision et distingue les faits des théories.\n\n${args}`;
   }
 
   if (command === 'police') {
-    prompt =
-      `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
+    prompt = `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
   }
 
-  const answer = await askGroq(prompt, jid);
+  // Xchat garde un historique de conversation ; les autres non.
+  const answer = await askGroq(prompt, jid, { useHistory: command === 'chat' });
 
   await sendReply(
     jid,
-    getResultText(
-      answer,
-      'Je n’ai pas pu produire de réponse pour le moment.'
-    ),
+    getResultText(answer, 'Je n’ai pas pu produire de réponse pour le moment.'),
     message
   );
 
   return true;
 }
-
-// ------------------------------------------------------------
-// 40. COMMANDES MULTIMÉDIAS
-// ------------------------------------------------------------
 
 async function handleImageCommand(jid, message, args) {
   if (!args) {
@@ -2618,12 +1990,7 @@ async function handleImageCommand(jid, message, args) {
     const prompt = args.replace(/^create\s+/i, '').trim();
 
     if (!prompt) {
-      await sendReply(
-        jid,
-        'Décris l’image que tu souhaites créer.',
-        message
-      );
-
+      await sendReply(jid, 'Décris l’image que tu souhaites créer.', message);
       return true;
     }
 
@@ -2637,23 +2004,11 @@ async function handleImageCommand(jid, message, args) {
   return true;
 }
 
-async function handleMediaCommand(
-  jid,
-  message,
-  command,
-  args
-) {
-  if (command === 'img') {
-    return handleImageCommand(jid, message, args);
-  }
+async function handleMediaCommand(jid, message, command, args) {
+  if (command === 'img') return handleImageCommand(jid, message, args);
 
   if (command === 'play' || command === 'video') {
-    await multimediaNotIntegrated(
-      jid,
-      message,
-      command
-    );
-
+    await multimediaNotIntegrated(jid, message, command);
     return true;
   }
 
@@ -2661,7 +2016,7 @@ async function handleMediaCommand(
 }
 
 // ------------------------------------------------------------
-// 41. ROUTEUR PRINCIPAL
+// 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
 async function processCommand(message) {
@@ -2675,7 +2030,6 @@ async function processCommand(message) {
 
   const parsed = parseCommand(text);
 
-  // Les messages ordinaires restent normaux.
   if (!parsed) return;
 
   const { command, args } = parsed;
@@ -2684,13 +2038,7 @@ async function processCommand(message) {
 
   if (!sender) return;
 
-  const ownerCommand =
-    Boolean(message.key?.fromMe) &&
-    isOwnerMessage(message);
-
-  // ----------------------------------------------------------
-  // MENU ET PRÉSENTATION
-  // ----------------------------------------------------------
+  const ownerCommand = Boolean(message.key?.fromMe) && isOwnerMessage(message);
 
   if (command === 'menu') {
     await sendOfficialImage(jid, message);
@@ -2704,34 +2052,17 @@ async function processCommand(message) {
     return;
   }
 
-  // ----------------------------------------------------------
-  // COMMANDES DE GROUPE
-  // ----------------------------------------------------------
-
+  // Commandes de groupe (la commande est normalisée : xkick → kick).
   if (isGroupJid(jid)) {
-    const handled = await handleGroupCommand(
-      jid,
-      message,
-      sender,
-      command,
-      args
-    );
+    const handled = await handleGroupCommand(jid, message, sender, command, args);
 
     if (handled) return;
   }
 
-  // ----------------------------------------------------------
-  // COMMANDES PROPRIÉTAIRE
-  // ----------------------------------------------------------
-
+  // Commandes propriétaire
   if (command === 'off' || command === 'restart') {
     if (!ownerCommand) {
-      await sendReply(
-        jid,
-        '⛔ Cette commande est réservée à KAY≈DEN.',
-        message
-      );
-
+      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
       return;
     }
 
@@ -2745,25 +2076,15 @@ async function processCommand(message) {
 
     isShuttingDown = true;
 
-    setTimeout(() => {
-      process.exit(0);
-    }, 1000);
+    // exit(1) pour « restart » : Railway relance le service.
+    setTimeout(() => process.exit(command === 'off' ? 0 : 1), 1000);
 
     return;
   }
 
-  // ----------------------------------------------------------
-  // MODE ONLY ADMIN
-  // ----------------------------------------------------------
-
-  if (
-    isGroupJid(jid) &&
-    !['upt', 'menu', 'info'].includes(command)
-  ) {
-    const allowed = await canUseOrdinaryGroupCommand(
-      jid,
-      sender
-    );
+  // Mode Only Admin pour les commandes ordinaires
+  if (isGroupJid(jid) && !['upt', 'menu', 'info'].includes(command)) {
+    const allowed = await canUseOrdinaryGroupCommand(jid, sender);
 
     if (!allowed) {
       await sendReply(
@@ -2776,86 +2097,26 @@ async function processCommand(message) {
     }
   }
 
-  // ----------------------------------------------------------
-  // UPTIME
-  // ----------------------------------------------------------
-
   if (command === 'upt') {
     await sendReply(jid, getUptimeText(), message);
     return;
   }
 
-  // ----------------------------------------------------------
-  // ÉCONOMIE ET PROFIL
-  // ----------------------------------------------------------
+  if (await handleEconomyCommand(jid, message, sender, command)) return;
+  if (await handleQuizCommand(jid, message, sender, command, args)) return;
+  if (await handleAICommand(jid, message, command, args)) return;
+  if (await handleMediaCommand(jid, message, command, args)) return;
 
-  if (
-    await handleEconomyCommand(
-      jid,
-      message,
-      sender,
-      command,
-      args
-    )
-  ) {
-    return;
-  }
-
-  // ----------------------------------------------------------
-  // QUIZ
-  // ----------------------------------------------------------
-
-  if (
-    await handleQuizCommand(
-      jid,
-      message,
-      sender,
-      command,
-      args
-    )
-  ) {
-    return;
-  }
-
-  // ----------------------------------------------------------
-  // INTELLIGENCE ARTIFICIELLE
-  // ----------------------------------------------------------
-
-  if (
-    await handleAICommand(
-      jid,
-      message,
-      command,
-      args
-    )
-  ) {
-    return;
-  }
-
-  // ----------------------------------------------------------
-  // MULTIMÉDIA
-  // ----------------------------------------------------------
-
-  if (
-    await handleMediaCommand(
-      jid,
-      message,
-      command,
-      args
-    )
-  ) {
-    return;
-  }
-
-  // Les commandes inconnues restent silencieuses.
+  // Commandes inconnues : silence.
 }
-
-// ------------------------------------------------------------
-// 42. RÉCEPTION DES MESSAGES
-// ------------------------------------------------------------
 
 async function handleIncomingMessage(message) {
   if (!message?.key?.id) return;
+
+  // Ignore les anciens messages (synchronisation / reconnexion).
+  const timestamp = Number(message.messageTimestamp || 0) * 1000;
+
+  if (timestamp && Date.now() - timestamp > CONFIG.maxMessageAge) return;
 
   if (hasProcessedMessage(message)) return;
 
@@ -2869,16 +2130,13 @@ async function handleIncomingMessage(message) {
     await processCommand(message);
   } catch (error) {
     logger.error(
-      {
-        error: error?.message || String(error),
-        messageId: requestId
-      },
+      { error: error?.message || String(error), messageId: requestId },
       'Erreur pendant le traitement du message.'
     );
 
     const jid = message?.key?.remoteJid;
 
-    if (jid) {
+    if (jid && sock) {
       try {
         await sendReply(
           jid,
@@ -2898,75 +2156,64 @@ async function handleIncomingMessage(message) {
 }
 
 // ------------------------------------------------------------
-// 43. DEMANDE DU PAIRING CODE
+// 27. CONNEXION WHATSAPP : PAIRING CODE ET RECONNEXION
 // ------------------------------------------------------------
 
-async function requestPairingCode() {
-  if (pairingRequested || pairingInProgress) return;
+let reconnectTimer = null;
+let startPromise = null;
+let pairingRequested = false;
+let reconnectAttempts = 0;
 
-  if (!sock || sock.user) {
-    // Si sock.user existe, le compte est déjà connecté.
-    return;
-  }
+const RECONNECT_DELAY = 5000;
+
+async function requestPairingCode(socket) {
+  if (pairingRequested) return;
+  if (!socket || socket !== sock) return;
+  if (socket.authState?.creds?.registered) return;
 
   if (!CONFIG.pairingNumber) {
-    logger.error(
-      'PAIRING_NUMBER absent. Configure le numéro dans Railway.'
-    );
-
+    logger.error('PAIRING_NUMBER absent. Ajoute-le dans les variables Railway (ex : 229XXXXXXXX).');
     return;
   }
 
-  pairingInProgress = true;
   pairingRequested = true;
 
   try {
-    const code = await sock.requestPairingCode(
-      CONFIG.pairingNumber
-    );
+    const rawCode = await socket.requestPairingCode(CONFIG.pairingNumber);
+    const code = String(rawCode).match(/.{1,4}/g)?.join('-') || rawCode;
 
     console.log('\n');
     console.log('╔══════════════════════════════════╗');
     console.log('║       SITRI-NEL PAIRING CODE      ║');
     console.log('╠══════════════════════════════════╣');
-    console.log(`║          ${code}          ║`);
+    console.log(`║           ${code}           ║`);
     console.log('╚══════════════════════════════════╝');
     console.log('\n');
 
-    logger.info('Code de jumelage généré.');
+    logger.info(`CODE DE JUMELAGE : ${code}`);
   } catch (error) {
+    // Un nouvel essai sera fait au prochain événement QR.
     pairingRequested = false;
 
     logger.error(
-      {
-        error: error?.message || String(error)
-      },
+      { error: error?.message || String(error) },
       'Échec de la génération du pairing code.'
     );
-  } finally {
-    pairingInProgress = false;
   }
 }
 
-// ------------------------------------------------------------
-// 44. RECONNEXION AUTOMATIQUE
-// ------------------------------------------------------------
-
-function scheduleReconnect() {
+function scheduleReconnect(minDelay = 0) {
   if (isShuttingDown) return;
-
   if (reconnectTimer) return;
 
   reconnectAttempts++;
 
-  const delay = Math.min(
-    RECONNECT_DELAY * reconnectAttempts,
-    30000
+  const delay = Math.max(
+    minDelay,
+    Math.min(RECONNECT_DELAY * reconnectAttempts, 30000)
   );
 
-  logger.warn(
-    `Nouvelle tentative de connexion dans ${delay / 1000} secondes.`
-  );
+  logger.warn(`Nouvelle tentative de connexion dans ${delay / 1000} secondes.`);
 
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
@@ -2974,64 +2221,83 @@ function scheduleReconnect() {
     try {
       await startBot();
     } catch (error) {
-      logger.error(
-        { error: error?.message },
-        'Échec de la reconnexion.'
-      );
-
+      logger.error({ error: error?.message }, 'Échec de la reconnexion.');
       scheduleReconnect();
     }
   }, delay);
 }
 
-// ------------------------------------------------------------
-// 45. DÉMARRAGE WHATSAPP
-// ------------------------------------------------------------
-
 async function startBot() {
   if (isShuttingDown) return;
-
   if (startPromise) return startPromise;
 
   startPromise = (async () => {
     connectionStatus = 'Connexion en cours';
+    pairingRequested = false;
 
     logger.info('Initialisation de Sitri-Nel...');
 
     await initDatabase();
 
-    const { state, saveCreds } =
-      await useMultiFileAuthState(SESSION_DIR);
+    const { state, saveCreds } = USE_TURSO
+      ? await useDatabaseAuthState()
+      : await useMultiFileAuthState(SESSION_DIR);
 
-    sock = makeWASocket({
-      auth: state,
-      logger,
+    // Version WhatsApp Web la plus récente (évite les rejets 401/405).
+    let version;
 
+    try {
+      if (typeof Baileys.fetchLatestBaileysVersion === 'function') {
+        const latest = await Baileys.fetchLatestBaileysVersion();
+        version = latest?.version;
+      }
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Version WhatsApp non récupérée, valeur par défaut utilisée.');
+    }
+
+    const keys =
+      typeof Baileys.makeCacheableSignalKeyStore === 'function'
+        ? Baileys.makeCacheableSignalKeyStore(state.keys, baileysLogger)
+        : state.keys;
+
+    const browser =
+      Baileys.Browsers && typeof Baileys.Browsers.ubuntu === 'function'
+        ? Baileys.Browsers.ubuntu('Chrome')
+        : ['Ubuntu', 'Chrome', '22.04.4'];
+
+    const socket = makeWASocket({
+      ...(version ? { version } : {}),
+      auth: { creds: state.creds, keys },
+      logger: baileysLogger,
+      browser,
       printQRInTerminal: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock = socket;
 
-    // --------------------------------------------------------
-    // ÉVÉNEMENTS DE CONNEXION
-    // --------------------------------------------------------
+    socket.ev.on('creds.update', async () => {
+      try {
+        await saveCreds();
+      } catch (error) {
+        logger.error({ error: error?.message }, 'Impossible de sauvegarder la session.');
+      }
+    });
 
-    sock.ev.on('connection.update', async update => {
-      const { connection, lastDisconnect } = update;
+    socket.ev.on('connection.update', async update => {
+      const { connection, lastDisconnect, qr } = update;
+
+      // L'événement QR signale que la connexion est prête
+      // pour demander le code de jumelage.
+      if (qr && !state.creds.registered) {
+        await requestPairingCode(socket);
+      }
 
       if (connection === 'connecting') {
         connectionStatus = 'Connexion en cours';
-
         logger.info('Connexion à WhatsApp...');
-
-        // Demande le code dès que Baileys signale
-        // que la connexion est en cours.
-        if (!state.creds.registered) {
-          await requestPairingCode();
-        }
       }
 
       if (connection === 'open') {
@@ -3039,12 +2305,11 @@ async function startBot() {
         reconnectAttempts = 0;
         pairingRequested = true;
 
-        botJid = normalizeJid(sock.user?.id || '');
+        botJid = normalizeJid(socket.user?.id || '');
+        botLid = normalizeJid(socket.user?.lid || '');
         botNumber = getNumber(botJid);
 
-        logger.info(
-          `Sitri-Nel connecté : ${botNumber || botJid}`
-        );
+        logger.info(`Sitri-Nel connecté : ${botNumber || botJid}`);
 
         console.log('\n⌬ SITRI-NEL EST EN LIGNE\n');
       }
@@ -3052,55 +2317,50 @@ async function startBot() {
       if (connection === 'close') {
         connectionStatus = 'Déconnecté';
 
-        const statusCode =
-          lastDisconnect?.error?.output?.statusCode;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
 
-        const loggedOut =
-          statusCode === DisconnectReason.loggedOut;
+        logger.warn(`Connexion fermée. Code : ${statusCode || 'inconnu'}`);
 
-        logger.warn(
-          `Connexion fermée. Code : ${statusCode || 'inconnu'}`
-        );
+        if (sock === socket) sock = null;
 
-        sock = null;
+        if (isShuttingDown) return;
 
-        if (loggedOut) {
-          connectionStatus = 'Déconnecté : jumelage requis';
+        // Session refusée par WhatsApp : on repart de zéro
+        // pour obtenir un nouveau code de jumelage.
+        if (statusCode === DisconnectReason.loggedOut) {
+          connectionStatus = 'Session invalide : nouveau jumelage';
 
           logger.error(
-            'Session WhatsApp déconnectée. Une nouvelle liaison est nécessaire.'
+            'Session WhatsApp invalide ou déconnectée. Nettoyage et nouveau jumelage.'
           );
 
+          await clearAuthState();
+
+          scheduleReconnect(10000);
           return;
         }
 
-        pairingRequested = false;
+        // Session ouverte ailleurs : attente plus longue.
+        if (statusCode === DisconnectReason.connectionReplaced) {
+          logger.warn('Session remplacée par une autre connexion.');
+          scheduleReconnect(30000);
+          return;
+        }
+
         scheduleReconnect();
       }
     });
 
-    // --------------------------------------------------------
-    // RÉCEPTION DES MESSAGES
-    // --------------------------------------------------------
-
-    sock.ev.on('messages.upsert', async event => {
+    socket.ev.on('messages.upsert', async event => {
       if (!event?.messages?.length) return;
 
-      // notify : nouveaux messages.
-      // append : messages synchronisés ou envoyés depuis
-      // un autre appareil lié.
-      if (!['notify', 'append'].includes(event.type)) {
-        return;
-      }
+      if (!['notify', 'append'].includes(event.type)) return;
 
       for (const message of event.messages) {
         try {
           await handleIncomingMessage(message);
         } catch (error) {
-          logger.error(
-            { error: error?.message },
-            'Erreur de réception du message.'
-          );
+          logger.error({ error: error?.message }, 'Erreur de réception du message.');
         }
       }
     });
@@ -3116,14 +2376,13 @@ async function startBot() {
 }
 
 // ------------------------------------------------------------
-// 46. ARRÊT PROPRE DU PROCESSUS
+// 28. ARRÊT PROPRE ET PROTECTION CONTRE LES CRASHS
 // ------------------------------------------------------------
 
 async function shutdown(signal) {
   if (isShuttingDown) return;
 
   isShuttingDown = true;
-
   connectionStatus = 'Arrêt en cours';
 
   logger.warn(`Arrêt demandé : ${signal}`);
@@ -3134,14 +2393,9 @@ async function shutdown(signal) {
   }
 
   try {
-    if (sock?.ws) {
-      sock.ws.close();
-    }
+    if (sock?.ws) sock.ws.close();
   } catch (error) {
-    logger.error(
-      { error: error?.message },
-      'Erreur pendant la fermeture WhatsApp.'
-    );
+    logger.error({ error: error?.message }, 'Erreur pendant la fermeture WhatsApp.');
   }
 
   connectionStatus = 'Arrêté';
@@ -3149,29 +2403,29 @@ async function shutdown(signal) {
   process.exit(0);
 }
 
-process.on('SIGTERM', () => {
-  shutdown('SIGTERM');
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('unhandledRejection', reason => {
+  logger.error(
+    { error: reason?.message || String(reason) },
+    'Promesse rejetée non gérée.'
+  );
 });
 
-process.on('SIGINT', () => {
-  shutdown('SIGINT');
+process.on('uncaughtException', error => {
+  logger.error({ error: error?.message || String(error) }, 'Exception non gérée.');
 });
 
 // ------------------------------------------------------------
-// 47. LANCEMENT AUTOMATIQUE
+// 29. LANCEMENT
 // ------------------------------------------------------------
 
 startBot().catch(error => {
   logger.error(
-    {
-      error: error?.message || String(error)
-    },
+    { error: error?.message || String(error) },
     'Impossible de démarrer Sitri-Nel.'
   );
 
   scheduleReconnect();
 });
-
-// ============================================================
-// FIN PARTIE 4/4
-// ============================================================

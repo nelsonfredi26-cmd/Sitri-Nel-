@@ -70,21 +70,22 @@ function readOwnerNumbers() {
     .filter(value => value.length >= 8);
 }
 
+const cleanEnv = value =>
+  String(value || '').trim().replace(/^["']+|["']+$/g, '').trim();
+
 const CONFIG = {
   pairingNumber: String(process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
   ownerNumbers: readOwnerNumbers(),
-  groqKey: process.env.GROQ_API_KEY || '',
-  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-  tursoUrl: process.env.TURSO_DATABASE_URL || '',
-  tursoToken: process.env.TURSO_AUTH_TOKEN || '',
-  serpApiKey: process.env.SERPAPI_KEY || '',
-  cloudflareToken: process.env.CLOUDFLARE_API_TOKEN || '',
-  cloudflareAccountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
+  groqKey: cleanEnv(process.env.GROQ_API_KEY || process.env.GROQ_KEY),
+  groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
+  tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
+  tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
+  serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
+  cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
+  cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
   maxImageBytes: 8 * 1024 * 1024,
   maxChatHistory: 16,
   tagCooldown: 60,
-  // Messages plus vieux que cette durée (ms) sont ignorés
-  // (évite de rejouer d'anciennes commandes après reconnexion).
   maxMessageAge: 2 * 60 * 1000
 };
 
@@ -519,6 +520,63 @@ function formatDuration(totalSeconds = 0) {
   return parts.join(' ');
 }
 
+// Gras Unicode « serif » (𝐀𝐛𝐜), accents conservés (𝐞́).
+function boldSerif(value = '') {
+  return Array.from(String(value).normalize('NFD'), char => {
+    const code = char.codePointAt(0);
+
+    if (code >= 65 && code <= 90) return String.fromCodePoint(0x1d400 + code - 65);
+    if (code >= 97 && code <= 122) return String.fromCodePoint(0x1d41a + code - 97);
+    if (code >= 48 && code <= 57) return String.fromCodePoint(0x1d7ce + code - 48);
+
+    return char;
+  }).join('');
+}
+
+function moduleMessage(title, text) {
+  return `${title}\n\n${boldSerif(text)}`;
+}
+
+// Transforme la réponse de l'IA : markdown retiré, texte en gras Unicode.
+function formatAIReply(raw) {
+  const parts = String(raw || '').replace(/\r/g, '').split(/(```[\s\S]*?```)/g);
+
+  const body = parts
+    .map(part => {
+      if (part.startsWith('```')) return part;
+
+      const text = part
+        .split('\n')
+        .filter(line => !/^\s*\|?[\s:|-]{3,}\|?\s*$/.test(line))
+        .map(line => {
+          let out = line;
+
+          if (/^\s*\|.*\|\s*$/.test(out)) {
+            out = out
+              .trim()
+              .replace(/^\||\|$/g, '')
+              .split('|')
+              .map(cell => cell.trim())
+              .filter(Boolean)
+              .join(' ➜ ');
+          }
+
+          return out
+            .replace(/^\s{0,3}#{1,6}\s*(.+)$/, '✦ $1')
+            .replace(/^\s*>\s?/, '┃ ')
+            .replace(/^\s*[-*]\s+/, '◈ ')
+            .replace(/\*\*(.+?)\*\*/g, '$1')
+            .replace(/__(.+?)__/g, '$1')
+            .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=$|[\s).,;:!?])/g, '$1$2');
+        })
+        .join('\n');
+
+      return boldSerif(text);
+    })
+    .join('');
+
+  return `⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\n${body.trim()}\n\n𖤍 𝗞𝗔𝗬≈𝗗𝗘𝗡`;
+}
 // ------------------------------------------------------------
 // 14. ENVOI DE MESSAGES
 // ------------------------------------------------------------
@@ -569,61 +627,83 @@ async function sendOfficialImage(jid, message = null) {
 // ------------------------------------------------------------
 
 function getMenu() {
-  return `
-╭━━〔 🧬 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 〕━━╮
-   𝗔𝗥𝗧𝗜𝗙𝗜𝗖𝗜𝗔𝗟 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘
-╰━━━━━━━━━━━━━━━━━━━━━━╯
+  return `⟢ 𝗔𝗥𝗧𝗜𝗙𝗜𝗖𝗜𝗔𝗟 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘 ⟣
 
-┏━━〔 ✦ 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘 〕
-┃ ✧ Xchat <message>
-┃ ✧ Xai <question>
-┃ ✧ Xask <question>
-┃ ✧ Xanime <personnage>
-┃ ✧ Xpolice <sujet>
-┃ ✧ Xinfo
-┗━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━
+       ✎𝗠𝗔𝗜𝗡 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 𝗣𝗔𝗡𝗘𝗟
+━━━━━━━━━━━━━━━━━━━━━━━
 
-┏━━〔 ✦ 𝗘́𝗖𝗢𝗡𝗢𝗠𝗜𝗘 〕
-┃ ✧ Xdaily
-┃ ✧ Xcoins
-┃ ✧ Xp
-┃ ✧ Xrank
-┃ ✧ Xprofil
-┗━━━━━━━━━━━━━━━━━━━━━━
+╭─〔 𝟬𝟭 ⌬ 𝗖𝗢𝗚𝗡𝗜𝗧𝗜𝗩𝗘 〕
+│
+├ ◈ 𝚇𝚌𝚑𝚊𝚝
+├ ◈ 𝚇𝚊𝚜𝚔
+├ ◈ 𝚇𝚊𝚒
+├ ◈ 𝚇𝚊𝚗𝚒𝚖𝚎
+├ ◈ 𝚇𝚙𝚘𝚕𝚒𝚌𝚎
+├ ◈ 𝚇𝚒𝚗𝚏𝚘
+│
+╰━━━━━━━━━━━━━━━━━━━━━
 
-┏━━〔 ✦ 𝗗𝗜𝗩𝗘𝗥𝗧𝗜𝗦𝗦𝗘𝗠𝗘𝗡𝗧 〕
-┃ ✧ Xquiz
-┃ ✧ Xreponse <réponse>
-┗━━━━━━━━━━━━━━━━━━━━━━
+╭─〔 𝟬𝟮 ⌬ 𝗘𝗖𝗢𝗡𝗢𝗠𝗬 〕
+│
+├ ◈ 𝚇𝚍𝚊𝚒𝚕𝚢
+├ ◈ 𝚇𝚌𝚘𝚒𝚗𝚜
+├ ◈ 𝚇𝚙
+├ ◈ 𝚇𝚛𝚊𝚗𝚔
+│
+╰━━━━━━━━━━━━━━━━━━━━━
 
-┏━━〔 ✦ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘́𝗗𝗜𝗔 〕
-┃ ✧ Ximg <recherche>
-┃ ✧ Ximg create <description>
-┃ ✧ Xplay <titre>
-┃ ✧ Xvideo <titre>
-┗━━━━━━━━━━━━━━━━━━━━━━
+╭─〔 𝟬𝟯 ⌬ 𝗘𝗡𝗧𝗘𝗥𝗧𝗔𝗜𝗡𝗠𝗘𝗡𝗧 〕
+│
+╰ ◈ 𝚇𝚚𝚞𝚒𝚣
+╰━━━━━━━━━━━━━━━━━━━━━
 
-┏━━〔 ✦ 𝗚𝗥𝗢𝗨𝗣𝗘𝗦 〕
-┃ ✧ Xtag
-┃ ✧ Xtagall
-┃ ✧ Xonlyadmin on/off
-┃ ✧ Xkick
-┃ ✧ Xadd <numéro>
-┃ ✧ Xannonce <message>
-┃ ✧ Xclear
-┗━━━━━━━━━━━━━━━━━━━━━━
+╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
+│
+├ ◈ 𝚇𝚒𝚖𝚐
+├ ◈ 𝚇𝚙𝚕𝚊𝚢
+├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
+│
+╰━━━━━━━━━━━━━━━━━━━━━
 
-┏━━〔 ✦ 𝗦𝗬𝗦𝗧𝗘̀𝗠𝗘 〕
-┃ ✧ Xupt
-┃ ✧ Xmenu
-┃ ✧ Xoff
-┃ ✧ Xrestart
-┗━━━━━━━━━━━━━━━━━━━━━━
+╭─〔 𝟬𝟱 ⌬ 𝗜𝗗𝗘𝗡𝗧𝗜𝗧𝗬 〕
+│
+╰ ◈ 𝚇𝚙𝚛𝚘𝚏𝚒𝚕
+╰━━━━━━━━━━━━━━━━━━━━━
 
-Créatrice de solutions. Esprit indépendant.
-Créée et développée par KAY≈DEN.
+╭─〔 𝟬𝟲 ⌬ 𝗡𝗘𝗧𝗪𝗢𝗥𝗞 〕
+│
+├ ◈ 𝚇𝚝𝚊𝚐𝚊𝚕𝚕
+├ ◈ 𝚇𝚊𝚗𝚗𝚘𝚗𝚌𝚎
+│
+╰━━━━━━━━━━━━━━━━━━━━━
 
-${SIGNATURE}
+╭─〔 𝟬𝟳 ⌬ 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 〕
+│
+├ ◈ 𝚇𝚔𝚒𝚌𝚔
+├ ◈ 𝚇𝚊𝚍𝚍
+├ ◈ 𝚇𝚌𝚕𝚎𝚊𝚛
+├ ◈ 𝚇𝚘𝚏𝚏
+├ ◈ 𝚇𝚛𝚎𝚜𝚝𝚊𝚛𝚝
+├ ◈ 𝚇𝚘𝚗𝚕𝚢𝚊𝚍𝚖𝚒𝚗
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+╭─〔 𝟬𝟴 ⌬ 𝗦𝗬𝗦𝗧𝗘𝗠 〕
+│
+├ ◈ 𝚇𝚞𝚙𝚝
+├ ◈ 𝚇𝚖𝚎𝚗𝚞
+│
+╰━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━
+⌬ 𝗣𝗥𝗘𝗙𝗜𝗫𝗘 : 𝐗
+⌬ 𝗦𝗧𝗔𝗧𝗨𝗦  : 𝗢𝗡𝗟𝗜𝗡𝗘
+━━━━━━━━━━━━━━━━━━━━━━
+
+              𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍
+                 ᴅᴇᴠᴇʟᴏᴘᴇᴅ ʙʏ
+                    𝗞𝗔𝗬≈𝗗𝗘𝗡
 `;
 }
 
@@ -698,22 +778,48 @@ async function askGroq(prompt, jid, options = {}) {
     { role: 'user', content: String(prompt).trim() }
   ];
 
-  const response = await axios.post(
-    'https://api.groq.com/openai/v1/chat/completions',
-    {
-      model: CONFIG.groqModel,
-      messages,
-      temperature: 0.75,
-      max_tokens: 1200
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${CONFIG.groqKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 60000
+  const models = [
+    ...new Set([
+      CONFIG.groqModel,
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant'
+    ])
+  ];
+
+  let response = null;
+  let lastError = null;
+
+  for (const model of models) {
+    try {
+      response = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        { model, messages, temperature: 0.75, max_tokens: 1200 },
+        {
+          headers: {
+            Authorization: `Bearer ${CONFIG.groqKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 60000
+        }
+      );
+
+      break;
+    } catch (error) {
+      lastError = error;
+
+      const status = error?.response?.status;
+
+      // Modèle refusé ou retiré : on essaie le suivant.
+      if (status !== 400 && status !== 404) throw error;
+
+      logger.warn(
+        { model, status, data: error?.response?.data },
+        'Modèle Groq refusé, essai du suivant.'
+      );
     }
-  );
+  }
+
+  if (!response) throw lastError || new Error('Groq indisponible.');
 
   const answer = response.data?.choices?.[0]?.message?.content;
 
@@ -1961,30 +2067,49 @@ async function handleAICommand(jid, message, command, args) {
 
   if (command === 'police') {
     prompt = `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
-  }
-
-  // Xchat garde un historique de conversation ; les autres non.
-  const answer = await askGroq(prompt, jid, { useHistory: command === 'chat' });
-
-  await sendReply(
-    jid,
-    getResultText(answer, 'Je n’ai pas pu produire de réponse pour le moment.'),
-    message
-  );
-
-  return true;
 }
+     
+    let answer;
 
-async function handleImageCommand(jid, message, args) {
-  if (!args) {
+  try {
+    answer = await askGroq(prompt, jid, { useHistory: command === 'chat' });
+  } catch (error) {
+    const status = error?.response?.status;
+
+    logger.error(
+      { status, data: error?.response?.data, error: error?.message },
+      'Erreur Groq.'
+    );
+
+    const reasons = {
+      401: 'La clé GROQ_API_KEY est refusée par Groq. Vérifie-la dans Railway.',
+      429: 'La limite d’utilisation de Groq est atteinte. Réessaie dans un instant.',
+      400: 'Groq a refusé la requête (modèle ou message non valide).',
+      404: 'Le modèle Groq demandé est introuvable.'
+    };
+
     await sendReply(
       jid,
-      'Utilisation :\nXimg Naruto\n\nPour créer une image :\nXimg create un dragon futuriste bleu',
+      moduleMessage(
+        '⌬ 𝗜𝗔 𝗜𝗡𝗗𝗜𝗦𝗣𝗢𝗡𝗜𝗕𝗟𝗘',
+        reasons[status] || 'Le service Groq ne répond pas pour le moment. Réessaie plus tard.'
+      ),
       message
     );
 
     return true;
   }
+
+  await sendReply(
+    jid,
+    formatAIReply(
+      getResultText(answer, 'Je n’ai pas pu produire de réponse pour le moment.')
+    ),
+    message
+  );
+
+  return true;
+}
 
   if (/^create\s+/i.test(args)) {
     const prompt = args.replace(/^create\s+/i, '').trim();

@@ -76,8 +76,9 @@ const cleanEnv = value =>
 const CONFIG = {
   pairingNumber: String(process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
   ownerNumbers: readOwnerNumbers(),
-  groqKey: cleanEnv(process.env.GROQ_API_KEY || process.env.GROQ_KEY),
-  groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
+  radoxKey: cleanEnv(process.env.RADOX_API_KEY),
+radoxModel: cleanEnv(process.env.RADOX_MODEL) || 'claude-sonnet-4.6',
+radoxBase: 'https://radoxai.com/v1',
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
@@ -120,7 +121,7 @@ const PROCESS_STARTED_AT = Date.now();
 const processedMessages = new Set();
 const activeRequests = new Set();
 
-const SIGNATURE = '𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
+const SIGNATURE = '𖤍𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
 
 // ------------------------------------------------------------
 // 06. IDENTITÉ DE SITRI-NEL
@@ -747,9 +748,9 @@ ${SIGNATURE}
 // 16. INTELLIGENCE ARTIFICIELLE — GROQ
 // ------------------------------------------------------------
 
-async function askGroq(prompt, jid, options = {}) {
-  if (!CONFIG.groqKey) {
-    throw new Error('GROQ_API_KEY absent des variables Railway.');
+async function askRadox(prompt, jid, options = {}) {
+  if (!CONFIG.radoxKey) {
+    throw new Error('RADOX_API_KEY absent des variables Railway.');
   }
 
   if (!prompt || !String(prompt).trim()) {
@@ -779,11 +780,10 @@ async function askGroq(prompt, jid, options = {}) {
     { role: 'user', content: String(prompt).trim() }
   ];
 
-  const models = [
+    const models = [
     ...new Set([
-      CONFIG.groqModel,
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant'
+      CONFIG.radoxModel,
+      'claude-sonnet-4.6'
     ])
   ];
 
@@ -792,12 +792,12 @@ async function askGroq(prompt, jid, options = {}) {
 
   for (const model of models) {
     try {
-      response = await axios.post(
-        'https://api.groq.com/openai/v1/chat/completions',
+            response = await axios.post(
+        `${CONFIG.radoxBase}/chat/completions`,
         { model, messages, temperature: 0.75, max_tokens: 1200 },
         {
           headers: {
-            Authorization: `Bearer ${CONFIG.groqKey}`,
+                        Authorization: `Bearer ${CONFIG.radoxKey}`,
             'Content-Type': 'application/json'
           },
           timeout: 60000
@@ -815,17 +815,17 @@ async function askGroq(prompt, jid, options = {}) {
 
       logger.warn(
         { model, status, data: error?.response?.data },
-        'Modèle Groq refusé, essai du suivant.'
+        'Modèle Radox refusé, essai du suivant.'
       );
     }
   }
 
-  if (!response) throw lastError || new Error('Groq indisponible.');
+  if (!response) throw lastError || new Error('Radox indisponible.');
 
   const answer = response.data?.choices?.[0]?.message?.content;
 
   if (!answer || !String(answer).trim()) {
-    throw new Error('Groq a renvoyé une réponse vide.');
+    new Error('Radox a renvoyé une réponse vide...')
   }
 
   const cleanAnswer = String(answer).trim();
@@ -2089,17 +2089,17 @@ async function handleAICommand(jid, message, command, args) {
     );
 
     const reasons = {
-      401: 'La clé GROQ_API_KEY est refusée par Groq. Vérifie-la dans Railway.',
-      429: 'La limite d’utilisation de Groq est atteinte. Réessaie dans un instant.',
-      400: 'Groq a refusé la requête (modèle ou message non valide).',
-      404: 'Le modèle Groq demandé est introuvable.'
-    };
+            401: 'La clé RADOX_API_KEY est refusée. Vérifie-la dans Railway.',
+      402: 'Solde Radox épuisé. Recharge ou attends le renouvellement gratuit.',
+      429: 'Limite Radox atteinte. Réessaie dans un instant.',
+      400: 'Radox a refusé la requête (modèle ou message non valide).',
+      404: 'Le modèle Radox demandé est introuvable.'
 
     await sendReply(
       jid,
       moduleMessage(
         '⌬ 𝗜𝗔 𝗜𝗡𝗗𝗜𝗦𝗣𝗢𝗡𝗜𝗕𝗟𝗘',
-        reasons[status] || 'Le service Groq ne répond pas pour le moment. Réessaie plus tard.'
+                reasons[status] || 'Le service Radox ne répond pas pour le moment. Réessaie plus tard.'
       ),
       message
     );

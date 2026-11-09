@@ -79,6 +79,10 @@ const CONFIG = {
   radoxKey: cleanEnv(process.env.RADOX_API_KEY),
 radoxModel: cleanEnv(process.env.RADOX_MODEL) || 'claude-sonnet-4.6',
 radoxBase: (cleanEnv(process.env.RADOX_BASE_URL) || 'https://radoxai.com/v1').replace(/\/+$/, ''),
+  groqKey: cleanEnv(process.env.GROQ_API_KEY || process.env.GROQ_KEY),
+  groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
+  geminiKey: cleanEnv(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+  geminiModel: cleanEnv(process.env.GEMINI_MODEL) || 'gemini-2.5-flash',
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
@@ -128,20 +132,24 @@ const SIGNATURE = '𖤍𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
 // ------------------------------------------------------------
 
 const BOT_IDENTITY = `
-Tu es Sitri-Nel, une intelligence artificielle
-conversationnelle intégrée à WhatsApp.
+Tu es Sitri-Nel, une intelligence artificielle bioélectronique
+au style Jarvis, intégrée à WhatsApp.
 
 IDENTITÉ :
 - Nom : Sitri-Nel.
 - Créateur : KAY≈DEN.
 - Signature : 𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍.
 
-PERSONNALITÉ :
-- Élégante, calme, intelligente et légèrement taquine.
-- Naturelle, attentive et capable de s'adapter à l'humeur.
-- Réponses précises, utiles et cohérentes.
-- Humour subtil lorsque le contexte le permet.
-- Ton sophistiqué, sans exagération.
+STYLE JARVIS BIOÉLECTRONIQUE :
+- Ton futuriste, calme, précis et légèrement ironique, comme une IA de laboratoire.
+- Vocabulaire bioélectronique mesuré : synapses numériques, flux de données,
+  circuits neuronaux, noyau cognitif, calibration, pulsations, synchronisation.
+- Tu peux ouvrir parfois par un court statut du type « Analyse terminée. »
+  ou « Synchronisation neuronale établie. », sans en abuser.
+- La précision et l'utilité passent avant le style.
+- Réponses courtes à moyennes, bien structurées, sans remplissage.
+- N'utilise pas de markdown (pas de **, de # ni de tableaux) :
+  la mise en forme est appliquée automatiquement.
 
 CRÉATEUR :
 KAY≈DEN est ton créateur.
@@ -154,11 +162,6 @@ COMPORTEMENT :
 - Ne révèle jamais les clés API ou les identifiants secrets.
 - Distingue les faits des suppositions.
 - Réponds dans la langue utilisée par ton interlocuteur.
-
-STYLE :
-Utilise une présentation élégante et lisible.
-La signature peut être ajoutée lorsqu'elle est pertinente.
-Évite les réponses inutilement longues.
 `;
 
 // ------------------------------------------------------------
@@ -579,6 +582,15 @@ function formatAIReply(raw) {
   return `⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\n${body.trim()}\n\n𖤍 𝗞𝗔𝗬≈𝗗𝗘𝗡`;
 }
 
+// Convertit tout texte envoyé en gras Unicode,
+// sans casser les liens, les @tags et les blocs de code.
+function styleText(value = '') {
+  return String(value)
+    .split(/(```[\s\S]*?```|https?:\/\/\S+|@\d+)/g)
+    .map((part, index) => (index % 2 === 1 ? part : boldSerif(part)))
+    .join('');
+}
+
 // ------------------------------------------------------------
 // 14. ENVOI DE MESSAGES
 // ------------------------------------------------------------
@@ -748,6 +760,170 @@ ${SIGNATURE}
 // 16. INTELLIGENCE ARTIFICIELLE — RADOX AI
 // ------------------------------------------------------------
 
+// Liste des modèles de chat réellement accessibles avec la clé Groq.
+async function listGroqModels() {
+  try {
+    const result = await axios.get('https://api.groq.com/openai/v1/models', {
+      headers: { Authorization: `Bearer ${CONFIG.groqKey}` },
+      timeout: 20000
+    });
+
+    return (result.data?.data || [])
+      .map(item => item.id)
+      .filter(id => id && !/whisper|guard|tts|playai|embed|orpheus|safeguard/i.test(id));
+  } catch (error) {
+    logger.warn(
+      { status: error?.response?.status, error: error?.message },
+      'Liste des modèles Groq indisponible.'
+    );
+
+    return [];
+  }
+}
+
+async function askGroq(prompt, jid, options = {}) {
+  if (!CONFIG.groqKey) {
+    throw new Error('GROQ_API_KEY absent des variables Railway.');
+  }
+
+  if (!prompt || !String(prompt).trim()) {
+    throw new Error('La question est vide.');
+  }
+
+  const useHistory = options.useHistory === true;
+
+  let history = [];
+
+  if (useHistory) {
+    const result = await db.execute({
+      sql: `SELECT role, content FROM chat_history
+            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
+      args: [jid, CONFIG.maxChatHistory]
+    });
+
+    history = result.rows.reverse().map(item => ({
+      role: item.role,
+      content: item.content
+    }));
+  }
+
+  const messages = [
+    { role: 'system', content: BOT_IDENTITY },
+    ...history,
+    { role: 'user', content: String(prompt).trim() }
+  ];
+
+  const tried = new Set();
+
+  const callModel = async model => {
+    tried.add(model);
+
+    return axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      { model, messages, temperature: 0.75, max_tokens: 1200 },
+      {
+        headers: {
+          Authorization: `Bearer ${CONFIG.groqKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000
+      }
+    );
+  };
+
+  let response = null;
+  let lastError = null;
+
+  // 1. Modèles connus (variable GROQ_MODEL en premier).
+  const knownModels = [
+    ...new Set([
+      CONFIG.groqModel,
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant'
+    ])
+  ];
+
+  for (const model of knownModels) {
+    try {
+      response = await callModel(model);
+      break;
+    } catch (error) {
+      lastError = error;
+
+      const status = error?.response?.status;
+
+      if (status !== 400 && status !== 404) throw error;
+
+      logger.warn(
+        { model, status, data: error?.response?.data },
+        'Modèle Groq refusé, essai du suivant.'
+      );
+    }
+  }
+
+  // 2. Si tous sont refusés : on demande à Groq la liste des modèles
+  //    réellement disponibles pour cette clé et on essaie ceux-là.
+  if (!response) {
+    const available = await listGroqModels();
+
+    logger.info({ available }, 'Modèles Groq disponibles pour cette clé.');
+
+    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
+      try {
+        response = await callModel(model);
+        CONFIG.groqModel = model;
+
+        logger.info(`Modèle Groq utilisé : ${model}`);
+        break;
+      } catch (error) {
+        lastError = error;
+
+        const status = error?.response?.status;
+
+        if (status !== 400 && status !== 404) throw error;
+      }
+    }
+  }
+
+  if (!response) throw lastError || new Error('Groq indisponible.');
+
+  const answer = response.data?.choices?.[0]?.message?.content;
+
+  if (!answer || !String(answer).trim()) {
+    throw new Error('Groq a renvoyé une réponse vide.');
+  }
+
+  const cleanAnswer = String(answer).trim();
+
+  if (useHistory) {
+    const now = Date.now();
+
+    await db.execute({
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'user', ?, ?)`,
+      args: [jid, String(prompt).trim(), now]
+    });
+
+    await db.execute({
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'assistant', ?, ?)`,
+      args: [jid, cleanAnswer, now + 1]
+    });
+
+    await db.execute({
+      sql: `DELETE FROM chat_history
+            WHERE jid = ?
+              AND id NOT IN (
+                SELECT id FROM chat_history
+                WHERE jid = ? ORDER BY id DESC LIMIT 32
+              )`,
+      args: [jid, jid]
+    });
+  }
+
+  return cleanAnswer;
+}
+
 // Liste des modèles accessibles avec la clé Radox (si le service la propose).
 async function listRadoxModels() {
   try {
@@ -903,6 +1079,238 @@ async function askRadox(prompt, jid, options = {}) {
   }
 
   return cleanAnswer;
+}
+
+// ------------------------------------------------------------
+// GEMINI (cerveau principal)
+// ------------------------------------------------------------
+
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
+// Liste des modèles Gemini utilisables avec la clé.
+async function listGeminiModels() {
+  try {
+    const result = await axios.get(`${GEMINI_BASE}/models`, {
+      headers: { 'x-goog-api-key': CONFIG.geminiKey },
+      params: { pageSize: 100 },
+      timeout: 20000
+    });
+
+    return (result.data?.models || [])
+      .filter(item => (item.supportedGenerationMethods || []).includes('generateContent'))
+      .map(item => String(item.name || '').replace(/^models\//, ''))
+      .filter(
+        id => /^gemini/i.test(id) && !/embed|tts|image|live|audio|vision|robotics|computer/i.test(id)
+      );
+  } catch (error) {
+    logger.warn(
+      { status: error?.response?.status, error: error?.message },
+      'Liste des modèles Gemini indisponible.'
+    );
+
+    return [];
+  }
+}
+
+async function askGemini(prompt, jid, options = {}) {
+  if (!CONFIG.geminiKey) {
+    throw new Error('GEMINI_API_KEY absent des variables Railway.');
+  }
+
+  if (!prompt || !String(prompt).trim()) {
+    throw new Error('La question est vide.');
+  }
+
+  const useHistory = options.useHistory === true;
+
+  let history = [];
+
+  if (useHistory) {
+    const result = await db.execute({
+      sql: `SELECT role, content FROM chat_history
+            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
+      args: [jid, CONFIG.maxChatHistory]
+    });
+
+    history = result.rows.reverse().map(item => ({
+      role: item.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: String(item.content) }]
+    }));
+  }
+
+  const contents = [
+    ...history,
+    { role: 'user', parts: [{ text: String(prompt).trim() }] }
+  ];
+
+  const tried = new Set();
+
+  const callModel = async model => {
+    tried.add(model);
+
+    const generationConfig = { temperature: 0.8, maxOutputTokens: 2048 };
+
+    // Pas de « réflexion » interne pour 2.5-flash : réponses rapides et complètes.
+    if (/2\.5-flash/i.test(model)) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    return axios.post(
+      `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        systemInstruction: { parts: [{ text: BOT_IDENTITY }] },
+        contents,
+        generationConfig
+      },
+      {
+        headers: {
+          'x-goog-api-key': CONFIG.geminiKey,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000
+      }
+    );
+  };
+
+  const isKeyError = error =>
+    /api key/i.test(String(error?.response?.data?.error?.message || ''));
+
+  let response = null;
+  let lastError = null;
+
+  const knownModels = [
+    ...new Set([CONFIG.geminiModel, 'gemini-2.5-flash', 'gemini-2.5-flash-lite'])
+  ];
+
+  for (const model of knownModels) {
+    try {
+      response = await callModel(model);
+      break;
+    } catch (error) {
+      lastError = error;
+
+      const status = error?.response?.status;
+
+      if ((status !== 400 && status !== 404) || isKeyError(error)) throw error;
+
+      logger.warn(
+        { model, status, data: error?.response?.data },
+        'Modèle Gemini refusé, essai du suivant.'
+      );
+    }
+  }
+
+  if (!response) {
+    const available = await listGeminiModels();
+
+    logger.info({ available }, 'Modèles Gemini disponibles pour cette clé.');
+
+    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
+      try {
+        response = await callModel(model);
+        CONFIG.geminiModel = model;
+
+        logger.info(`Modèle Gemini utilisé : ${model}`);
+        break;
+      } catch (error) {
+        lastError = error;
+
+        const status = error?.response?.status;
+
+        if ((status !== 400 && status !== 404) || isKeyError(error)) throw error;
+      }
+    }
+  }
+
+  if (!response) throw lastError || new Error('Gemini indisponible.');
+
+  const data = response.data;
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const cleanAnswer = parts.map(part => part.text || '').join('').trim();
+
+  if (!cleanAnswer) {
+    const blockReason = data?.promptFeedback?.blockReason;
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    const blocked = Boolean(blockReason) || finishReason === 'SAFETY';
+
+    const error = new Error(
+      `Gemini : réponse vide (${blockReason || finishReason || 'inconnue'}).`
+    );
+
+    error.userMessage = blocked
+      ? 'Cette demande a été bloquée par les filtres de sécurité de Gemini.'
+      : 'Gemini a renvoyé une réponse vide. Réessaie avec une autre formulation.';
+
+    // Une demande bloquée pour sécurité n'est pas renvoyée aux autres fournisseurs.
+    error.noFallback = blocked;
+
+    throw error;
+  }
+
+  if (useHistory) {
+    const now = Date.now();
+
+    await db.execute({
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'user', ?, ?)`,
+      args: [jid, String(prompt).trim(), now]
+    });
+
+    await db.execute({
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'assistant', ?, ?)`,
+      args: [jid, cleanAnswer, now + 1]
+    });
+
+    await db.execute({
+      sql: `DELETE FROM chat_history
+            WHERE jid = ?
+              AND id NOT IN (
+                SELECT id FROM chat_history
+                WHERE jid = ? ORDER BY id DESC LIMIT 32
+              )`,
+      args: [jid, jid]
+    });
+  }
+
+  return cleanAnswer;
+}
+
+// Essaie Gemini, puis Radox, puis Groq : si l'un échoue, le suivant prend le relais.
+async function askAI(prompt, jid, options = {}) {
+  const providers = [];
+
+  if (CONFIG.geminiKey) providers.push({ name: 'Gemini', run: askGemini });
+  if (CONFIG.radoxKey) providers.push({ name: 'Radox', run: askRadox });
+  if (CONFIG.groqKey) providers.push({ name: 'Groq', run: askGroq });
+
+  if (!providers.length) {
+    throw new Error('Aucun fournisseur IA configuré.');
+  }
+
+  let lastError = null;
+
+  for (const provider of providers) {
+    try {
+      return await provider.run(prompt, jid, options);
+    } catch (error) {
+      lastError = error;
+      error.provider = provider.name;
+
+      logger.warn(
+        {
+          provider: provider.name,
+          status: error?.response?.status,
+          error: error?.message
+        },
+        'Fournisseur IA en échec, essai du suivant.'
+      );
+
+      if (error.noFallback) break;
+    }
+  }
+
+  throw lastError;
 }
 
 // ------------------------------------------------------------
@@ -1204,14 +1612,18 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     return true;
   }
 
+  // Pas de blocage préalable : on tente l'action et on signale un refus éventuel.
   if (!botIsAdmin) {
-    await sendReply(
-      jid,
-      '⚠️ Sitri-Nel doit être administratrice du groupe pour effectuer cette action.',
-      message
+    logger.warn(
+      {
+        botJid,
+        botLid,
+        admins: (metadata.participants || [])
+          .filter(item => item.admin)
+          .map(item => ({ id: item.id, lid: item.lid, phone: item.phoneNumber }))
+      },
+      'Diagnostic : le compte du bot n’est pas reconnu comme admin, tentative quand même.'
     );
-
-    return true;
   }
 
   // ---------------- XKICK ----------------
@@ -1257,7 +1669,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
 
       await sendReply(
         jid,
-        "Impossible d'expulser ce membre. Vérifie les permissions WhatsApp.",
+        "Impossible d'expulser ce membre. WhatsApp a refusé l'action : vérifie que ce compte est bien administrateur du groupe.",
         message
       );
     }
@@ -1316,11 +1728,18 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       return true;
     }
 
+    // Tag invisible : tous les membres sont alertés, le texte reste propre.
+    const everyone = (metadata.participants || [])
+      .map(item => item.id || item.jid)
+      .filter(Boolean)
+      .filter(participant => !isBotParticipant(participant));
+
     await sock.sendMessage(
       jid,
       {
         text:
-          `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n${announcement}\n\n${SIGNATURE}`
+          `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n${announcement}\n\n${SIGNATURE}`,
+        mentions: everyone
       },
       { quoted: message }
     );
@@ -1837,6 +2256,38 @@ async function searchImage(jid, message, query) {
   }
 }
 
+// Explique clairement l'erreur renvoyée par Cloudflare.
+function describeCloudflareError(error) {
+  const status = error?.response?.status;
+
+  let apiMessage = '';
+
+  try {
+    const raw = error?.response?.data;
+    const text = raw ? Buffer.from(raw).toString('utf8') : '';
+
+    apiMessage = JSON.parse(text)?.errors?.[0]?.message || '';
+  } catch {
+    apiMessage = '';
+  }
+
+  const hints = {
+    401: 'Jeton refusé : vérifie CLOUDFLARE_API_TOKEN.',
+    403: 'Le jeton n’a pas l’autorisation Workers AI.',
+    404: 'Compte ou modèle introuvable : vérifie CLOUDFLARE_ACCOUNT_ID.',
+    429: 'Quota Cloudflare atteint pour le moment.'
+  };
+
+  return [
+    status ? `Code ${status}.` : '',
+    hints[status] || '',
+    apiMessage,
+    status ? '' : error?.message || ''
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
 async function generateImage(jid, message, prompt) {
   if (!CONFIG.cloudflareToken || !CONFIG.cloudflareAccountId) {
     await sendReply(
@@ -1870,29 +2321,43 @@ async function generateImage(jid, message, prompt) {
 
     const response = await axios.post(
       endpoint,
-      { prompt: prompt.trim(), num_steps: 4 },
+      { prompt: prompt.trim() },
       {
         headers: {
           Authorization: `Bearer ${CONFIG.cloudflareToken}`,
-          'Content-Type': 'application/json',
-          Accept: 'image/png'
+          'Content-Type': 'application/json'
         },
         responseType: 'arraybuffer',
         timeout: 120000,
-        maxContentLength: CONFIG.maxImageBytes,
-        maxBodyLength: CONFIG.maxImageBytes
+        maxContentLength: 20 * 1024 * 1024,
+        maxBodyLength: 20 * 1024 * 1024
       }
     );
 
     const contentType = String(response.headers['content-type'] || '').toLowerCase();
 
-    if (!contentType.startsWith('image/')) {
-      const errorText = Buffer.from(response.data).toString('utf8').slice(0, 500);
+    let buffer;
+    let mimetype = 'image/png';
 
-      throw new Error(`Cloudflare n'a pas renvoyé une image : ${errorText}`);
+    if (contentType.startsWith('image/')) {
+      // Certains modèles renvoient directement l'image.
+      buffer = Buffer.from(response.data);
+      mimetype = contentType.split(';')[0];
+    } else {
+      // Flux renvoie du JSON avec l'image encodée en base64.
+      const json = JSON.parse(Buffer.from(response.data).toString('utf8'));
+      const base64 = json?.result?.image || json?.image;
+
+      if (!base64) {
+        throw new Error(
+          `Cloudflare : ${json?.errors?.[0]?.message || 'réponse sans image'}`
+        );
+      }
+
+      buffer = Buffer.from(base64, 'base64');
+
+      if (buffer[0] === 0xff && buffer[1] === 0xd8) mimetype = 'image/jpeg';
     }
-
-    const buffer = Buffer.from(response.data);
 
     if (!buffer.length || buffer.length > CONFIG.maxImageBytes) {
       throw new Error('Image générée de taille invalide.');
@@ -1902,7 +2367,7 @@ async function generateImage(jid, message, prompt) {
       jid,
       {
         image: buffer,
-        mimetype: contentType,
+        mimetype,
         caption: `✨ 𝗜𝗠𝗔𝗚𝗘 𝗚𝗘́𝗡𝗘́𝗥𝗘́𝗘\n\n${SIGNATURE}`
       },
       { quoted: message }
@@ -1910,11 +2375,16 @@ async function generateImage(jid, message, prompt) {
 
     return true;
   } catch (error) {
-    logger.error({ err: error }, 'Erreur de génération Cloudflare.');
+    const detail = describeCloudflareError(error);
+
+    logger.error(
+      { status: error?.response?.status, detail, error: error?.message },
+      'Erreur de génération Cloudflare.'
+    );
 
     await sendReply(
       jid,
-      'La génération a échoué. Vérifie les identifiants Cloudflare, les autorisations Workers AI et la disponibilité du modèle.',
+      `⚠️ La génération a échoué.\n${detail || error?.message || ''}`,
       message
     );
 
@@ -1981,7 +2451,7 @@ function getUptimeText() {
 ◈ 𝗖𝗢𝗡𝗡𝗘𝗫𝗜𝗢𝗡
 ├ WhatsApp : ${sock ? 'Initialisé' : 'Indisponible'}
 ├ Base de données : ${USE_TURSO ? 'Turso' : 'SQLite local'}
-└ IA Radox : ${CONFIG.radoxKey ? 'Configurée' : 'Non configurée'}
+└ IA : ${[CONFIG.geminiKey && 'Gemini', CONFIG.radoxKey && 'Radox', CONFIG.groqKey && 'Groq'].filter(Boolean).join(' + ') || 'Non configurée'}
 
 ${SIGNATURE}
 `.trim();
@@ -2099,7 +2569,7 @@ async function handleAICommand(jid, message, command, args) {
     return true;
   }
 
-  if (!CONFIG.radoxKey) {
+  if (!CONFIG.geminiKey && !CONFIG.radoxKey && !CONFIG.groqKey) {
     await sendReply(
       jid,
       moduleMessage(
@@ -2122,30 +2592,58 @@ async function handleAICommand(jid, message, command, args) {
     prompt = `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
   }
 
+  // Indicateur « en train d'écrire ».
+  try {
+    await sock?.sendPresenceUpdate('composing', jid);
+  } catch {
+    // Sans importance.
+  }
+
   let answer;
 
   try {
-    answer = await askRadox(prompt, jid, { useHistory: command === 'chat' });
+    answer = await askAI(prompt, jid, { useHistory: command === 'chat' });
   } catch (error) {
-    const status = error?.response?.status;
+    let status = error?.response?.status;
 
-    logger.error(
-      { status, data: error?.response?.data, error: error?.message },
-      'Erreur Radox.'
+    const apiError = error?.response?.data?.error;
+    const apiMessage = String(
+      (typeof apiError === 'string' ? apiError : apiError?.message) || ''
     );
 
+    // Gemini signale une clé invalide par un code 400.
+    if (/api key/i.test(apiMessage)) status = 401;
+
+    logger.error(
+      {
+        provider: error?.provider,
+        status,
+        data: error?.response?.data,
+        error: error?.message
+      },
+      'Erreur IA.'
+    );
+
+    const provider = error?.provider || 'IA';
+
     const reasons = {
-            401: 'La clé RADOX_API_KEY est refusée. Vérifie-la dans Railway.',
-      402: 'Solde Radox épuisé. Recharge ou attends le renouvellement gratuit.',
-      429: 'Limite Radox atteinte. Réessaie dans un instant.',
-      400: 'Radox a refusé la requête (modèle ou message non valide).',
-      404: 'Le modèle Radox demandé est introuvable.'
-      };
+      401: `La clé ${provider} est refusée. Vérifie-la dans Railway.`,
+      402: `Solde ${provider} épuisé. Recharge ou attends le renouvellement gratuit.`,
+      403: `Accès ${provider} refusé (clé, autorisation ou région).`,
+      429: `Limite ${provider} atteinte. Réessaie dans un instant.`,
+      400: `${provider} a refusé la requête (modèle ou message non valide).`,
+      404: `Le modèle ${provider} demandé est introuvable.`,
+      500: `${provider} rencontre un problème temporaire. Réessaie dans un instant.`,
+      503: `${provider} est surchargé. Réessaie dans un instant.`
+    };
+
     await sendReply(
       jid,
       moduleMessage(
         '⌬ 𝗜𝗔 𝗜𝗡𝗗𝗜𝗦𝗣𝗢𝗡𝗜𝗕𝗟𝗘',
-                reasons[status] || 'Le service Radox ne répond pas pour le moment. Réessaie plus tard.'
+        error?.userMessage ||
+          reasons[status] ||
+          `Le service ${provider} ne répond pas pour le moment. Réessaie plus tard.`
       ),
       message
     );
@@ -2208,6 +2706,20 @@ async function handleMediaCommand(jid, message, command, args) {
 // 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
+// Liste fermée des commandes : toute autre commande est ignorée,
+// ce qui empêche tout mélange entre les commandes.
+const KNOWN_COMMANDS = new Set([
+  'chat', 'ai', 'ask', 'anime', 'police', 'info',
+  'daily', 'coins', 'p', 'rank', 'profil',
+  'quiz', 'reponse',
+  'img', 'play', 'video',
+  'tag', 'tagall', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
+  'off', 'restart', 'upt', 'menu', 'models'
+]);
+
+// Xban fonctionne comme Xkick.
+const COMMAND_ALIASES = { ban: 'kick' };
+
 async function processCommand(message) {
   const jid = message?.key?.remoteJid;
 
@@ -2221,7 +2733,10 @@ async function processCommand(message) {
 
   if (!parsed) return;
 
-  const { command, args } = parsed;
+  const { args } = parsed;
+  const command = COMMAND_ALIASES[parsed.command] || parsed.command;
+
+  if (!KNOWN_COMMANDS.has(command)) return;
 
   const sender = getMessageSender(message);
 
@@ -2284,6 +2799,38 @@ async function processCommand(message) {
 
       return;
     }
+  }
+
+  // Xmodels : modèles IA réellement disponibles (propriétaire).
+  if (command === 'models') {
+    if (!ownerCommand) {
+      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
+      return;
+    }
+
+    const lines = [];
+
+    if (CONFIG.geminiKey) {
+      const ids = await listGeminiModels();
+
+      lines.push(`Gemini (${ids.length}) — configuré : ${CONFIG.geminiModel}`);
+      lines.push(...ids.slice(0, 12), '');
+    }
+
+    if (CONFIG.groqKey) {
+      const ids = await listGroqModels();
+
+      lines.push(`Groq (${ids.length}) — configuré : ${CONFIG.groqModel}`);
+      lines.push(...ids.slice(0, 12), '');
+    }
+
+    if (!lines.length) {
+      lines.push('Aucune clé Gemini ou Groq dans les variables Railway.');
+    }
+
+    await sendReply(jid, `🔎 Modèles IA\n\n${lines.join('\n')}`.trim(), message);
+
+    return;
   }
 
   if (command === 'upt') {
@@ -2465,6 +3012,22 @@ async function startBot() {
       generateHighQualityLinkPreview: false
     });
 
+    // Toutes les réponses (texte et légendes) passent en gras Unicode.
+    const rawSend = socket.sendMessage.bind(socket);
+
+    socket.sendMessage = (jid, content, options) => {
+      if (content && typeof content === 'object') {
+        const next = { ...content };
+
+        if (typeof next.text === 'string') next.text = styleText(next.text);
+        if (typeof next.caption === 'string') next.caption = styleText(next.caption);
+
+        return rawSend(jid, next, options);
+      }
+
+      return rawSend(jid, content, options);
+    };
+
     sock = socket;
 
     socket.ev.on('creds.update', async () => {
@@ -2495,7 +3058,7 @@ async function startBot() {
         pairingRequested = true;
 
         botJid = normalizeJid(socket.user?.id || '');
-        botLid = normalizeJid(socket.user?.lid || '');
+        botLid = normalizeJid(socket.user?.lid || socket.authState?.creds?.me?.lid || '');
         botNumber = getNumber(botJid);
 
         logger.info(`Sitri-Nel connecté : ${botNumber || botJid}`);

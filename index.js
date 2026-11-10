@@ -76,11 +76,6 @@ const cleanEnv = value =>
 const CONFIG = {
   pairingNumber: String(process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
   ownerNumbers: readOwnerNumbers(),
-  radoxKey: cleanEnv(process.env.RADOX_API_KEY),
-radoxModel: cleanEnv(process.env.RADOX_MODEL) || 'claude-sonnet-4.6',
-radoxBase: (cleanEnv(process.env.RADOX_BASE_URL) || 'https://radoxai.com/v1').replace(/\/+$/, ''),
-  groqKey: cleanEnv(process.env.GROQ_API_KEY || process.env.GROQ_KEY),
-  groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
   geminiKey: cleanEnv(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
   geminiModel: cleanEnv(process.env.GEMINI_MODEL) || 'gemini-2.5-flash',
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
@@ -219,6 +214,11 @@ async function initDatabase() {
     `CREATE TABLE IF NOT EXISTS auth_state (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      )`,
+    `CREATE TABLE IF NOT EXISTS bot_lock (
+        id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
       )`
   ];
 
@@ -236,11 +236,45 @@ async function initDatabase() {
 // plus besoin de relier le bot à chaque fois.
 
 async function useDatabaseAuthState() {
+  // Toutes les écritures passent par une file d'attente : l'ordre est garanti.
+  // Sans ça, une ancienne version de la session peut écraser la plus récente
+  // et le bot redemande un jumelage.
+  let queue = Promise.resolve();
+
+  const enqueue = task => {
+    const run = queue.then(task);
+    queue = run.catch(() => {});
+    return run;
+  };
+
+  const withRetry = async task => {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        return await task();
+      } catch (error) {
+        lastError = error;
+
+        logger.warn(
+          { attempt, error: error?.message },
+          'Accès à la session (base de données) échoué, nouvel essai.'
+        );
+
+        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+      }
+    }
+
+    throw lastError;
+  };
+
   const readData = async key => {
-    const result = await db.execute({
-      sql: 'SELECT value FROM auth_state WHERE key = ?',
-      args: [key]
-    });
+    const result = await withRetry(() =>
+      db.execute({
+        sql: 'SELECT value FROM auth_state WHERE key = ?',
+        args: [key]
+      })
+    );
 
     if (!result.rows.length) return null;
 
@@ -265,6 +299,8 @@ async function useDatabaseAuthState() {
       creds,
       keys: {
         get: async (type, ids) => {
+          await queue;
+
           const data = {};
 
           await Promise.all(
@@ -306,13 +342,14 @@ async function useDatabaseAuthState() {
           }
 
           if (statements.length) {
-            await db.batch(statements, 'write');
+            await enqueue(() => withRetry(() => db.batch(statements, 'write')));
           }
         }
       }
     },
 
-    saveCreds: () => writeData('creds', creds)
+    // La session est sérialisée au moment de l'écriture : c'est toujours la plus récente.
+    saveCreds: () => enqueue(() => withRetry(() => writeData('creds', creds)))
   };
 }
 
@@ -757,332 +794,7 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. INTELLIGENCE ARTIFICIELLE — RADOX AI
-// ------------------------------------------------------------
-
-// Liste des modèles de chat réellement accessibles avec la clé Groq.
-async function listGroqModels() {
-  try {
-    const result = await axios.get('https://api.groq.com/openai/v1/models', {
-      headers: { Authorization: `Bearer ${CONFIG.groqKey}` },
-      timeout: 20000
-    });
-
-    return (result.data?.data || [])
-      .map(item => item.id)
-      .filter(id => id && !/whisper|guard|tts|playai|embed|orpheus|safeguard/i.test(id));
-  } catch (error) {
-    logger.warn(
-      { status: error?.response?.status, error: error?.message },
-      'Liste des modèles Groq indisponible.'
-    );
-
-    return [];
-  }
-}
-
-async function askGroq(prompt, jid, options = {}) {
-  if (!CONFIG.groqKey) {
-    throw new Error('GROQ_API_KEY absent des variables Railway.');
-  }
-
-  if (!prompt || !String(prompt).trim()) {
-    throw new Error('La question est vide.');
-  }
-
-  const useHistory = options.useHistory === true;
-
-  let history = [];
-
-  if (useHistory) {
-    const result = await db.execute({
-      sql: `SELECT role, content FROM chat_history
-            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
-      args: [jid, CONFIG.maxChatHistory]
-    });
-
-    history = result.rows.reverse().map(item => ({
-      role: item.role,
-      content: item.content
-    }));
-  }
-
-  const messages = [
-    { role: 'system', content: BOT_IDENTITY },
-    ...history,
-    { role: 'user', content: String(prompt).trim() }
-  ];
-
-  const tried = new Set();
-
-  const callModel = async model => {
-    tried.add(model);
-
-    return axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      { model, messages, temperature: 0.75, max_tokens: 1200 },
-      {
-        headers: {
-          Authorization: `Bearer ${CONFIG.groqKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 60000
-      }
-    );
-  };
-
-  let response = null;
-  let lastError = null;
-
-  // 1. Modèles connus (variable GROQ_MODEL en premier).
-  const knownModels = [
-    ...new Set([
-      CONFIG.groqModel,
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant'
-    ])
-  ];
-
-  for (const model of knownModels) {
-    try {
-      response = await callModel(model);
-      break;
-    } catch (error) {
-      lastError = error;
-
-      const status = error?.response?.status;
-
-      if (status !== 400 && status !== 404) throw error;
-
-      logger.warn(
-        { model, status, data: error?.response?.data },
-        'Modèle Groq refusé, essai du suivant.'
-      );
-    }
-  }
-
-  // 2. Si tous sont refusés : on demande à Groq la liste des modèles
-  //    réellement disponibles pour cette clé et on essaie ceux-là.
-  if (!response) {
-    const available = await listGroqModels();
-
-    logger.info({ available }, 'Modèles Groq disponibles pour cette clé.');
-
-    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
-      try {
-        response = await callModel(model);
-        CONFIG.groqModel = model;
-
-        logger.info(`Modèle Groq utilisé : ${model}`);
-        break;
-      } catch (error) {
-        lastError = error;
-
-        const status = error?.response?.status;
-
-        if (status !== 400 && status !== 404) throw error;
-      }
-    }
-  }
-
-  if (!response) throw lastError || new Error('Groq indisponible.');
-
-  const answer = response.data?.choices?.[0]?.message?.content;
-
-  if (!answer || !String(answer).trim()) {
-    throw new Error('Groq a renvoyé une réponse vide.');
-  }
-
-  const cleanAnswer = String(answer).trim();
-
-  if (useHistory) {
-    const now = Date.now();
-
-    await db.execute({
-      sql: `INSERT INTO chat_history (jid, role, content, created_at)
-            VALUES (?, 'user', ?, ?)`,
-      args: [jid, String(prompt).trim(), now]
-    });
-
-    await db.execute({
-      sql: `INSERT INTO chat_history (jid, role, content, created_at)
-            VALUES (?, 'assistant', ?, ?)`,
-      args: [jid, cleanAnswer, now + 1]
-    });
-
-    await db.execute({
-      sql: `DELETE FROM chat_history
-            WHERE jid = ?
-              AND id NOT IN (
-                SELECT id FROM chat_history
-                WHERE jid = ? ORDER BY id DESC LIMIT 32
-              )`,
-      args: [jid, jid]
-    });
-  }
-
-  return cleanAnswer;
-}
-
-// Liste des modèles accessibles avec la clé Radox (si le service la propose).
-async function listRadoxModels() {
-  try {
-    const result = await axios.get(`${CONFIG.radoxBase}/models`, {
-      headers: { Authorization: `Bearer ${CONFIG.radoxKey}` },
-      timeout: 20000
-    });
-
-    return (result.data?.data || [])
-      .map(item => item.id)
-      .filter(id => id && !/embed|whisper|tts|image|moderation/i.test(id));
-  } catch (error) {
-    logger.warn(
-      { status: error?.response?.status, error: error?.message },
-      'Liste des modèles Radox indisponible.'
-    );
-
-    return [];
-  }
-}
-
-async function askRadox(prompt, jid, options = {}) {
-  if (!CONFIG.radoxKey) {
-    throw new Error('RADOX_API_KEY absent des variables Railway.');
-  }
-
-  if (!prompt || !String(prompt).trim()) {
-    throw new Error('La question est vide.');
-  }
-
-  const useHistory = options.useHistory === true;
-
-  let history = [];
-
-  if (useHistory) {
-    const result = await db.execute({
-      sql: `SELECT role, content FROM chat_history
-            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
-      args: [jid, CONFIG.maxChatHistory]
-    });
-
-    history = result.rows.reverse().map(item => ({
-      role: item.role,
-      content: item.content
-    }));
-  }
-
-  const messages = [
-    { role: 'system', content: BOT_IDENTITY },
-    ...history,
-    { role: 'user', content: String(prompt).trim() }
-  ];
-
-  const tried = new Set();
-
-  const callModel = async model => {
-    tried.add(model);
-
-    return axios.post(
-      `${CONFIG.radoxBase}/chat/completions`,
-      { model, messages, temperature: 0.75, max_tokens: 1200 },
-      {
-        headers: {
-          Authorization: `Bearer ${CONFIG.radoxKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 60000
-      }
-    );
-  };
-
-  let response = null;
-  let lastError = null;
-
-  // 1. Modèle configuré (variable RADOX_MODEL) puis modèle par défaut.
-  const knownModels = [...new Set([CONFIG.radoxModel, 'claude-sonnet-4.6'])];
-
-  for (const model of knownModels) {
-    try {
-      response = await callModel(model);
-      break;
-    } catch (error) {
-      lastError = error;
-
-      const status = error?.response?.status;
-
-      if (status !== 400 && status !== 404) throw error;
-
-      logger.warn(
-        { model, status, data: error?.response?.data },
-        'Modèle Radox refusé, essai du suivant.'
-      );
-    }
-  }
-
-  // 2. Si refusé : on demande à Radox la liste de ses modèles.
-  if (!response) {
-    const available = await listRadoxModels();
-
-    logger.info({ available }, 'Modèles Radox disponibles pour cette clé.');
-
-    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
-      try {
-        response = await callModel(model);
-        CONFIG.radoxModel = model;
-
-        logger.info(`Modèle Radox utilisé : ${model}`);
-        break;
-      } catch (error) {
-        lastError = error;
-
-        const status = error?.response?.status;
-
-        if (status !== 400 && status !== 404) throw error;
-      }
-    }
-  }
-
-  if (!response) throw lastError || new Error('Radox indisponible.');
-
-  const answer = response.data?.choices?.[0]?.message?.content;
-
-  if (!answer || !String(answer).trim()) {
-    throw new Error('Radox a renvoyé une réponse vide.');
-  }
-
-  const cleanAnswer = String(answer).trim();
-
-  if (useHistory) {
-    const now = Date.now();
-
-    await db.execute({
-      sql: `INSERT INTO chat_history (jid, role, content, created_at)
-            VALUES (?, 'user', ?, ?)`,
-      args: [jid, String(prompt).trim(), now]
-    });
-
-    await db.execute({
-      sql: `INSERT INTO chat_history (jid, role, content, created_at)
-            VALUES (?, 'assistant', ?, ?)`,
-      args: [jid, cleanAnswer, now + 1]
-    });
-
-    await db.execute({
-      sql: `DELETE FROM chat_history
-            WHERE jid = ?
-              AND id NOT IN (
-                SELECT id FROM chat_history
-                WHERE jid = ? ORDER BY id DESC LIMIT 32
-              )`,
-      args: [jid, jid]
-    });
-  }
-
-  return cleanAnswer;
-}
-
-// ------------------------------------------------------------
-// GEMINI (cerveau principal)
+// 16. INTELLIGENCE ARTIFICIELLE — GEMINI
 // ------------------------------------------------------------
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
@@ -1276,41 +988,14 @@ async function askGemini(prompt, jid, options = {}) {
   return cleanAnswer;
 }
 
-// Essaie Gemini, puis Radox, puis Groq : si l'un échoue, le suivant prend le relais.
+// Point d'entrée unique de l'IA : Gemini est le seul cerveau du bot.
 async function askAI(prompt, jid, options = {}) {
-  const providers = [];
-
-  if (CONFIG.geminiKey) providers.push({ name: 'Gemini', run: askGemini });
-  if (CONFIG.radoxKey) providers.push({ name: 'Radox', run: askRadox });
-  if (CONFIG.groqKey) providers.push({ name: 'Groq', run: askGroq });
-
-  if (!providers.length) {
-    throw new Error('Aucun fournisseur IA configuré.');
+  try {
+    return await askGemini(prompt, jid, options);
+  } catch (error) {
+    error.provider = 'Gemini';
+    throw error;
   }
-
-  let lastError = null;
-
-  for (const provider of providers) {
-    try {
-      return await provider.run(prompt, jid, options);
-    } catch (error) {
-      lastError = error;
-      error.provider = provider.name;
-
-      logger.warn(
-        {
-          provider: provider.name,
-          status: error?.response?.status,
-          error: error?.message
-        },
-        'Fournisseur IA en échec, essai du suivant.'
-      );
-
-      if (error.noFallback) break;
-    }
-  }
-
-  throw lastError;
 }
 
 // ------------------------------------------------------------
@@ -2451,7 +2136,7 @@ function getUptimeText() {
 ◈ 𝗖𝗢𝗡𝗡𝗘𝗫𝗜𝗢𝗡
 ├ WhatsApp : ${sock ? 'Initialisé' : 'Indisponible'}
 ├ Base de données : ${USE_TURSO ? 'Turso' : 'SQLite local'}
-└ IA : ${[CONFIG.geminiKey && 'Gemini', CONFIG.radoxKey && 'Radox', CONFIG.groqKey && 'Groq'].filter(Boolean).join(' + ') || 'Non configurée'}
+└ IA : ${CONFIG.geminiKey ? 'Gemini' : 'Non configurée'}
 
 ${SIGNATURE}
 `.trim();
@@ -2554,6 +2239,38 @@ async function handleQuizCommand(jid, message, sender, command, args) {
   return false;
 }
 
+// Phrase d'explication pour un fournisseur IA en échec.
+function explainAIFailure(error) {
+  let status = error?.response?.status;
+
+  const apiError = error?.response?.data?.error;
+  const apiMessage = String(
+    (typeof apiError === 'string' ? apiError : apiError?.message) || ''
+  );
+
+  // Gemini signale une clé invalide par un code 400.
+  if (/api key/i.test(apiMessage)) status = 401;
+
+  const provider = error?.provider || 'IA';
+
+  const reasons = {
+    401: `La clé ${provider} est refusée. Vérifie-la dans Railway.`,
+    402: `Solde ${provider} épuisé. Recharge ou attends le renouvellement gratuit.`,
+    403: `Accès ${provider} refusé (clé, autorisation ou région).`,
+    429: `Limite ${provider} atteinte. Réessaie dans un instant.`,
+    400: `${provider} a refusé la requête (modèle ou message non valide).`,
+    404: `Le modèle ${provider} demandé est introuvable.`,
+    500: `${provider} rencontre un problème temporaire. Réessaie dans un instant.`,
+    503: `${provider} est surchargé. Réessaie dans un instant.`
+  };
+
+  return (
+    error?.userMessage ||
+    reasons[status] ||
+    `Le service ${provider} ne répond pas pour le moment. Réessaie plus tard.`
+  );
+}
+
 async function handleAICommand(jid, message, command, args) {
   if (!['chat', 'ai', 'ask', 'anime', 'police'].includes(command)) {
     return false;
@@ -2569,7 +2286,7 @@ async function handleAICommand(jid, message, command, args) {
     return true;
   }
 
-  if (!CONFIG.geminiKey && !CONFIG.radoxKey && !CONFIG.groqKey) {
+  if (!CONFIG.geminiKey) {
     await sendReply(
       jid,
       moduleMessage(
@@ -2604,46 +2321,25 @@ async function handleAICommand(jid, message, command, args) {
   try {
     answer = await askAI(prompt, jid, { useHistory: command === 'chat' });
   } catch (error) {
-    let status = error?.response?.status;
+    const failures = error?.failures?.length ? error.failures : [error];
 
-    const apiError = error?.response?.data?.error;
-    const apiMessage = String(
-      (typeof apiError === 'string' ? apiError : apiError?.message) || ''
-    );
-
-    // Gemini signale une clé invalide par un code 400.
-    if (/api key/i.test(apiMessage)) status = 401;
-
-    logger.error(
-      {
-        provider: error?.provider,
-        status,
-        data: error?.response?.data,
-        error: error?.message
-      },
-      'Erreur IA.'
-    );
-
-    const provider = error?.provider || 'IA';
-
-    const reasons = {
-      401: `La clé ${provider} est refusée. Vérifie-la dans Railway.`,
-      402: `Solde ${provider} épuisé. Recharge ou attends le renouvellement gratuit.`,
-      403: `Accès ${provider} refusé (clé, autorisation ou région).`,
-      429: `Limite ${provider} atteinte. Réessaie dans un instant.`,
-      400: `${provider} a refusé la requête (modèle ou message non valide).`,
-      404: `Le modèle ${provider} demandé est introuvable.`,
-      500: `${provider} rencontre un problème temporaire. Réessaie dans un instant.`,
-      503: `${provider} est surchargé. Réessaie dans un instant.`
-    };
+    for (const failure of failures) {
+      logger.error(
+        {
+          provider: failure?.provider,
+          status: failure?.response?.status,
+          data: failure?.response?.data,
+          error: failure?.message
+        },
+        'Erreur IA.'
+      );
+    }
 
     await sendReply(
       jid,
       moduleMessage(
         '⌬ 𝗜𝗔 𝗜𝗡𝗗𝗜𝗦𝗣𝗢𝗡𝗜𝗕𝗟𝗘',
-        error?.userMessage ||
-          reasons[status] ||
-          `Le service ${provider} ne répond pas pour le moment. Réessaie plus tard.`
+        failures.map(explainAIFailure).join('\n')
       ),
       message
     );
@@ -2736,7 +2432,15 @@ async function processCommand(message) {
   const { args } = parsed;
   const command = COMMAND_ALIASES[parsed.command] || parsed.command;
 
-  if (!KNOWN_COMMANDS.has(command)) return;
+  if (!KNOWN_COMMANDS.has(command)) {
+    logger.info({ command }, 'Commande inconnue ignorée');
+    return;
+  }
+
+  logger.info(
+    { command, jid, fromMe: Boolean(message.key?.fromMe) },
+    'Commande reçue'
+  );
 
   const sender = getMessageSender(message);
 
@@ -2781,7 +2485,10 @@ async function processCommand(message) {
     isShuttingDown = true;
 
     // exit(1) pour « restart » : Railway relance le service.
-    setTimeout(() => process.exit(command === 'off' ? 0 : 1), 1000);
+    setTimeout(async () => {
+      await releaseInstanceLock();
+      process.exit(command === 'off' ? 0 : 1);
+    }, 1000);
 
     return;
   }
@@ -2801,34 +2508,25 @@ async function processCommand(message) {
     }
   }
 
-  // Xmodels : modèles IA réellement disponibles (propriétaire).
+  // Xmodels : modèles Gemini réellement disponibles (propriétaire).
   if (command === 'models') {
     if (!ownerCommand) {
       await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
       return;
     }
 
-    const lines = [];
-
-    if (CONFIG.geminiKey) {
-      const ids = await listGeminiModels();
-
-      lines.push(`Gemini (${ids.length}) — configuré : ${CONFIG.geminiModel}`);
-      lines.push(...ids.slice(0, 12), '');
+    if (!CONFIG.geminiKey) {
+      await sendReply(jid, 'GEMINI_API_KEY est absent des variables Railway.', message);
+      return;
     }
 
-    if (CONFIG.groqKey) {
-      const ids = await listGroqModels();
+    const ids = await listGeminiModels();
 
-      lines.push(`Groq (${ids.length}) — configuré : ${CONFIG.groqModel}`);
-      lines.push(...ids.slice(0, 12), '');
-    }
-
-    if (!lines.length) {
-      lines.push('Aucune clé Gemini ou Groq dans les variables Railway.');
-    }
-
-    await sendReply(jid, `🔎 Modèles IA\n\n${lines.join('\n')}`.trim(), message);
+    await sendReply(
+      jid,
+      `🔎 Modèles Gemini (${ids.length})\n\nConfiguré : ${CONFIG.geminiModel}\n\n${ids.slice(0, 20).join('\n')}`.trim(),
+      message
+    );
 
     return;
   }
@@ -2852,7 +2550,14 @@ async function handleIncomingMessage(message) {
   // Ignore les anciens messages (synchronisation / reconnexion).
   const timestamp = Number(message.messageTimestamp || 0) * 1000;
 
-  if (timestamp && Date.now() - timestamp > CONFIG.maxMessageAge) return;
+  if (timestamp && Date.now() - timestamp > CONFIG.maxMessageAge) {
+    logger.info(
+      { ageSeconds: Math.round((Date.now() - timestamp) / 1000) },
+      'Message ignoré : trop ancien'
+    );
+
+    return;
+  }
 
   if (hasProcessedMessage(message)) return;
 
@@ -2892,6 +2597,78 @@ async function handleIncomingMessage(message) {
 }
 
 // ------------------------------------------------------------
+// 26 bis. VERROU : UNE SEULE INSTANCE CONNECTÉE À LA FOIS
+// ------------------------------------------------------------
+// Deux copies du bot avec la même session se déconnectent mutuellement
+// et finissent par perdre la session (nouveaux jumelages sans fin).
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const INSTANCE_ID = `${process.pid}-${Date.now()}`;
+const LOCK_TTL_MS = 45000;
+
+const LOCK_SQL = `INSERT INTO bot_lock (id, owner, expires_at)
+  VALUES ('main', ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    owner = excluded.owner,
+    expires_at = excluded.expires_at
+  WHERE bot_lock.expires_at <= ? OR bot_lock.owner = excluded.owner
+  RETURNING owner`;
+
+async function tryTakeLock() {
+  const now = Date.now();
+
+  const result = await db.execute({
+    sql: LOCK_SQL,
+    args: [INSTANCE_ID, now + LOCK_TTL_MS, now]
+  });
+
+  return result.rows.length > 0;
+}
+
+async function acquireInstanceLock() {
+  for (;;) {
+    if (await tryTakeLock()) {
+      logger.info('Verrou obtenu : cette instance est la seule connectée.');
+      return;
+    }
+
+    logger.warn(
+      'Une autre instance du bot est déjà active (verrou). Attente avant de se connecter...'
+    );
+
+    await sleep(5000);
+  }
+}
+
+async function renewInstanceLock() {
+  if (isShuttingDown) return;
+
+  try {
+    if (!(await tryTakeLock())) {
+      logger.error('Verrou perdu : une autre instance a pris la main. Arrêt de celle-ci.');
+      process.exit(1);
+    }
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Renouvellement du verrou impossible pour le moment.');
+  }
+}
+
+async function releaseInstanceLock() {
+  try {
+    await Promise.race([
+      db.execute({
+        sql: "DELETE FROM bot_lock WHERE id = 'main' AND owner = ?",
+        args: [INSTANCE_ID]
+      }),
+      sleep(3000)
+    ]);
+  } catch {
+    // Le verrou expirera tout seul.
+  }
+}
+
+// ------------------------------------------------------------
 // 27. CONNEXION WHATSAPP : PAIRING CODE ET RECONNEXION
 // ------------------------------------------------------------
 
@@ -2899,6 +2676,7 @@ let reconnectTimer = null;
 let startPromise = null;
 let pairingRequested = false;
 let reconnectAttempts = 0;
+let loggedOutCount = 0;
 
 const RECONNECT_DELAY = 5000;
 
@@ -3006,6 +2784,10 @@ async function startBot() {
       auth: { creds: state.creds, keys },
       logger: baileysLogger,
       browser,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      retryRequestDelayMs: 500,
       printQRInTerminal: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,
@@ -3055,6 +2837,7 @@ async function startBot() {
       if (connection === 'open') {
         connectionStatus = 'Connecté';
         reconnectAttempts = 0;
+        loggedOutCount = 0;
         pairingRequested = true;
 
         botJid = normalizeJid(socket.user?.id || '');
@@ -3077,13 +2860,22 @@ async function startBot() {
 
         if (isShuttingDown) return;
 
-        // Session refusée par WhatsApp : on repart de zéro
-        // pour obtenir un nouveau code de jumelage.
+        // Session refusée par WhatsApp (401).
         if (statusCode === DisconnectReason.loggedOut) {
+          loggedOutCount++;
+
+          // 1re fois : on réessaie avec la même session avant de tout effacer.
+          if (loggedOutCount < 2) {
+            logger.warn('Déconnexion 401 : nouvel essai avec la même session avant tout nettoyage.');
+            scheduleReconnect(15000);
+            return;
+          }
+
           connectionStatus = 'Session invalide : nouveau jumelage';
+          loggedOutCount = 0;
 
           logger.error(
-            'Session WhatsApp invalide ou déconnectée. Nettoyage et nouveau jumelage.'
+            'Session WhatsApp invalide (401 répété). Nettoyage et nouveau jumelage.'
           );
 
           await clearAuthState();
@@ -3105,6 +2897,19 @@ async function startBot() {
 
     socket.ev.on('messages.upsert', async event => {
       if (!event?.messages?.length) return;
+
+      const firstKey = event.messages[0]?.key || {};
+
+      logger.info(
+        {
+          type: event.type,
+          count: event.messages.length,
+          jid: firstKey.remoteJid,
+          fromMe: firstKey.fromMe,
+          participant: firstKey.participant
+        },
+        'Événement de messages reçu'
+      );
 
       if (!['notify', 'append'].includes(event.type)) return;
 
@@ -3152,6 +2957,8 @@ async function shutdown(signal) {
 
   connectionStatus = 'Arrêté';
 
+  await releaseInstanceLock();
+
   process.exit(0);
 }
 
@@ -3173,11 +2980,39 @@ process.on('uncaughtException', error => {
 // 29. LANCEMENT
 // ------------------------------------------------------------
 
-startBot().catch(error => {
-  logger.error(
-    { error: error?.message || String(error) },
-    'Impossible de démarrer Sitri-Nel.'
-  );
+// Démarrage : base de données, verrou d'instance, puis connexion WhatsApp.
+const BOOT_DELAY_MS = Number(process.env.BOOT_DELAY_MS || 3000);
 
-  scheduleReconnect();
-});
+async function boot() {
+  for (;;) {
+    try {
+      await initDatabase();
+      await acquireInstanceLock();
+      break;
+    } catch (error) {
+      logger.error(
+        { error: error?.message || String(error) },
+        'Démarrage : base de données indisponible, nouvel essai dans 5 secondes.'
+      );
+
+      await sleep(5000);
+    }
+  }
+
+  setInterval(renewInstanceLock, 15000);
+
+  try {
+    await startBot();
+  } catch (error) {
+    logger.error(
+      { error: error?.message || String(error) },
+      'Impossible de démarrer Sitri-Nel.'
+    );
+
+    scheduleReconnect();
+  }
+}
+
+logger.info(`Démarrage dans ${BOOT_DELAY_MS / 1000} secondes...`);
+
+setTimeout(boot, BOOT_DELAY_MS);

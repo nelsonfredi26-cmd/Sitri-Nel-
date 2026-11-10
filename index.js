@@ -75,6 +75,10 @@ const cleanEnv = value =>
 
 const CONFIG = {
   pairingNumber: String(process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
+  // Code de jumelage choisi par toi (8 caractères A-Z / 0-9), optionnel.
+  pairingCode: String(process.env.PAIRING_CODE || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+  // Un même code reste affiché pendant cette durée (ms) avant d'en demander un nouveau.
+  pairingRefreshMs: Number(process.env.PAIRING_REFRESH_MS || 300000),
   ownerNumbers: readOwnerNumbers(),
   geminiKey: cleanEnv(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
   geminiModel: cleanEnv(process.env.GEMINI_MODEL) || 'gemini-2.5-flash',
@@ -2680,35 +2684,76 @@ let loggedOutCount = 0;
 
 const RECONNECT_DELAY = 5000;
 
+let pairingTimer = null;
+let pairingCodeText = '';
+let pairingCodeAt = 0;
+
+function stopPairingTimer() {
+  if (pairingTimer) {
+    clearInterval(pairingTimer);
+    pairingTimer = null;
+  }
+
+  // Un code lié à une connexion fermée n'est plus valable.
+  pairingCodeText = '';
+  pairingCodeAt = 0;
+}
+
+// Affiche le code bien en évidence dans les logs.
+function showPairingCode(code, ageMs) {
+  console.log('\n');
+  console.log('╔══════════════════════════════════╗');
+  console.log('║       SITRI-NEL PAIRING CODE      ║');
+  console.log('╠══════════════════════════════════╣');
+  console.log(`║           ${code}           ║`);
+  console.log('╚══════════════════════════════════╝');
+  console.log('\n');
+
+  logger.info(
+    `CODE DE JUMELAGE : ${code} — demandé il y a ${formatDuration(Math.round(ageMs / 1000))}`
+  );
+}
+
+// Demande le code de jumelage une seule fois, puis le réaffiche tel quel
+// (même code, sans le changer pendant que tu le tapes).
+// Un nouveau code n'est demandé qu'après PAIRING_REFRESH_MS.
 async function requestPairingCode(socket) {
-  if (pairingRequested) return;
   if (!socket || socket !== sock) return;
-  if (socket.authState?.creds?.registered) return;
+
+  // Déjà jumelé : plus besoin de code.
+  if (socket.authState?.creds?.registered || socket.authState?.creds?.me) {
+    stopPairingTimer();
+    return;
+  }
 
   if (!CONFIG.pairingNumber) {
     logger.error('PAIRING_NUMBER absent. Ajoute-le dans les variables Railway (ex : 229XXXXXXXX).');
     return;
   }
 
-  pairingRequested = true;
+  const age = Date.now() - pairingCodeAt;
+
+  if (pairingCodeText && age < CONFIG.pairingRefreshMs) {
+    showPairingCode(pairingCodeText, age);
+    return;
+  }
+
+  const custom = CONFIG.pairingCode.length === 8 ? CONFIG.pairingCode : '';
 
   try {
-    const rawCode = await socket.requestPairingCode(CONFIG.pairingNumber);
-    const code = String(rawCode).match(/.{1,4}/g)?.join('-') || rawCode;
+    const rawCode = custom
+      ? await socket.requestPairingCode(CONFIG.pairingNumber, custom)
+      : await socket.requestPairingCode(CONFIG.pairingNumber);
 
-    console.log('\n');
-    console.log('╔══════════════════════════════════╗');
-    console.log('║       SITRI-NEL PAIRING CODE      ║');
-    console.log('╠══════════════════════════════════╣');
-    console.log(`║           ${code}           ║`);
-    console.log('╚══════════════════════════════════╝');
-    console.log('\n');
+    if (custom && String(rawCode).toUpperCase() !== custom) {
+      logger.warn('Cette version de Baileys ignore PAIRING_CODE : un code aléatoire est utilisé.');
+    }
 
-    logger.info(`CODE DE JUMELAGE : ${code}`);
+    pairingCodeText = String(rawCode).match(/.{1,4}/g)?.join('-') || String(rawCode);
+    pairingCodeAt = Date.now();
+
+    showPairingCode(pairingCodeText, 0);
   } catch (error) {
-    // Un nouvel essai sera fait au prochain événement QR.
-    pairingRequested = false;
-
     logger.error(
       { error: error?.message || String(error) },
       'Échec de la génération du pairing code.'
@@ -2787,6 +2832,7 @@ async function startBot() {
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
+      qrTimeout: 300000,
       retryRequestDelayMs: 500,
       printQRInTerminal: false,
       syncFullHistory: false,
@@ -2825,8 +2871,11 @@ async function startBot() {
 
       // L'événement QR signale que la connexion est prête
       // pour demander le code de jumelage.
-      if (qr && !state.creds.registered) {
+      if (qr && !state.creds.registered && !pairingTimer) {
         await requestPairingCode(socket);
+
+        // Réaffiche le même code toutes les 20 s : il est toujours en bas des logs.
+        pairingTimer = setInterval(() => requestPairingCode(socket), 20000);
       }
 
       if (connection === 'connecting') {
@@ -2836,6 +2885,7 @@ async function startBot() {
 
       if (connection === 'open') {
         connectionStatus = 'Connecté';
+        stopPairingTimer();
         reconnectAttempts = 0;
         loggedOutCount = 0;
         pairingRequested = true;
@@ -2851,6 +2901,7 @@ async function startBot() {
 
       if (connection === 'close') {
         connectionStatus = 'Déconnecté';
+        stopPairingTimer();
 
         const statusCode = lastDisconnect?.error?.output?.statusCode;
 

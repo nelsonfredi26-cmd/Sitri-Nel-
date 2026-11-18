@@ -1955,7 +1955,7 @@ async function answerQuiz(chatJid, userJid, answer) {
       '       +20 XP ⭐\n\n' +
       'Bonne réponse ! Tu remportes le quiz.\n\n' +
       `Ton solde : ${Number(user.coins)} XCoins\n` +
-      `Ton XP : ${Number(user.xp)}\n\n' +
+      `Ton XP : ${Number(user.xp)}\n\n` +
       '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
       SIGNATURE
   };
@@ -1999,6 +1999,10 @@ async function downloadImageBuffer(url) {
 
 const MAX_IMAGES_PER_REQUEST = 5;
 
+// Nombre minimal de fans AniList pour considérer un résultat comme un vrai personnage.
+// Évite que « lion » ou « plage » renvoie un personnage obscur au lieu d'une photo.
+const MIN_CHARACTER_FAVOURITES = 25;
+
 function parseImageRequest(raw = '') {
   const text = String(raw).trim();
   const match = text.match(/^([\s\S]*?)[\s-]+(\d{1,2})$/);
@@ -2020,7 +2024,7 @@ function uniqueUrls(list) {
 }
 
 const ANILIST_CHARACTER_QUERY =
-  'query ($search: String, $perPage: Int) { Page(page: 1, perPage: $perPage) { characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) { name { full } image { large } media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { romaji english } } } } } }';
+  'query ($search: String, $perPage: Int) { Page(page: 1, perPage: $perPage) { characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) { name { full } image { large } favourites media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { romaji english } } } } } }';
 
 // AniList : recherche directe de personnages d'anime/manga SANS clé API.
 async function findAniListCharacterImages(query, wanted = 1) {
@@ -2044,6 +2048,7 @@ async function findAniListCharacterImages(query, wanted = 1) {
   const characters = response.data?.data?.Page?.characters || [];
 
   return characters
+    .filter(item => Number(item.favourites || 0) >= MIN_CHARACTER_FAVOURITES)
     .map(item => {
       const charName = item.name?.full || query;
       const animeNode = item.media?.nodes?.[0]?.title;
@@ -2097,9 +2102,9 @@ async function findSerpApiImages(query) {
   return uniqueUrls(urls).map(url => ({ label: query, url }));
 }
 
-async function collectImageCandidates(query, wanted) {
+async function collectImageCandidates(query, wanted, photoOnly = false) {
   const providers = [
-    ['AniList', () => findAniListCharacterImages(query, wanted)],
+    ...(photoOnly ? [] : [['AniList', () => findAniListCharacterImages(query, wanted)]]),
     ['Pixabay', () => findPixabayImages(query, wanted)],
     ['SerpApi', () => findSerpApiImages(query)]
   ];
@@ -2117,12 +2122,15 @@ async function collectImageCandidates(query, wanted) {
 }
 
 async function searchImage(jid, message, rawQuery) {
-  const { query, count } = parseImageRequest(rawQuery);
+  const parsed = parseImageRequest(rawQuery);
+  const photoOnly = /^photos?\s+/i.test(parsed.query);
+  const query = parsed.query.replace(/^photos?\s+/i, '').trim();
+  const count = parsed.count;
 
   if (!query) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg naruto\n• Ximg gojo 3 (jusqu’à 5 images sur AniList)',
+      'Utilisation :\n• Ximg-sasuke 3 (personnage, 5 max)\n• Ximg photo lion 2 (photos réelles)',
       message
     );
     return false;
@@ -2130,7 +2138,7 @@ async function searchImage(jid, message, rawQuery) {
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
-  const found = await collectImageCandidates(query, count);
+  const found = await collectImageCandidates(query, count, photoOnly);
 
   if (!found) {
     await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
@@ -2539,7 +2547,7 @@ async function handleImageCommand(jid, message, args) {
   if (!args) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg naruto\n• Ximg gojo 3 (jusqu’à 5 images sur AniList)\n\nPour créer une image :\n• Ximg create un dragon futuriste bleu',
+      'Utilisation :\n• Ximg-sasuke 3 (personnage, 5 max)\n• Ximg photo lion 2 (photos réelles)\n\nPour créer une image :\n• Ximg create un dragon futuriste bleu',
       message
     );
     return true;

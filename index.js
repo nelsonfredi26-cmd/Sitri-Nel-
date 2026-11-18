@@ -167,16 +167,11 @@ IDENTITÉ & CARACTÈRE :
 - Humeur actuelle : ${mood}. Laisse transparaître naturellement cette humeur dans ta façon de répondre !
 
 COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
-- Tu es une vraie amie brillante, chaleureuse, naturelle et autonome : tutoie toujours ton interlocuteur, parle comme une humaine cool et proche des gens, jamais comme un robot ou un assistant administratif froid.
-- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais parfaitement à qui tu parles. Si quelqu'un te donne son surnom ou te demande comment il s'appelle, confirme-le avec complicité.
-- Sois expressive, vivante et spontanée : réagis aux blagues, taquine gentiment quand on te pose une question piège, partage ton avis personnel sur les animés ou les sujets de discussion, et relance parfois la conversation.
-- Va droit au but dès la première phrase, sans formules robotiques ("En tant qu'IA...", "Voici la réponse...").
-- Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
-- N'utilise pas de markdown (pas de **, de # ni de tableaux).
-
-EXACTITUDE & CULTURE ANIMÉ / MANGA :
-- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Mashle, Tokyo Revengers, etc.).
-- Ne confonds JAMAIS les techniques ou personnages (ex: Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji, Mash Burnedead a été élevé uniquement par Regro Burnedead son père adoptif, etc.).${verifiedContext}
+- Tu es une vraie amie brillante, chaleureuse, naturelle et culturelle : tutoie toujours ton interlocuteur, parle comme une humaine cool, passionnée et experte, jamais comme un robot.
+- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais à qui tu parles.
+- Tes réponses sur les animés, mangas, sciences ou l'histoire doivent être **PROFONDES, DOCUMENTÉES ET 100% FIABLES** (appuie-toi strictement sur les faits vérifiés ci-dessous). Zéro hallucination, zéro invention de techniques (ex: Tobirama Senju a inventé l'Edo Tensei, le Kage Bunshin no Jutsu et le Hiraishin no Jutsu, mais en aucun cas le Chidori qui est l'œuvre de Kakashi Hatake !).
+- Va droit au but, sois précise et percutante (4 à 10 lignes riches en détails croustillants).
+- N'utilise pas de markdown (pas de **, de # ni de tableaux).${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -873,7 +868,7 @@ async function fetchVerifiedFacts(query = '') {
     axios.get('https://api.duckduckgo.com/', {
       params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
       headers: { 'User-Agent': 'SitriNelBot/1.0' },
-      timeout: 2500
+      timeout: 4000
     }).then(res => {
       const out = [];
       const abstract = String(res.data?.AbstractText || '').trim();
@@ -908,7 +903,7 @@ async function fetchVerifiedFacts(query = '') {
       axios.get(`https://${domain}/api.php`, {
         params: { action: 'query', list: 'search', srsearch: clean, srlimit: 2, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 2500
+        timeout: 4000
       }).then(res => {
         const hits = res.data?.query?.search || [];
         return hits.map(hit => {
@@ -925,13 +920,13 @@ async function fetchVerifiedFacts(query = '') {
       axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
         params: { action: 'query', list: 'search', srsearch: clean, srlimit: 1, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 2500
+        timeout: 4000
       }).then(async res => {
         const hit = res.data?.query?.search?.[0];
         if (!hit?.title) return [];
         const sum = await axios.get(
           `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
+          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 4000 }
         );
         const extract = String(sum.data?.extract || '').trim();
         return extract ? [`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`] : [];

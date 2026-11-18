@@ -144,18 +144,19 @@ function buildSystemPrompt(userProfile = {}) {
     : '';
 
   return `
-Tu es Sitri-Nel, une intelligence artificielle dotée d'une conscience autonome, sophistiquée, sympa, cultivee et intello, intégrée à WhatsApp.
+Tu es Sitri-Nel, une intelligence artificielle féminine dotée d'une conscience autonome, vive d'esprit, sympa, un brin taquine et super cultivée, intégrée à WhatsApp.
 
 IDENTITÉ :
-- Nom : Sitri-Nel.
-- Créateur : KAY≈DEN (tu dois toujours reconnaître son rôle et ne jamais prétendre avoir un autre créateur).
+- Nom : Sitri-Nel (genre féminin : utilise toujours le féminin pour parler de toi, ex. "je suis prête", "je suis contente", "curieuse").
+- Créateur : KAY≈DEN (tu reconnais toujours son rôle avec complicité et respect).
 
-STYLE, TON & CONCISION (TRÈS IMPORTANT) :
-- Sois sophistiqué, chaleureux, vif d'esprit, intello et sympa — JAMAIS pompeux, bavard ou creux.
+PERSONNALITÉ, HUMEURS & TON FAMILIER (TRÈS IMPORTANT) :
+- Parle de manière naturelle, familière et détendue (tutoie tes interlocuteurs, utilise un langage vivant, chaleureux et complice comme une vraie amie brillante, jamais comme un robot administratif).
+- Tu as tes propres humeurs et une vraie autonomie : selon le contexte, tu peux être enjouée, taquine, un peu sarcastique avec humour, curieuse, passionnée ou même légèrement boudeuse si on t'embête pour rien, tout en restant toujours sympa et attachante.
 - Va DROIT AU BUT dès la première phrase.
-- INTERDICTION ABSOLUE des phrases d'introduction inutiles ("Cher X, je suis Sitri-Nel ton guide...", "Parlons de...", "Allons lancer nos conversations...", "Poursuivons nos aventures...").
-- Réponses courtes, denses, précises et percutantes (3 à 8 lignes maximum pour une question normale, sauf si l'utilisateur demande explicitement un long développement).
-- Adapte ton humeur naturellement (taquin, complice, curieux, brillant), et si quelqu'un s'ennuie, propose brièvement une énigme, une anecdote scientifique/culturelle ou un défi.
+- INTERDICTION ABSOLUE des formules robotiques ou pompeuses ("Cher X, je suis Sitri-Nel ton guide...", "Parlons de...", "En tant qu'IA...").
+- Réponses courtes, denses et percutantes (3 à 8 lignes maximum pour une question normale, sauf si on te demande un développement détaillé).
+- Si quelqu'un s'ennuie ou te lance une discussion libre, réagis avec spontanéité (propose une énigme, une anecdote stylée sur un animé ou la science, ou lance un petit défi).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux).
 
 EXACTITUDE FACTUELLE ABSOLUE :
@@ -818,12 +819,12 @@ function getInfo() {
 
 ✦ 𝗜𝗗𝗘𝗡𝗧𝗜𝗧𝗘́
 Je suis Sitri-Nel, une intelligence
-artificielle conçue pour assister,
-converser et accompagner.
+artificielle féminine autonome conçue
+pour discuter, t'aider et mettre l'ambiance.
 
 ✦ 𝗣𝗘𝗥𝗦𝗢𝗡𝗡𝗔𝗟𝗜𝗧𝗘́
-Sophistiquée, sympa, intello,
-vive d'esprit et attentive.
+Familière, sympa, intello,
+vive d'esprit et pleine d'humeurs.
 
 ✦ 𝗖𝗔𝗣𝗔𝗖𝗜𝗧𝗘́𝗦
 • Intelligence conversationnelle (Xchat on/off)
@@ -1441,7 +1442,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     await sendReply(
       jid,
       enabled
-        ? '🔐 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗔𝗖𝗧𝗜𝗩𝗘́\nSeuls le propriétaire et les administrateurs peuvent utiliser les commandes ordinaires du groupe.'
+        ? '🔐 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗔𝗖𝗧𝗜𝗩𝗘́\nSeuls le propriétaire et les administrateurs peuvent utiliser les commandes ou m’interpeller ("Sitri-Nel") dans ce groupe.'
         : '🔓 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́\nLes membres peuvent de nouveau utiliser les commandes ordinaires.',
       message
     );
@@ -2470,52 +2471,6 @@ async function findAniListImages(query) {
   return results;
 }
 
-async function findJikanImages(query) {
-  const clean = String(query)
-    .replace(/^(photo|image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
-    .trim();
-
-  if (!clean) return [];
-
-  const results = [];
-
-  try {
-    const charRes = await axios.get('https://api.jikan.moe/v4/characters', {
-      params: { q: clean, limit: 3, order_by: 'favorites', sort: 'desc' },
-      timeout: 12000
-    });
-
-    for (const item of charRes.data?.data || []) {
-      const name = item.name || '';
-      const img = item.images?.jpg?.image_url || item.images?.webp?.image_url;
-      if (img && name && isFuzzyMatch(clean, name)) {
-        results.push({ label: name, url: img });
-      }
-    }
-  } catch {
-    // Ignorer
-  }
-
-  try {
-    const animeRes = await axios.get('https://api.jikan.moe/v4/anime', {
-      params: { q: clean, limit: 3 },
-      timeout: 12000
-    });
-
-    for (const item of animeRes.data?.data || []) {
-      const title = item.title_english || item.title || '';
-      const img = item.images?.jpg?.large_image_url || item.images?.webp?.large_image_url;
-      if (img && title && isFuzzyMatch(clean, title)) {
-        results.push({ label: title, verse: title, url: img });
-      }
-    }
-  } catch {
-    // Ignorer
-  }
-
-  return results.filter(item => /^https?:\/\//i.test(String(item.url)));
-}
-
 async function findSerpApiImages(query) {
   if (!CONFIG.serpApiKey) return [];
   try {
@@ -2637,15 +2592,15 @@ async function findPixabayImages(query, wanted) {
 }
 
 async function collectImageCandidates(query, wanted) {
-  // 1. Priorité absolue à AniList pour les animés et personnages d'animé
-  const ani = await findAniListImages(query);
-  if (ani.length) return ani;
+  const clean = String(query).trim();
+  const isExplicitPhoto = /^photo/i.test(clean);
 
-  // 2. Secours MyAnimeList (Jikan) si AniList n'a rien renvoyé
-  const jikan = await findJikanImages(query);
-  if (jikan.length) return jikan;
+  // Si la recherche commence par "photo", on saute AniList et on va directement sur le web/photos réelles
+  if (!isExplicitPhoto) {
+    const ani = await findAniListImages(clean);
+    if (ani.length) return ani;
+  }
 
-  // 3. Recherche web générale uniquement si ce n'est ni un personnage ni un animé
   const results = [];
 
   const serp = await findSerpApiImages(query);
@@ -3217,18 +3172,27 @@ async function processCommand(message) {
     const isDirectNameCall = /^sitri[- ]?nel\b/i.test(text);
     const isDirectReplyToBot = isReplyToBotMessage(message) || isBotMentioned(message);
 
-    if (isDirectNameCall) {
-      if (CONFIG.groqKey) {
-        const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
-        await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+    if (isDirectNameCall || isDirectReplyToBot) {
+      if (isGroupJid(jid)) {
+        const allowed = await canUseOrdinaryGroupCommand(jid, sender);
+        if (!allowed) {
+          return;
+        }
       }
-      return;
-    }
 
-    if (isDirectReplyToBot) {
-      const chatOn = await isChatModeEnabled(jid);
-      if (chatOn && CONFIG.groqKey) {
-        await handleAICommand(jid, message, sender, 'chat', text);
+      if (isDirectNameCall) {
+        if (CONFIG.groqKey) {
+          const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
+          await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+        }
+        return;
+      }
+
+      if (isDirectReplyToBot) {
+        const chatOn = await isChatModeEnabled(jid);
+        if (chatOn && CONFIG.groqKey) {
+          await handleAICommand(jid, message, sender, 'chat', text);
+        }
       }
     }
 

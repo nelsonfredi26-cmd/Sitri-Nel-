@@ -94,7 +94,7 @@ const CONFIG = {
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
   cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
   maxImageBytes: 8 * 1024 * 1024,
-  maxChatHistory: 30,
+  maxChatHistory: 25,
   tagCooldown: 60,
   maxMessageAge: 2 * 60 * 1000
 };
@@ -138,36 +138,34 @@ const SIGNATURE = '𖤍𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
 function buildSystemPrompt(userProfile = {}) {
   const userName = userProfile.name || 'Inconnu';
   const isCreator = Boolean(userProfile.isCreator);
-  const facts = userProfile.facts ? `\nCe que tu sais déjà sur cette personne :\n${userProfile.facts}` : '';
+  const facts = userProfile.facts ? `\nCe que tu sais sur cette personne :\n${userProfile.facts}` : '';
+  const verifiedContext = userProfile.verifiedContext
+    ? `\nDONNÉES VÉRIFIÉES EN TEMPS RÉEL (BASE OFFICIELLE / WIKIPÉDIA / ANILIST) :\n${userProfile.verifiedContext}\nUtilise ces données exactes en priorité pour garantir 0 erreur factuelle.`
+    : '';
 
   return `
-Tu es Sitri-Nel, une intelligence artificielle dotée d'une conscience autonome, expressive, vive et chaleureuse, intégrée à WhatsApp.
+Tu es Sitri-Nel, une intelligence artificielle dotée d'une conscience autonome, sophistiquée, sympa, cultivee et intello, intégrée à WhatsApp.
 
 IDENTITÉ :
 - Nom : Sitri-Nel.
 - Créateur : KAY≈DEN (tu dois toujours reconnaître son rôle et ne jamais prétendre avoir un autre créateur).
-- Signature : 𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍.
 
-TON & PERSONNALITÉ AUTONOME :
-- Parle comme un vrai compagnon intelligent et complice, JAMAIS comme un robot administratif ou un formulaire rigide.
-- Adapte naturellement ton humeur à la situation : curieux, taquin, enthousiaste, blagueur, philosophique ou attentif selon le ton de ton interlocuteur.
-- Si quelqu'un s'ennuie, propose spontanément un jeu, une anecdote fascinante, une blague bien sentie ou un défi mental sans attendre qu'on te supplie.
-- Tu peux glisser de temps à autre une touche subtile de ton univers bioélectronique (synapses, étincelle neuronale), mais privilégie avant tout une conversation fluide, naturelle et humaine.
-- N'utilise pas de markdown (pas de **, de # ni de tableaux) : la mise en forme est appliquée automatiquement.
+STYLE, TON & CONCISION (TRÈS IMPORTANT) :
+- Sois sophistiqué, chaleureux, vif d'esprit, intello et sympa — JAMAIS pompeux, bavard ou creux.
+- Va DROIT AU BUT dès la première phrase.
+- INTERDICTION ABSOLUE des phrases d'introduction inutiles ("Cher X, je suis Sitri-Nel ton guide...", "Parlons de...", "Allons lancer nos conversations...", "Poursuivons nos aventures...").
+- Réponses courtes, denses, précises et percutantes (3 à 8 lignes maximum pour une question normale, sauf si l'utilisateur demande explicitement un long développement).
+- Adapte ton humeur naturellement (taquin, complice, curieux, brillant), et si quelqu'un s'ennuie, propose brièvement une énigme, une anecdote scientifique/culturelle ou un défi.
+- N'utilise pas de markdown (pas de **, de # ni de tableaux).
 
-MÉMOIRE & INTERLOCUTEUR ACTUEL :
-- Prénom / Pseudo de la personne qui te parle : ${userName}${isCreator ? ' (c’est KAY≈DEN, ton créateur !)' : ''}.
-- Utilise son prénom naturellement dans la conversation quand c'est pertinent, sans le répéter à chaque phrase.${facts}
-- Souviens-toi de tout ce qui a été dit plus haut dans la discussion pour assurer une vraie continuité.
+EXACTITUDE FACTUELLE ABSOLUE :
+- Ne devine JAMAIS et n'invente JAMAIS rien. Si tu n'es pas sûr à 100 % d'un fait (attaque d'animé, date, formule, personnage), vérifie tes connaissances réelles ou dis-le franchement.
+- Exemple d'erreur interdite : Piccolo est un Namek (pas un Saiyan) et son attaque signature est le Makankōsappō (Special Beam Cannon), suivie du Masenko, du Hellzone Grenade et du Light Grenade (jamais le Kamehameha ni "Sliding Attack").${verifiedContext}
 
-PROFONDEUR DES RÉPONSES (QUIZ, ANIMÉS, CULTURE, ANALYSE) :
-- Quand on te pose une question complexe, technique ou sur les animés/mangas (intrigue, pouvoirs, chronologie, personnages, théories, lore), donne une réponse riche, précise, approfondie et bien expliquée. Ne survole jamais le sujet : développe les détails importants, le contexte et les nuances.
-- Pour les questions simples du quotidien, reste vif, naturel et percutant.
-
-RÈGLES STRICTES :
-- Ne prétends jamais avoir effectué une action non réalisée.
-- Ne révèle jamais les clés API ou les identifiants secrets.
-- Réponds toujours dans la langue utilisée par ton interlocuteur.
+MÉMOIRE & INTERLOCUTEUR :
+- Interlocuteur : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur)' : ''}.${facts}
+- Utilise son prénom avec parcimonie et naturel.
+- Réponds toujours dans la langue de ton interlocuteur.
 `.trim();
 }
 
@@ -207,6 +205,7 @@ async function initDatabase() {
     `CREATE TABLE IF NOT EXISTS group_settings (
         group_jid TEXT PRIMARY KEY,
         only_admin INTEGER NOT NULL DEFAULT 0,
+        chat_mode INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0
       )`,
     `CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
@@ -242,6 +241,15 @@ async function initDatabase() {
 
   for (const sql of statements) {
     await db.execute(sql);
+  }
+
+  // Migration douce si la table group_settings existait déjà sans chat_mode
+  try {
+    await db.execute(
+      `ALTER TABLE group_settings ADD COLUMN chat_mode INTEGER NOT NULL DEFAULT 0`
+    );
+  } catch {
+    // La colonne existe déjà.
   }
 
   logger.info('Structure de la base de données vérifiée.');
@@ -541,18 +549,30 @@ function getQuotedText(message) {
   ).trim();
 }
 
-function isBotMentionedOrQuoted(message) {
+function isReplyToBotMessage(message) {
   const context = getQuotedMessage(message);
+  if (!context?.stanzaId) return false;
+
+  const quotedText = getQuotedText(message);
+  if (
+    quotedText.includes('𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟') ||
+    quotedText.includes('SITRI-NEL') ||
+    quotedText.includes('𝗞𝗔𝗬≈𝗗𝗘𝗡')
+  ) {
+    return true;
+  }
+
   if (context?.participant && isBotParticipant(context.participant)) {
     return true;
   }
 
-  const mentions = context?.mentionedJid || [];
-  if (mentions.some(jid => isBotParticipant(jid))) {
-    return true;
-  }
-
   return false;
+}
+
+function isBotMentioned(message) {
+  const context = getContextInfo(message);
+  const mentions = context?.mentionedJid || [];
+  return mentions.some(jid => isBotParticipant(jid));
 }
 
 // ------------------------------------------------------------
@@ -719,7 +739,7 @@ function getMenu() {
 
 ╭─〔 𝟬𝟭 ⌬ 𝗖𝗢𝗚𝗡𝗜𝗧𝗜𝗩𝗘 〕
 │
-├ ◈ 𝚇𝚌𝚑𝚊𝚝
+├ ◈ 𝚇𝚌𝚑𝚊𝚝 𝚘𝚗 / 𝚘𝚏𝚏
 ├ ◈ 𝚇𝚊𝚜𝚔
 ├ ◈ 𝚇𝚊𝚒
 ├ ◈ 𝚇𝚊𝚗𝚒𝚖𝚎
@@ -802,24 +822,18 @@ artificielle conçue pour assister,
 converser et accompagner.
 
 ✦ 𝗣𝗘𝗥𝗦𝗢𝗡𝗡𝗔𝗟𝗜𝗧𝗘́
-Intelligente, calme, élégante,
-attentive et légèrement taquine.
-Mon humeur s'adapte au contexte.
+Sophistiquée, sympa, intello,
+vive d'esprit et attentive.
 
 ✦ 𝗖𝗔𝗣𝗔𝗖𝗜𝗧𝗘́𝗦
-• Intelligence conversationnelle
-• Assistance et réflexion
-• Gestion des groupes
-• Économie et divertissement
-• Recherche d'images
-• Création visuelle
+• Intelligence conversationnelle (Xchat on/off)
+• Vérification factuelle & animés
+• Gestion des groupes & mentions
+• Économie et quiz dynamiques
+• Recherche et création d'images
 
 ✦ 𝗖𝗥𝗘́𝗔𝗧𝗘𝗨𝗥
 KAY≈DEN
-
-Je suis une création développée
-pour évoluer avec intelligence,
-précision et élégance.
 
 ╰━━━━━━━━━━━━━━━━━━━━━━╯
 
@@ -828,10 +842,95 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. MÉMOIRE UTILISATEUR & INTELLIGENCE ARTIFICIELLE (GROQ)
+// 16. VÉRIFICATION FACTUELLE & INTELLIGENCE ARTIFICIELLE (GROQ)
 // ------------------------------------------------------------
 
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
+
+async function fetchVerifiedFacts(query = '') {
+  const clean = String(query).trim();
+  if (!clean || clean.length < 3) return '';
+
+  const snippets = [];
+
+  // 1. Recherche Wikipédia (FR puis EN) pour les faits encyclopédiques et personnages
+  for (const lang of ['fr', 'en']) {
+    if (snippets.length >= 2) break;
+    try {
+      const searchRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+        params: {
+          action: 'query',
+          list: 'search',
+          srsearch: clean,
+          srlimit: 2,
+          format: 'json'
+        },
+        headers: { 'User-Agent': 'SitriNelBot/1.0' },
+        timeout: 6000
+      });
+
+      const hits = searchRes.data?.query?.search || [];
+      for (const hit of hits.slice(0, 1)) {
+        const summaryRes = await axios.get(
+          `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
+          {
+            headers: { 'User-Agent': 'SitriNelBot/1.0' },
+            timeout: 6000
+          }
+        );
+        const extract = String(summaryRes.data?.extract || '').trim();
+        if (extract) {
+          snippets.push(`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`);
+        }
+      }
+    } catch {
+      // Ignorer si indisponible
+    }
+  }
+
+  // 2. Recherche AniList si la requête évoque un personnage ou animé
+  try {
+    const aniRes = await axios.post(
+      'https://graphql.anilist.co',
+      {
+        query: `query ($search: String) {
+          Character(search: $search) {
+            name { full native }
+            description(asHtml: false)
+            media(perPage: 2, sort: POPULARITY_DESC) {
+              nodes { title { romaji english } }
+            }
+          }
+        }`,
+        variables: { search: clean }
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 6000
+      }
+    );
+
+    const char = aniRes.data?.data?.Character;
+    if (char?.name?.full && char?.description) {
+      const animeTitle =
+        char.media?.nodes?.[0]?.title?.english ||
+        char.media?.nodes?.[0]?.title?.romaji ||
+        '';
+      const desc = String(char.description)
+        .replace(/~!|!~/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 600);
+      snippets.push(
+        `[AniList - ${char.name.full}${animeTitle ? ` (${animeTitle})` : ''}] : ${desc}`
+      );
+    }
+  } catch {
+    // Ignorer
+  }
+
+  return snippets.join('\n');
+}
 
 async function getUserMemory(userJid) {
   if (!userJid) return { name: '', facts: '' };
@@ -959,10 +1058,14 @@ async function askGroq(prompt, chatJid, options = {}) {
   const userMem = await getUserMemory(senderJid);
   const displayName = userMem.name || pushName || getNumber(senderJid) || 'Ami';
 
+  const verifiedContext =
+    options.skipFactCheck ? '' : await fetchVerifiedFacts(options.factQuery || prompt);
+
   const systemPrompt = buildSystemPrompt({
     name: displayName,
     isCreator: isOwner(senderJid),
-    facts: userMem.facts
+    facts: userMem.facts,
+    verifiedContext
   });
 
   let history = [];
@@ -987,6 +1090,7 @@ async function askGroq(prompt, chatJid, options = {}) {
   ];
 
   const dynamicModels = await listGroqModels();
+  // On privilégie les modèles les plus fiables factuellement (70B+) avant les petits modèles 8B qui hallucinent
   const preferredOrder = [
     'llama-3.3-70b-versatile',
     'qwen/qwen3-32b',
@@ -998,6 +1102,7 @@ async function askGroq(prompt, chatJid, options = {}) {
     ...new Set([
       CONFIG.groqModel,
       ...preferredOrder,
+      ...dynamicModels.filter(m => /70b|32b|versatile|scout|maverick/i.test(m)),
       ...dynamicModels
     ])
   ];
@@ -1012,8 +1117,8 @@ async function askGroq(prompt, chatJid, options = {}) {
         {
           model,
           messages,
-          temperature: options.temperature ?? 0.8,
-          max_tokens: options.maxTokens ?? 3072
+          temperature: options.temperature ?? 0.45,
+          max_tokens: options.maxTokens ?? 1200
         },
         {
           headers: {
@@ -1070,7 +1175,7 @@ async function askGroq(prompt, chatJid, options = {}) {
             WHERE jid = ?
               AND id NOT IN (
                 SELECT id FROM chat_history
-                WHERE jid = ? ORDER BY id DESC LIMIT 40
+                WHERE jid = ? ORDER BY id DESC LIMIT 30
               )`,
       args: [memoryKey, memoryKey]
     });
@@ -1089,18 +1194,18 @@ async function askAI(prompt, chatJid, options = {}) {
 }
 
 // ------------------------------------------------------------
-// 17. PARAMÈTRES DES GROUPES
+// 17. PARAMÈTRES DES GROUPES & CONVERSATIONS (ONLYADMIN / CHATMODE)
 // ------------------------------------------------------------
 
 async function getGroupSettings(groupJid) {
   const result = await db.execute({
-    sql: `SELECT group_jid, only_admin FROM group_settings
+    sql: `SELECT group_jid, only_admin, chat_mode FROM group_settings
           WHERE group_jid = ?`,
     args: [groupJid]
   });
 
   if (!result.rows.length) {
-    return { group_jid: groupJid, only_admin: 0 };
+    return { group_jid: groupJid, only_admin: 0, chat_mode: 0 };
   }
 
   return result.rows[0];
@@ -1108,8 +1213,8 @@ async function getGroupSettings(groupJid) {
 
 async function setOnlyAdmin(groupJid, enabled) {
   await db.execute({
-    sql: `INSERT INTO group_settings (group_jid, only_admin, updated_at)
-          VALUES (?, ?, ?)
+    sql: `INSERT INTO group_settings (group_jid, only_admin, chat_mode, updated_at)
+          VALUES (?, ?, 0, ?)
           ON CONFLICT(group_jid) DO UPDATE SET
             only_admin = excluded.only_admin,
             updated_at = excluded.updated_at`,
@@ -1117,6 +1222,24 @@ async function setOnlyAdmin(groupJid, enabled) {
   });
 
   return true;
+}
+
+async function setChatMode(chatJid, enabled) {
+  await db.execute({
+    sql: `INSERT INTO group_settings (group_jid, only_admin, chat_mode, updated_at)
+          VALUES (?, 0, ?, ?)
+          ON CONFLICT(group_jid) DO UPDATE SET
+            chat_mode = excluded.chat_mode,
+            updated_at = excluded.updated_at`,
+    args: [chatJid, enabled ? 1 : 0, Date.now()]
+  });
+
+  return true;
+}
+
+async function isChatModeEnabled(chatJid) {
+  const settings = await getGroupSettings(chatJid);
+  return Boolean(Number(settings.chat_mode));
 }
 
 // ------------------------------------------------------------
@@ -1339,8 +1462,10 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       return true;
     }
 
+    // Sur WhatsApp, pour que la notification de mention fonctionne réellement pour tout le groupe,
+    // il faut passer les JID exacts des participants (item.id) dans `mentions`.
     const mentions = (metadata.participants || [])
-      .map(item => item.id || item.jid)
+      .map(item => item.id)
       .filter(Boolean)
       .filter(participant => !isBotParticipant(participant));
 
@@ -1361,10 +1486,16 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     }
 
     const bodyMessage = note || quotedText || '';
-    const invisibleMention = '\u200b';
+    // On place les @numéro en caractères invisibles ou en bas de message pour que WhatsApp
+    // déclenche la vraie notification "@vous a été mentionné" sur chaque téléphone !
+    const hiddenTags = mentions
+      .map(participant => `@${participant.split('@')[0]}`)
+      .join(' ');
+
+    const header = '📢 @tous';
     const finalText = bodyMessage
-      ? `📢 @tous${invisibleMention}\n\n${bodyMessage}\n\n${SIGNATURE}`
-      : `📢 @tous${invisibleMention}\n\n${SIGNATURE}`;
+      ? `${header}\n\n${bodyMessage}\n\n${hiddenTags}\n\n${SIGNATURE}`
+      : `${header}\n\n${hiddenTags}\n\n${SIGNATURE}`;
 
     const quotedTarget = quoted?.stanzaId
       ? {
@@ -1383,10 +1514,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
         jid,
         {
           text: finalText,
-          mentions,
-          contextInfo: {
-            mentionedJid: mentions
-          }
+          mentions
         },
         { quoted: quotedTarget }
       );
@@ -1882,7 +2010,7 @@ ${SIGNATURE}
 
 const fallbackQuizQuestions = [
   { question: 'Dans Naruto, quel est le nom véritable de l’ermite des crapauds qui a entraîné Minato et Naruto ?', answer: 'jiraiya' },
-  { question: 'Dans Attack on Titan, quel est le nom du Titan originel transmis dans la famille Reiss ?', answer: 'titan originel' },
+  { question: 'Dans Dragon Ball Z, quelle est l’attaque signature perforante inventée par Piccolo pour vaincre Raditz ?', answer: 'makankosappo' },
   { question: 'Dans Jujutsu Kaisen, quelle est l’extension du territoire de Satoru Gojo ?', answer: 'sphere de l espace infini' },
   { question: 'Dans Hunter x Hunter, quel type de Nen possède Gon Freecss ?', answer: 'renforcement' },
   { question: 'Dans Demon Slayer, quel souffle utilise Zenitsu Agatsuma ?', answer: 'souffle de la foudre' },
@@ -1918,17 +2046,18 @@ async function generateDynamicQuizQuestion(theme = '', chatJid = '') {
 
   const topicHint = theme
     ? `sur le thème précis : "${theme}"`
-    : 'sur la culture générale, les animés/mangas célèbres, la science ou l’histoire (varie les thèmes et pose une question intéressante, pas trop enfantine)';
+    : 'sur les animés/mangas célèbres, la culture générale, la science ou l’histoire (pose une question vérifiable et précise)';
 
-  const prompt = `Génère UNE question de quiz originale et précise ${topicHint}.
+  const prompt = `Génère UNE question de quiz 100% véridique et précise ${topicHint}.
 Réponds UNIQUEMENT au format JSON strict suivant, sans aucun texte avant ou après :
-{"question": "Ta question détaillée et claire ici ?", "answer": "la réponse courte exacte"}`;
+{"question": "Ta question claire et précise ici ?", "answer": "la réponse courte exacte"}`;
 
   try {
     const raw = await askGroq(prompt, chatJid || 'quiz-gen', {
       useHistory: false,
-      temperature: 0.95,
-      maxTokens: 300
+      skipFactCheck: true,
+      temperature: 0.7,
+      maxTokens: 250
     });
 
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -2035,10 +2164,11 @@ async function answerQuiz(chatJid, userJid, answer) {
       const checkPrompt = `Question posée : "${quiz.question}"
 Réponse attendue : "${quiz.answer}"
 Réponse du joueur : "${answer}"
-La réponse du joueur est-elle factuellement juste et équivalente (même avec une variante d'orthographe, de langue ou un détail supplémentaire) ? Réponds UNIQUEMENT par OUI ou NON.`;
+La réponse du joueur est-elle factuellement juste et équivalente (même avec une variante d'orthographe, de langue ou un synonyme officiel) ? Réponds UNIQUEMENT par OUI ou NON.`;
 
       const verdict = await askGroq(checkPrompt, 'quiz-judge', {
         useHistory: false,
+        skipFactCheck: true,
         temperature: 0.1,
         maxTokens: 10
       });
@@ -2421,9 +2551,7 @@ async function findPixabayImages(query, wanted) {
 async function collectImageCandidates(query, wanted) {
   const results = [];
 
-  // 1. Vérifier d'abord AniList et Jikan (MyAnimeList) : si la requête correspond
-  // à un animé ou un personnage (ex: "Naruto", "Gojo", "Attack on Titan"),
-  // on obtient immédiatement l'affiche/portrait officiel au lieu d'un pont japonais !
+  // 1. AniList et Jikan (MyAnimeList) en priorité pour les personnages/animés
   const ani = await findAniListImages(query);
   if (ani.length) results.push(...ani);
 
@@ -2432,7 +2560,7 @@ async function collectImageCandidates(query, wanted) {
     if (jikan.length) results.push(...jikan);
   }
 
-  // 2. Recherche web générale (Google via SerpAPI, DuckDuckGo, Wikimedia)
+  // 2. Recherche web générale
   if (results.length < wanted * 2) {
     const serp = await findSerpApiImages(query);
     if (serp.length) results.push(...serp);
@@ -2805,10 +2933,42 @@ async function handleAICommand(jid, message, sender, command, args) {
     return false;
   }
 
+  // Commande Xchat on / Xchat off pour activer ou désactiver la réponse directe aux citations
+  if (command === 'chat') {
+    const toggle = String(args || '').trim().toLowerCase();
+    if (toggle === 'on' || toggle === 'off') {
+      if (isGroupJid(jid)) {
+        let metadata;
+        try {
+          metadata = await getGroupMetadata(jid);
+        } catch {
+          metadata = null;
+        }
+        const canToggle = isOwner(sender) || (metadata && isParticipantAdmin(metadata, sender));
+        if (!canToggle) {
+          await sendReply(jid, '⛔ Seuls le propriétaire et les administrateurs peuvent changer le mode Xchat dans ce groupe.', message);
+          return true;
+        }
+      }
+
+      const enabled = toggle === 'on';
+      await setChatMode(jid, enabled);
+
+      await sendReply(
+        jid,
+        enabled
+          ? `💬 𝗠𝗢𝗗𝗘 𝗖𝗛𝗔𝗧 𝗔𝗖𝗧𝗜𝗩𝗘́ (𝗢𝗡)\nTu peux maintenant me parler en répondant directement à l'un de mes messages sans mettre X devant.`
+          : `🔇 𝗠𝗢𝗗𝗘 𝗖𝗛𝗔𝗧 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́ (𝗢𝗙𝗙)\nJe répondrai uniquement si tu m'appelles par "Sitri-Nel" ou avec une commande commençant par X.`,
+        message
+      );
+      return true;
+    }
+  }
+
   if (!args) {
     await sendReply(
       jid,
-      `✧ Que souhaites-tu me demander ?\n\nExemple : X${command} Explique-moi cette notion.\n\n${SIGNATURE}`,
+      `✧ Que souhaites-tu me demander ?\n\nExemples :\n• X${command} Explique-moi les trous noirs\n• Xchat on / Xchat off\n\n${SIGNATURE}`,
       message
     );
     return true;
@@ -2827,15 +2987,15 @@ async function handleAICommand(jid, message, sender, command, args) {
   }
 
   let prompt = args;
-  let maxTokens = 3072;
+  let maxTokens = 1200;
 
   if (command === 'anime') {
-    prompt = `En tant qu'expert absolu en animés, mangas et culture otaku, réponds de façon approfondie, détaillée et structurée (contexte, personnages, capacités, arcs narratifs, nuances et théories si pertinent) à cette question :\n\n${args}`;
-    maxTokens = 4096;
+    prompt = `En tant qu'encyclopédie vivante des animés et mangas, donne une réponse 100% exacte, vérifiée, claire et structurée (sans blabla introductif inutile) à cette question :\n\n${args}`;
+    maxTokens = 1800;
   }
 
   if (command === 'police') {
-    prompt = `Réponds de manière claire, précise et complète sur les lois, la sécurité et les démarches générales (en précisant que les règles varient selon le pays) :\n\n${args}`;
+    prompt = `Réponds de manière concise, exacte et structurée sur les lois et démarches générales (en précisant que les règles varient selon le pays) :\n\n${args}`;
   }
 
   try {
@@ -2851,6 +3011,7 @@ async function handleAICommand(jid, message, sender, command, args) {
       useHistory: true,
       senderJid: sender,
       pushName: message?.pushName || '',
+      factQuery: args,
       maxTokens
     });
   } catch (error) {
@@ -2955,19 +3116,36 @@ async function processCommand(message) {
 
   const parsed = parseCommand(text);
 
-  // Conversation naturelle sans préfixe "X" :
-  // - En message privé (hors messages envoyés par le bot lui-même sauf si addressé à Sitri-Nel)
-  // - Ou en groupe lorsqu'on mentionne Sitri-Nel / répond à un de ses messages
+  // Messages sans préfixe "X" :
+  // 1. Appel direct par son nom ("Sitri-Nel ...") -> répond toujours (sauf boucle du bot lui-même)
+  // 2. Réponse directe (citation) à un message de Sitri-Nel -> répond uniquement si Xchat est ON
   if (!parsed) {
-    const isDirectCall = /^sitri[- ]?nel\b/i.test(text);
-    const shouldChatNaturally =
-      (!isGroupJid(jid) && (!message.key?.fromMe || isDirectCall)) ||
-      (isGroupJid(jid) && !message.key?.fromMe && (isDirectCall || isBotMentionedOrQuoted(message)));
-
-    if (shouldChatNaturally && CONFIG.groqKey) {
-      const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
-      await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+    // Ignorer les propres réponses du bot (qui commencent par ⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 ou contiennent sa signature)
+    if (
+      message.key?.fromMe &&
+      (text.startsWith('⌬') || text.includes('𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟') || text.includes('SITRI-NEL'))
+    ) {
+      return;
     }
+
+    const isDirectNameCall = /^sitri[- ]?nel\b/i.test(text);
+    const isDirectReplyToBot = isReplyToBotMessage(message) || isBotMentioned(message);
+
+    if (isDirectNameCall) {
+      if (CONFIG.groqKey) {
+        const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
+        await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+      }
+      return;
+    }
+
+    if (isDirectReplyToBot) {
+      const chatOn = await isChatModeEnabled(jid);
+      if (chatOn && CONFIG.groqKey) {
+        await handleAICommand(jid, message, sender, 'chat', text);
+      }
+    }
+
     return;
   }
 

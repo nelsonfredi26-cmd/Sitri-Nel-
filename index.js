@@ -2019,6 +2019,9 @@ function uniqueUrls(list) {
   return [...new Set(list.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url)))];
 }
 
+const ANILIST_CHARACTER_QUERY =
+  'query ($search: String, $perPage: Int) { Page(page: 1, perPage: $perPage) { characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) { name { full } image { large } media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { romaji english } } } } } }';
+
 // AniList : recherche directe de personnages d'anime/manga SANS clé API.
 async function findAniListCharacterImages(query, wanted = 1) {
   const perPage = Math.min(Math.max(wanted * 2, 5), 10);
@@ -2026,19 +2029,7 @@ async function findAniListCharacterImages(query, wanted = 1) {
   const response = await axios.post(
     'https://graphql.anilist.co',
     {
-      query: `query ($search: String, $perPage: Int) {
-        Page(page: 1, perPage: $perPage) {
-          characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) {
-            name { full }
-            image { large }
-            media(perPage: 1, sort: POPULARITY_DESC) {
-              nodes {
-                title { romaji english }
-              }
-            }
-          }
-        }
-      }`,
+      query: ANILIST_CHARACTER_QUERY,
       variables: { search: query, perPage }
     },
     {

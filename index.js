@@ -854,9 +854,60 @@ async function fetchVerifiedFacts(query = '') {
 
   const snippets = [];
 
-  // 1. Recherche Wikipédia (FR puis EN) pour les faits encyclopédiques et personnages
+  // 1. Recherche AniList en priorité absolue pour tout ce qui touche aux animés, mangas, personnages et capacités
+  try {
+    const aniRes = await axios.post(
+      'https://graphql.anilist.co',
+      {
+        query: `query ($search: String) {
+          Character(search: $search) {
+            name { full native }
+            description(asHtml: false)
+            media(perPage: 3, sort: POPULARITY_DESC) {
+              nodes { title { romaji english } }
+            }
+          }
+          Media(search: $search, type: ANIME) {
+            title { romaji english }
+            description(asHtml: false)
+            characters(perPage: 5, sort: [ROLE, FAVOURITES_DESC]) {
+              nodes { name { full } }
+            }
+          }
+        }`,
+        variables: { search: clean }
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 6000
+      }
+    );
+
+    const char = aniRes.data?.data?.Character;
+    if (char?.name?.full && char?.description) {
+      const animeTitle =
+        char.media?.nodes?.[0]?.title?.english ||
+        char.media?.nodes?.[0]?.title?.romaji ||
+        '';
+      snippets.push(
+        `[AniList Character - ${char.name.full}${animeTitle ? ` (${animeTitle})` : ''}] : ${String(char.description).replace(/~!|!~/g, '').replace(/\s+/g, ' ').trim().slice(0, 800)}`
+      );
+    }
+
+    const media = aniRes.data?.data?.Media;
+    if (media?.title) {
+      const title = media.title.english || media.title.romaji || '';
+      snippets.push(
+        `[AniList Anime - ${title}] : ${String(media.description || '').replace(/~!|!~/g, '').replace(/\s+/g, ' ').trim().slice(0, 800)}`
+      );
+    }
+  } catch {
+    // Ignorer
+  }
+
+  // 2. Recherche Wikipédia (FR puis EN) pour compléter
   for (const lang of ['fr', 'en']) {
-    if (snippets.length >= 2) break;
+    if (snippets.length >= 3) break;
     try {
       const searchRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
         params: {
@@ -885,49 +936,8 @@ async function fetchVerifiedFacts(query = '') {
         }
       }
     } catch {
-      // Ignorer si indisponible
+      // Ignorer
     }
-  }
-
-  // 2. Recherche AniList si la requête évoque un personnage ou animé
-  try {
-    const aniRes = await axios.post(
-      'https://graphql.anilist.co',
-      {
-        query: `query ($search: String) {
-          Character(search: $search) {
-            name { full native }
-            description(asHtml: false)
-            media(perPage: 2, sort: POPULARITY_DESC) {
-              nodes { title { romaji english } }
-            }
-          }
-        }`,
-        variables: { search: clean }
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 6000
-      }
-    );
-
-    const char = aniRes.data?.data?.Character;
-    if (char?.name?.full && char?.description) {
-      const animeTitle =
-        char.media?.nodes?.[0]?.title?.english ||
-        char.media?.nodes?.[0]?.title?.romaji ||
-        '';
-      const desc = String(char.description)
-        .replace(/~!|!~/g, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 600);
-      snippets.push(
-        `[AniList - ${char.name.full}${animeTitle ? ` (${animeTitle})` : ''}] : ${desc}`
-      );
-    }
-  } catch {
-    // Ignorer
   }
 
   return snippets.join('\n');

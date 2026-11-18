@@ -2048,7 +2048,7 @@ async function findAniListCharacterImages(query, wanted = 1) {
       const charName = item.name?.full || query;
       const animeNode = item.media?.nodes?.[0]?.title;
       const animeTitle = animeNode?.english || animeNode?.romaji || '';
-      const label = animeTitle ? `${charName} (${animeTitle})` : charName;
+      const label = animeTitle ? charName + ' (' + animeTitle + ')' : charName;
       
       return { label, url: item.image?.large };
     })

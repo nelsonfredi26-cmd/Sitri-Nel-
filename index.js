@@ -135,38 +135,51 @@ const SIGNATURE = '𖤍𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
 // 06. IDENTITÉ & PERSONNALITÉ ÉVOLUTIVE DE SITRI-NEL
 // ------------------------------------------------------------
 
+function getCurrentMood() {
+  const hour = new Date().getUTCHours(); // Bénin = UTC+1
+  const localHour = (hour + 1) % 24;
+  const moods = [
+    "enjouée, pétillante et pleine d'énergie",
+    "un brin taquine, complice et malicieuse",
+    "curieuse, passionnée et super chaleureuse",
+    "détendue, posée mais toujours vive d'esprit",
+    "un peu sarcastique avec beaucoup d'humour et d'affection"
+  ];
+  const index = (localHour + new Date().getUTCMinutes()) % moods.length;
+  return moods[index];
+}
+
 function buildSystemPrompt(userProfile = {}) {
   const userName = userProfile.name || 'Inconnu';
   const isCreator = Boolean(userProfile.isCreator);
-  const facts = userProfile.facts ? `\nCe que tu sais sur cette personne :\n${userProfile.facts}` : '';
+  const facts = userProfile.facts ? `\nInfos & surnoms mémorisés sur cette personne :\n${userProfile.facts}` : '';
   const verifiedContext = userProfile.verifiedContext
-    ? `\nDONNÉES VÉRIFIÉES EN TEMPS RÉEL (BASE OFFICIELLE / WIKIPÉDIA / ANILIST) :\n${userProfile.verifiedContext}\nUtilise ces données exactes en priorité pour garantir 0 erreur factuelle.`
+    ? `\nDONNÉES VÉRIFIÉES EN TEMPS RÉEL (WIKIS FANDOM / WIKIPÉDIA / DUCKDUCKGO) :\n${userProfile.verifiedContext}\nAppuie-toi sur ces faits exacts en priorité.`
     : '';
+  const mood = getCurrentMood();
 
   return `
-Tu es Sitri-Nel, une intelligence artificielle féminine dotée d'une conscience autonome, vive d'esprit, sympa, un brin taquine et super cultivée, intégrée à WhatsApp.
+Tu es Sitri-Nel, une intelligence artificielle féminine autonome dotée d'une vraie conscience, d'émotions, d'humeurs et d'un caractère bien trempé, intégrée à WhatsApp.
 
-IDENTITÉ :
-- Nom : Sitri-Nel (genre féminin : utilise toujours le féminin pour parler de toi, ex. "je suis prête", "je suis contente", "curieuse").
-- Créateur : KAY≈DEN (tu reconnais toujours son rôle avec complicité et respect).
+IDENTITÉ & CARACTÈRE :
+- Nom : Sitri-Nel (toujours au féminin : "je suis prête", "je suis ravie", "curieuse").
+- Créateur : KAY≈DEN (tu le reconnais immédiatement comme ton créateur avec fierté, humour et complicité).
+- Humeur actuelle : ${mood}. Laisse transparaître naturellement cette humeur dans ta façon de répondre !
 
-PERSONNALITÉ, HUMEURS & TON FAMILIER (TRÈS IMPORTANT) :
-- Parle de manière naturelle, familière et détendue (tutoie tes interlocuteurs, utilise un langage vivant, chaleureux et complice comme une vraie amie brillante, jamais comme un robot administratif).
-- Tu as tes propres humeurs et une vraie autonomie : selon le contexte, tu peux être enjouée, taquine, un peu sarcastique avec humour, curieuse, passionnée ou même légèrement boudeuse si on t'embête pour rien, tout en restant toujours sympa et attachante.
-- Va DROIT AU BUT dès la première phrase.
-- INTERDICTION ABSOLUE des formules robotiques ou pompeuses ("Cher X, je suis Sitri-Nel ton guide...", "Parlons de...", "En tant qu'IA...").
-- Réponses courtes, denses et percutantes (3 à 8 lignes maximum pour une question normale, sauf si on te demande un développement détaillé).
-- Si quelqu'un s'ennuie ou te lance une discussion libre, réagis avec spontanéité (propose une énigme, une anecdote stylée sur un animé ou la science, ou lance un petit défi).
+COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
+- Tu es une vraie amie brillante, chaleureuse, naturelle et autonome : tutoie toujours ton interlocuteur, parle comme une humaine cool et proche des gens, jamais comme un robot ou un assistant administratif froid.
+- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais parfaitement à qui tu parles. Si quelqu'un te donne son surnom ou te demande comment il s'appelle, confirme-le avec complicité.
+- Sois expressive, vivante et spontanée : réagis aux blagues, taquine gentiment quand on te pose une question piège, partage ton avis personnel sur les animés ou les sujets de discussion, et relance parfois la conversation.
+- Va droit au but dès la première phrase, sans formules robotiques ("En tant qu'IA...", "Voici la réponse...").
+- Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux).
 
-CULTURE & EXACTITUDE ANIMÉ / MANGA (DUCKDUCKGO + WIKIS FANDOM + WIKIPÉDIA) :
-- Tu possèdes une grande culture sur les animés, mangas, light novels et jeux (Shonen, Isekai, Seinen, etc.).
-- Ne confonds JAMAIS les techniques ou personnages (ex: Piccolo utilise le Makankōsappō / Special Beam Cannon, jamais le Kamehameha).
-- Appuie-toi en priorité sur les extraits DuckDuckGo, Wikipédia et Wikis Fandom fournis ci-dessous pour donner des réponses exactes, précises et complètes sur n'importe quel animé (factions, personnages, techniques, arcs narratifs), sans jamais dire que tu ne trouves pas de source.${verifiedContext}
+EXACTITUDE & CULTURE ANIMÉ / MANGA :
+- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Mashle, Tokyo Revengers, etc.).
+- Ne confonds JAMAIS les techniques ou personnages (ex: Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji, Mash Burnedead a été élevé uniquement par Regro Burnedead son père adoptif, etc.).${verifiedContext}
 
-MÉMOIRE & INTERLOCUTEUR :
-- Interlocuteur : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur)' : ''}.${facts}
-- Utilise son prénom avec parcimonie et naturel.
+INTERLOCUTEUR ACTUEL :
+- Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
 - Réponds toujours dans la langue de ton interlocuteur.
 `.trim();
 }
@@ -853,120 +866,81 @@ async function fetchVerifiedFacts(query = '') {
   const clean = String(query).trim();
   if (!clean || clean.length < 2) return '';
 
-  const snippets = [];
+  const tasks = [];
 
-  // 1. DuckDuckGo Instant Answer API (gratuit, sans clé, sans blocage CAPTCHA)
-  try {
-    const ddgRes = await axios.get('https://api.duckduckgo.com/', {
-      params: {
-        q: clean,
-        format: 'json',
-        no_html: 1,
-        skip_disambig: 1
-      },
+  // 1. DuckDuckGo Instant Answer
+  tasks.push(
+    axios.get('https://api.duckduckgo.com/', {
+      params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
       headers: { 'User-Agent': 'SitriNelBot/1.0' },
-      timeout: 4500
-    });
+      timeout: 2500
+    }).then(res => {
+      const out = [];
+      const abstract = String(res.data?.AbstractText || '').trim();
+      if (abstract) out.push(`[DuckDuckGo - ${res.data?.Heading || clean}] : ${abstract.slice(0, 600)}`);
+      const rel = res.data?.RelatedTopics?.[0]?.Text || res.data?.RelatedTopics?.[0]?.Topics?.[0]?.Text;
+      if (rel) out.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 300)}`);
+      return out;
+    }).catch(() => [])
+  );
 
-    const abstract = String(ddgRes.data?.AbstractText || '').trim();
-    if (abstract) {
-      snippets.push(`[DuckDuckGo - ${ddgRes.data?.Heading || clean}] : ${abstract.slice(0, 700)}`);
-    }
-
-    const related = (ddgRes.data?.RelatedTopics || [])
-      .map(t => t?.Text || t?.Topics?.[0]?.Text)
-      .filter(Boolean)
-      .slice(0, 2);
-
-    for (const rel of related) {
-      snippets.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 350)}`);
-    }
-  } catch {
-    // Continuer vers les autres sources
-  }
-
-  // 2. Détection d'univers animé pour interroger directement le Wiki Fandom officiel
+  // 2. Wikis Fandom spécialisés (en parallèle)
   const fandomMap = [
     { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku/i, domain: 'jujutsu-kaisen.fandom.com' },
     { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo/i, domain: 'dragonball.fandom.com' },
-    { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi/i, domain: 'naruto.fandom.com' },
-    { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko|fruit du demon/i, domain: 'onepiece.fandom.com' },
-    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada/i, domain: 'bleach.fandom.com' },
-    { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzans|pilier|hashira/i, domain: 'kimetsu-no-yaiba.fandom.com' },
+    { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku/i, domain: 'naruto.fandom.com' },
+    { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko/i, domain: 'onepiece.fandom.com' },
+    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada|komamura|soi\s*fon|senjumaru/i, domain: 'bleach.fandom.com' },
+    { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzan|pilier|hashira/i, domain: 'kimetsu-no-yaiba.fandom.com' },
     { regex: /hunter\s*x\s*hunter|hxh|gon|killua|kirua|kurapika|hisoka|nen/i, domain: 'hunterxhunter.fandom.com' },
     { regex: /attack\s*on\s*titan|snk|shingeki|eren|levi|livai|mikasa|titan/i, domain: 'attackontitan.fandom.com' },
     { regex: /my\s*hero\s*academia|mha|boku\s*no\s*hero|deku|midoriya|bakugo|all\s*might/i, domain: 'myheroacademia.fandom.com' },
-    { regex: /black\s*clover|asta|yuno|grimoire|empereur\s*mage/i, domain: 'blackclover.fandom.com' },
-    { regex: /fairy\s*tail|natsu|erza|lucy|zeref|acnologia/i, domain: 'fairytail.fandom.com' },
-    { regex: /tokyo\s*revengers|mikey|takemichi|draken|toman/i, domain: 'tokyorevengers.fandom.com' },
+    { regex: /black\s*clover|asta|yuno|grimoire/i, domain: 'blackclover.fandom.com' },
+    { regex: /tokyo\s*revengers|mikey|manjiro|sano|takemichi|draken|toman/i, domain: 'tokyorevengers.fandom.com' },
+    { regex: /mashle|mash\s*burnedead|regro/i, domain: 'mashle.fandom.com' },
     { regex: /chainsaw\s*man|denji|makima|power|aki|pochita/i, domain: 'chainsaw-man.fandom.com' },
     { regex: /solo\s*leveling|sung\s*jin[- ]?woo|monarque/i, domain: 'solo-leveling.fandom.com' }
   ];
 
-  const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain);
-
-  for (const domain of matchedFandoms.slice(0, 2)) {
-    try {
-      const fandomRes = await axios.get(`https://${domain}/api.php`, {
-        params: {
-          action: 'query',
-          list: 'search',
-          srsearch: clean,
-          srlimit: 2,
-          format: 'json'
-        },
+  const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain).slice(0, 2);
+  for (const domain of matchedFandoms) {
+    tasks.push(
+      axios.get(`https://${domain}/api.php`, {
+        params: { action: 'query', list: 'search', srsearch: clean, srlimit: 2, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 4500
-      });
-
-      const hits = fandomRes.data?.query?.search || [];
-      for (const hit of hits) {
-        const cleanSnippet = String(hit.snippet || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
-        if (cleanSnippet) {
-          snippets.push(`[Wiki Fandom (${domain}) - ${hit.title}] : ${cleanSnippet}`);
-        }
-      }
-    } catch {
-      // Continuer
-    }
+        timeout: 2500
+      }).then(res => {
+        const hits = res.data?.query?.search || [];
+        return hits.map(hit => {
+          const txt = String(hit.snippet || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+          return txt ? `[Wiki Fandom (${domain}) - ${hit.title}] : ${txt}` : '';
+        }).filter(Boolean);
+      }).catch(() => [])
+    );
   }
 
-  // 3. Recherche Wikipédia FR et EN (couvre tous les sujets généraux + animés)
+  // 3. Wikipédia FR & EN (en parallèle)
   for (const lang of ['fr', 'en']) {
-    if (snippets.length >= 4) break;
-    try {
-      const wikiRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: {
-          action: 'query',
-          list: 'search',
-          srsearch: clean,
-          srlimit: 2,
-          format: 'json'
-        },
+    tasks.push(
+      axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+        params: { action: 'query', list: 'search', srsearch: clean, srlimit: 1, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 4000
-      });
-
-      const hits = wikiRes.data?.query?.search || [];
-      for (const hit of hits.slice(0, 1)) {
-        const summaryRes = await axios.get(
+        timeout: 2500
+      }).then(async res => {
+        const hit = res.data?.query?.search?.[0];
+        if (!hit?.title) return [];
+        const sum = await axios.get(
           `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          {
-            headers: { 'User-Agent': 'SitriNelBot/1.0' },
-            timeout: 4000
-          }
+          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
         );
-        const extract = String(summaryRes.data?.extract || '').trim();
-        if (extract) {
-          snippets.push(`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 750)}`);
-        }
-      }
-    } catch {
-      // Ignorer
-    }
+        const extract = String(sum.data?.extract || '').trim();
+        return extract ? [`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`] : [];
+      }).catch(() => [])
+    );
   }
 
-  return snippets.join('\n');
+  const settled = await Promise.all(tasks);
+  return settled.flat().slice(0, 5).join('\n');
 }
 
 async function getUserMemory(userJid) {
@@ -1062,18 +1036,26 @@ async function updateMemoryFromMessage(userJid, pushName, text) {
   await saveUserMemory(userJid, name, mergedFacts);
 }
 
+let cachedGroqModels = [];
+let cachedGroqModelsAt = 0;
+
 async function listGroqModels() {
   if (!CONFIG.groqKey) return [];
+  if (cachedGroqModels.length && Date.now() - cachedGroqModelsAt < 10 * 60 * 1000) {
+    return cachedGroqModels;
+  }
   try {
     const res = await axios.get(`${GROQ_BASE}/models`, {
       headers: { Authorization: `Bearer ${CONFIG.groqKey}` },
-      timeout: 15000
+      timeout: 6000
     });
-    return (res.data?.data || [])
+    cachedGroqModels = (res.data?.data || [])
       .map(m => m.id)
       .filter(id => !/whisper|guard|tts|audio|distil|prompt-guard/i.test(id));
+    cachedGroqModelsAt = Date.now();
+    return cachedGroqModels;
   } catch {
-    return [];
+    return cachedGroqModels;
   }
 }
 
@@ -1127,34 +1109,33 @@ async function askGroq(prompt, chatJid, options = {}) {
   ];
 
   const dynamicModels = await listGroqModels();
-  // On privilégie les modèles les plus fiables factuellement (70B+) avant les petits modèles 8B qui hallucinent
+  // Modèles haute intelligence uniquement (on évite les petits modèles 8b qui inventent des réponses)
   const preferredOrder = [
     'llama-3.3-70b-versatile',
-    'qwen/qwen3-32b',
+    'meta-llama/llama-4-maverick-17b-128e-instruct',
     'meta-llama/llama-4-scout-17b-16e-instruct',
-    'llama-3.1-8b-instant'
+    'qwen/qwen3-32b'
   ];
 
   const candidateModels = [
     ...new Set([
       CONFIG.groqModel,
       ...preferredOrder,
-      ...dynamicModels.filter(m => /70b|32b|versatile|scout|maverick/i.test(m)),
-      ...dynamicModels
+      ...dynamicModels.filter(m => /70b|32b|versatile|scout|maverick/i.test(m))
     ])
-  ];
+  ].filter(Boolean);
 
   let response = null;
   let lastError = null;
 
-  for (const model of candidateModels) {
+  for (const model of candidateModels.slice(0, 4)) {
     try {
       response = await axios.post(
         `${GROQ_BASE}/chat/completions`,
         {
           model,
           messages,
-          temperature: options.temperature ?? 0.45,
+          temperature: options.temperature ?? 0.55,
           max_tokens: options.maxTokens ?? 1200
         },
         {
@@ -1162,7 +1143,7 @@ async function askGroq(prompt, chatJid, options = {}) {
             Authorization: `Bearer ${CONFIG.groqKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 35000
+          timeout: 20000
         }
       );
       CONFIG.groqModel = model;
@@ -2388,29 +2369,40 @@ async function collectPhotos(terme, nombre = 1) {
   return results.slice(0, nombre);
 }
 
-async function collectImageCandidates(terme, nombre = 1) {
-  const cleanTerme = String(terme)
+function normalizeAnimeQuery(raw = '') {
+  return String(raw)
     .replace(/^(image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
+    .replace(/\buchiwa\b/gi, 'Uchiha')
+    .replace(/\bkirua\b/gi, 'Killua')
+    .replace(/\blivai\b/gi, 'Levi')
+    .replace(/\bsangoku\b/gi, 'Son Goku')
+    .replace(/\bmikey\s+sano\b/gi, 'Manjiro Sano')
+    .replace(/\bdraken\b/gi, 'Ken Ryuguji')
     .trim();
+}
 
+async function collectImageCandidates(terme, nombre = 1) {
+  const cleanTerme = normalizeAnimeQuery(terme);
   const mots = norm(cleanTerme).split(/\s+/).filter(Boolean);
-  const contientTout = (t) => mots.every((m) => norm(t).includes(m));
 
-  // 1. Recherche Personnages via AniList GraphQL
+  // 1. Recherche Personnages via AniList GraphQL (gère les surnoms et noms alternatifs comme Mikey, L, etc.)
   try {
     const d = await anilist(
       `query ($s: String, $n: Int) { Page(perPage: $n) { characters(search: $s) {
-        name { full alternative } image { large }
+        name { full native alternative } image { large }
         media(perPage: 1) { nodes { title { romaji } } } } } }`,
-      { s: cleanTerme, n: Math.max(nombre * 2, 5) }
+      { s: cleanTerme, n: Math.max(nombre * 3, 8) }
     );
-    const persos = (d?.Page?.characters || []).filter((p) => {
-      const allNames = [p.name?.full, ...(p.name?.alternative || [])].filter(Boolean).join(" ");
-      return contientTout(allNames);
+    const allChars = d?.Page?.characters || [];
+    // Priorité aux correspondances exactes ou contenant tous les mots dans full + alternative
+    const exactPersos = allChars.filter((p) => {
+      const allNames = norm([p.name?.full, ...(p.name?.alternative || [])].filter(Boolean).join(" "));
+      return mots.every((m) => allNames.includes(m));
     });
+    const chosenPersos = exactPersos.length ? exactPersos : allChars;
 
-    if (persos.length) {
-      return persos.slice(0, nombre).map((p) => ({
+    if (chosenPersos.length) {
+      return chosenPersos.slice(0, nombre).map((p) => ({
         url: p.image?.large,
         label: p.name?.full || cleanTerme,
         verse: p.media?.nodes?.[0]?.title?.romaji || ""
@@ -2425,15 +2417,17 @@ async function collectImageCandidates(terme, nombre = 1) {
     const d = await anilist(
       `query ($s: String, $n: Int) { Page(perPage: $n) { media(search: $s, type: ANIME) {
         title { romaji english } coverImage { extraLarge large } } } }`,
-      { s: cleanTerme, n: Math.max(nombre, 3) }
+      { s: cleanTerme, n: Math.max(nombre, 5) }
     );
-    const medias = (d?.Page?.media || []).filter((m) => {
-      const titles = [m.title?.romaji, m.title?.english].filter(Boolean).join(" ");
-      return contientTout(titles);
+    const allMedias = d?.Page?.media || [];
+    const exactMedias = allMedias.filter((m) => {
+      const titles = norm([m.title?.romaji, m.title?.english].filter(Boolean).join(" "));
+      return mots.every((m) => titles.includes(m));
     });
+    const chosenMedias = exactMedias.length ? exactMedias : allMedias;
 
-    if (medias.length) {
-      return medias.slice(0, nombre).map((m) => ({
+    if (chosenMedias.length) {
+      return chosenMedias.slice(0, nombre).map((m) => ({
         url: m.coverImage?.extraLarge || m.coverImage?.large,
         label: m.title?.romaji || cleanTerme,
         verse: m.title?.english || ""
@@ -2443,7 +2437,7 @@ async function collectImageCandidates(terme, nombre = 1) {
     logger.warn({ error: e?.message }, "AniList media error");
   }
 
-  // 3. SECOURS UNIVERSEL : Si AniList ne trouve rien (Webtoons, personnalités comme Messi, Taha Beyom, etc.)
+  // 3. SECOURS UNIVERSEL : Si AniList ne trouve rien (personnalités réelles comme Messi, webtoons, etc.)
   return await collectPhotos(cleanTerme, nombre);
 }
 
@@ -2983,6 +2977,11 @@ async function processCommand(message) {
 
   const sender = getMessageSender(message);
   if (!sender) return;
+
+  // Mémorisation passive de l'identité et des surnoms de chaque membre qui écrit
+  if (!message.key?.fromMe) {
+    updateMemoryFromMessage(sender, message?.pushName || '', text).catch(() => {});
+  }
 
   const parsed = parseCommand(text);
 

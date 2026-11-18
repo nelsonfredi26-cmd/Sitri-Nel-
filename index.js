@@ -2144,7 +2144,7 @@ async function searchImage(jid, message, rawQuery) {
 
     try {
       const downloaded = await downloadImageBuffer(item.url);
-      const counter = count > 1 ? ` (${sent + 1}/${count})` : '';
+      const counter = count > 1 ? ' (' + (sent + 1) + '/' + count + ')' : '';
 
       await sock.sendMessage(
         jid,

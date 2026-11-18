@@ -2318,6 +2318,76 @@ async function anilist(query, variables) {
   return (await res.json())?.data;
 }
 
+async function collectPhotos(terme, nombre = 1) {
+  const cleanTerme = String(terme).trim();
+  const results = [];
+
+  // 1. Essayer Wikipédia (FR et EN) pour récupérer l'image principale de la page (très fiable pour les personnalités, sportifs comme Messi, etc.)
+  for (const lang of ['fr', 'en']) {
+    if (results.length >= nombre) break;
+    try {
+      const searchRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+        params: {
+          action: 'query',
+          list: 'search',
+          srsearch: cleanTerme,
+          srlimit: 2,
+          format: 'json'
+        },
+        headers: { 'User-Agent': 'SitriNelBot/1.0' },
+        timeout: 4000
+      });
+      const hits = searchRes.data?.query?.search || [];
+      for (const hit of hits.slice(0, 2)) {
+        if (results.length >= nombre) break;
+        const summaryRes = await axios.get(
+          `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
+          {
+            headers: { 'User-Agent': 'SitriNelBot/1.0' },
+            timeout: 4000
+          }
+        );
+        const imageUrl = summaryRes.data?.originalimage?.source || summaryRes.data?.thumbnail?.source;
+        if (imageUrl && !results.some(r => r.url === imageUrl)) {
+          results.push({
+            url: imageUrl,
+            label: hit.title || cleanTerme,
+            verse: `Wikipédia (${lang.toUpperCase()})`
+          });
+        }
+      }
+    } catch (e) {
+      // Continuer
+    }
+  }
+
+  if (results.length >= nombre) return results.slice(0, nombre);
+
+  // 2. Pixabay (si clé présente)
+  if (CONFIG.pixabayKey) {
+    try {
+      const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(cleanTerme)}&image_type=all&safesearch=true&per_page=${Math.max(nombre * 2, 5)}`;
+      const json = await (await fetch(url)).json();
+      const hits = json.hits || [];
+      for (const h of hits) {
+        if (results.length >= nombre) break;
+        const imgUrl = h.largeImageURL || h.webformatURL;
+        if (imgUrl && !results.some(r => r.url === imgUrl)) {
+          results.push({
+            url: imgUrl,
+            label: cleanTerme,
+            verse: "Pixabay"
+          });
+        }
+      }
+    } catch (e) {
+      // Continuer
+    }
+  }
+
+  return results.slice(0, nombre);
+}
+
 async function collectImageCandidates(terme, nombre = 1) {
   const cleanTerme = String(terme)
     .replace(/^(image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
@@ -2373,23 +2443,8 @@ async function collectImageCandidates(terme, nombre = 1) {
     logger.warn({ error: e?.message }, "AniList media error");
   }
 
-  return [];
-}
-
-async function collectPhotos(terme, nombre = 1) {
-  if (!CONFIG.pixabayKey) return [];
-  try {
-    const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(terme)}&image_type=photo&safesearch=true&per_page=${Math.max(nombre, 3)}`;
-    const json = await (await fetch(url)).json();
-    return (json.hits || []).slice(0, nombre).map((h) => ({
-      url: h.largeImageURL,
-      label: terme,
-      verse: ""
-    })).filter(item => item.url);
-  } catch (e) {
-    logger.warn({ error: e?.message }, "Pixabay error");
-  }
-  return [];
+  // 3. SECOURS UNIVERSEL : Si AniList ne trouve rien (Webtoons, personnalités comme Messi, Taha Beyom, etc.)
+  return await collectPhotos(cleanTerme, nombre);
 }
 
 async function searchImage(jid, message, rawQuery) {

@@ -85,7 +85,6 @@ const CONFIG = {
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
-  pixabayKey: cleanEnv(process.env.PIXABAY_API_KEY),
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
   cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
   maxImageBytes: 8 * 1024 * 1024,
@@ -1099,75 +1098,6 @@ async function canUseOrdinaryGroupCommand(groupJid, sender) {
 }
 
 // ------------------------------------------------------------
-// 18 bis. AIDES POUR XADD / XKICK
-// ------------------------------------------------------------
-
-// Variantes possibles d'un numéro. Bénin : depuis fin 2024 le « 01 » fait partie
-// du numéro (229 01 XX XX XX XX), mais d'anciens comptes WhatsApp existent encore
-// sous la forme à 8 chiffres (229 XX XX XX XX).
-function phoneCandidates(raw = '') {
-  const digits = normalizeNumber(raw);
-
-  if (!digits) return [];
-
-  if (/^01\d{8}$/.test(digits)) return ['229' + digits, '229' + digits.slice(2)];
-  if (/^2290\d{9}$/.test(digits)) return [digits, '229' + digits.slice(5)];
-  if (/^229\d{8}$/.test(digits)) return [digits, '22901' + digits.slice(3)];
-  if (/^\d{8}$/.test(digits)) return ['22901' + digits, '229' + digits];
-
-  return [digits];
-}
-
-// Infos du message (mentions, réponse) même quand ce n'est pas une réponse.
-function getContextInfo(message) {
-  const content = unwrapContent(message);
-
-  if (!content) return null;
-
-  const types = [
-    'extendedTextMessage', 'imageMessage', 'videoMessage',
-    'documentMessage', 'audioMessage', 'stickerMessage'
-  ];
-
-  for (const type of types) {
-    if (content[type]?.contextInfo) return content[type].contextInfo;
-  }
-
-  return null;
-}
-
-// Fiche du membre telle que WhatsApp la connaît dans CE groupe.
-// Son identifiant (numéro ou LID) est celui à utiliser pour expulser.
-function findGroupParticipant(metadata, jid) {
-  return (
-    (metadata?.participants || []).find(item =>
-      [item.id, item.jid, item.phoneNumber, item.lid].some(candidate =>
-        sameParticipant(candidate, jid)
-      )
-    ) || null
-  );
-}
-
-function participantLabel(item) {
-  const number = getNumber(item?.phoneNumber || item?.jid || item?.id || '');
-
-  return number ? `+${number}` : 'ce membre';
-}
-
-// Cible d'un Xkick : @mention, sinon réponse à un message, sinon numéro écrit.
-function getKickTargetJid(message, args) {
-  const context = getContextInfo(message);
-  const mentioned = context?.mentionedJid?.[0];
-
-  if (mentioned) return mentioned;
-  if (context?.stanzaId && context?.participant) return context.participant;
-
-  const candidate = phoneCandidates(args)[0];
-
-  return candidate ? `${candidate}@s.whatsapp.net` : null;
-}
-
-// ------------------------------------------------------------
 // 19. DÉLAI ANTI-SPAM PARTAGÉ POUR XTAG
 // ------------------------------------------------------------
 
@@ -1388,43 +1318,27 @@ async function handleGroupCommand(jid, message, sender, command, args) {
   // ---------------- XKICK ----------------
 
   if (command === 'kick') {
-    const targetJid = getKickTargetJid(message, args);
+    const quoted = getQuotedMessage(message);
+    const target = quoted?.participant;
 
-    if (!targetJid) {
+    if (!target) {
       await sendReply(
         jid,
-        'Réponds au message de la personne, ou mentionne-la (@), ou écris son numéro : Xkick 229XXXXXXXXXX',
+        'Réponds au message de la personne à expulser, puis utilise Xkick.',
         message
       );
 
       return true;
     }
 
-    // Les numéros béninois peuvent exister sous deux formes : on teste les deux.
-    const candidates = getContextInfo(message)?.mentionedJid?.length || getContextInfo(message)?.stanzaId
-      ? [targetJid]
-      : phoneCandidates(args).map(number => `${number}@s.whatsapp.net`);
-
-    const member = candidates
-      .map(candidate => findGroupParticipant(metadata, candidate))
-      .find(Boolean);
-
-    if (!member) {
-      await sendReply(jid, 'Cette personne n’est pas dans le groupe.', message);
-      return true;
-    }
-
-    const memberId = member.id || member.jid;
-
     if (
-      isBotParticipant(memberId) ||
-      isOwner(memberId) ||
-      isOwner(member.phoneNumber || '') ||
-      member.admin
+      isBotParticipant(target) ||
+      isOwner(target) ||
+      isParticipantAdmin(metadata, target)
     ) {
       await sendReply(
         jid,
-        '⛔ Cette personne ne peut pas être expulsée par cette commande (propriétaire ou administrateur).',
+        '⛔ Cette personne ne peut pas être expulsée par cette commande.',
         message
       );
 
@@ -1432,26 +1346,19 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     }
 
     try {
-      const result = await sock.groupParticipantsUpdate(jid, [memberId], 'remove');
-      const status = String(result?.[0]?.status || '200');
-
-      if (status === '200') {
-        await sendReply(jid, `✅ ${participantLabel(member)} a été expulsé du groupe.`, message);
-      } else if (status === '403' || status === '401') {
-        await sendReply(
-          jid,
-          `WhatsApp a refusé (code ${status}) : ce compte n’est pas administrateur du groupe, ou la personne est protégée.`,
-          message
-        );
-      } else {
-        await sendReply(jid, `L’expulsion n’a pas abouti (code WhatsApp ${status}).`, message);
-      }
-    } catch (error) {
-      logger.error({ err: error, memberId }, 'Erreur Xkick');
+      await sock.groupParticipantsUpdate(jid, [target], 'remove');
 
       await sendReply(
         jid,
-        `Impossible d’expulser ce membre. Détail : ${error?.message || 'erreur inconnue'}.`,
+        `✅ La demande d'expulsion de @${getNumber(target)} a été effectuée.`,
+        message
+      );
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur Xkick');
+
+      await sendReply(
+        jid,
+        "Impossible d'expulser ce membre. WhatsApp a refusé l'action : vérifie que ce compte est bien administrateur du groupe.",
         message
       );
     }
@@ -1462,90 +1369,37 @@ async function handleGroupCommand(jid, message, sender, command, args) {
   // ---------------- XADD ----------------
 
   if (command === 'add') {
-    const candidates = phoneCandidates(args);
+    const number = normalizeNumber(args);
 
-    if (!candidates.length || candidates.some(number => number.length < 8 || number.length > 15)) {
-      await sendReply(jid, 'Utilisation : Xadd 229XXXXXXXXXX (ou 01XXXXXXXX pour le Bénin)', message);
+    if (!number || number.length < 8 || number.length > 15) {
+      await sendReply(jid, 'Utilisation : Xadd 229XXXXXXXXXX', message);
       return true;
     }
 
-    // On demande à WhatsApp quelle forme du numéro existe vraiment.
-    let targetJid = null;
-
     try {
-      const checks = await sock.onWhatsApp(
-        ...candidates.map(number => `${number}@s.whatsapp.net`)
+      const result = await sock.groupParticipantsUpdate(
+        jid,
+        [`${number}@s.whatsapp.net`],
+        'add'
       );
 
-      targetJid = (checks || []).find(item => item?.exists)?.jid || null;
+      const status = result?.[0]?.status;
 
-      if (!targetJid) {
-        await sendReply(
-          jid,
-          'Ce numéro n’est pas sur WhatsApp. Vérifie-le (exemple : Xadd 2290143420472).',
-          message
-        );
-
-        return true;
-      }
-    } catch (error) {
-      logger.warn({ err: error }, 'Vérification du numéro impossible, essai direct.');
-      targetJid = `${candidates[0]}@s.whatsapp.net`;
-    }
-
-    if (findGroupParticipant(metadata, targetJid)) {
-      await sendReply(jid, 'Cette personne est déjà dans le groupe.', message);
-      return true;
-    }
-
-    try {
-      const result = await sock.groupParticipantsUpdate(jid, [targetJid], 'add');
-      const status = String(result?.[0]?.status || '');
-
-      if (status === '200') {
-        await sendReply(jid, `✅ +${getNumber(targetJid)} a été ajouté au groupe.`, message);
-      } else if (status === '409') {
-        await sendReply(jid, 'Cette personne est déjà dans le groupe.', message);
-      } else if (status === '408') {
-        await sendReply(
-          jid,
-          'Cette personne a quitté le groupe récemment : WhatsApp bloque un nouvel ajout pendant un moment.',
-          message
-        );
-      } else if (status === '403' || status === '401') {
-        // Confidentialité : on lui envoie le lien d'invitation en privé.
-        try {
-          const code = await sock.groupInviteCode(jid);
-
-          await sock.sendMessage(targetJid, {
-            text:
-              `📩 𝗜𝗡𝗩𝗜𝗧𝗔𝗧𝗜𝗢𝗡\n\nTu es invité à rejoindre le groupe :\n` +
-              `https://chat.whatsapp.com/${code}\n\n${SIGNATURE}`
-          });
-
-          await sendReply(
-            jid,
-            `📩 +${getNumber(targetJid)} ne peut pas être ajouté directement (confidentialité). Une invitation lui a été envoyée en privé.`,
-            message
-          );
-        } catch (inviteError) {
-          logger.warn({ err: inviteError }, 'Envoi de l’invitation impossible.');
-
-          await sendReply(
-            jid,
-            'Ses paramètres de confidentialité empêchent l’ajout, et l’invitation n’a pas pu être envoyée. Partage-lui le lien du groupe manuellement.',
-            message
-          );
-        }
+      if (String(status) === '200') {
+        await sendReply(jid, `✅ Demande d'ajout envoyée pour ${number}.`, message);
       } else {
-        await sendReply(jid, `L’ajout n’a pas abouti (code WhatsApp ${status || 'inconnu'}).`, message);
+        await sendReply(
+          jid,
+          `La demande a été traitée avec le statut ${status || 'inconnu'}. WhatsApp peut imposer une invitation selon les paramètres de confidentialité.`,
+          message
+        );
       }
     } catch (error) {
       logger.warn({ err: error }, 'Échec de Xadd');
 
       await sendReply(
         jid,
-        `Impossible d’ajouter ce numéro. Détail : ${error?.message || 'erreur inconnue'}.`,
+        'WhatsApp n’autorise pas directement cet ajout. Une invitation peut être nécessaire selon les paramètres de confidentialité du membre.',
         message
       );
     }
@@ -2007,183 +1861,88 @@ async function downloadImageBuffer(url) {
   return { buffer, contentType };
 }
 
-// Nombre minimal de fans pour considérer qu'un résultat est un vrai personnage connu.
-// Évite que « lion » ou « plage » renvoie un personnage obscur au lieu d'une photo.
-const MIN_CHARACTER_FAVORITES = 100;
-const MAX_IMAGES_PER_REQUEST = 5;
-
-// « sasuke 3 » → { query: 'sasuke', count: 3 } ; sans nombre, une seule image.
-function parseImageRequest(raw = '') {
-  const text = String(raw).trim();
-  const match = text.match(/^([\s\S]*?)\s+(\d{1,2})$/);
-
-  if (!match || !match[1].trim()) {
-    return { query: text, count: 1 };
-  }
-
-  const count = Math.min(
-    Math.max(parseInt(match[2], 10) || 1, 1),
-    MAX_IMAGES_PER_REQUEST
-  );
-
-  return { query: match[1].trim(), count };
-}
-
-function uniqueUrls(list) {
-  return [...new Set(list.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url)))];
-}
-
-// AniList : personnages d'anime/manga. Pas de clé ni de compte : l'API est publique.
-// Chaque personnage n'a qu'une seule image, donc « 3 » = les 3 meilleurs résultats.
-async function findAniListCharacterImages(query) {
-  const response = await axios.post(
-    'https://graphql.anilist.co',
-    {
-      query: `query ($search: String) {
-        Page(page: 1, perPage: 5) {
-          characters(search: $search, sort: FAVOURITES_DESC) {
-            name { full }
-            image { large }
-            favourites
-          }
-        }
-      }`,
-      variables: { search: query }
-    },
-    { timeout: 15000, headers: { 'Content-Type': 'application/json' } }
-  );
-
-  return (response.data?.data?.Page?.characters || [])
-    .filter(item => Number(item.favourites || 0) >= MIN_CHARACTER_FAVORITES)
-    .map(item => ({ label: item.name?.full || query, url: item.image?.large }))
-    .filter(item => /^https?:\/\//i.test(String(item.url)));
-}
-
-// Pixabay : photos libres de droits (animaux, paysages, objets...). Clé gratuite.
-async function findPixabayImages(query, wanted) {
-  if (!CONFIG.pixabayKey) return null;
-
-  const response = await axios.get('https://pixabay.com/api/', {
-    params: {
-      key: CONFIG.pixabayKey,
-      q: query.slice(0, 100),
-      image_type: 'photo',
-      safe_search: 'true',
-      per_page: Math.max(wanted * 2, 3)
-    },
-    timeout: 15000
-  });
-
-  const urls = (response.data?.hits || []).map(
-    hit => hit.largeImageURL || hit.webformatURL
-  );
-
-  return uniqueUrls(urls).map(url => ({ label: query, url }));
-}
-
-// Google Images via SerpApi : dernier recours, seulement si la clé existe.
-async function findSerpApiImages(query) {
-  if (!CONFIG.serpApiKey) return null;
-
-  const response = await axios.get('https://serpapi.com/search.json', {
-    params: {
-      engine: 'google_images',
-      q: query,
-      api_key: CONFIG.serpApiKey,
-      safe: 'active',
-      ijn: '0'
-    },
-    timeout: 30000
-  });
-
-  const urls = (response.data?.images_results || [])
-    .slice(0, 10)
-    .map(item => item.original || item.thumbnail);
-
-  return uniqueUrls(urls).map(url => ({ label: query, url }));
-}
-
-// Essaie les fournisseurs dans l'ordre et garde le premier qui répond.
-async function collectImageCandidates(query, wanted) {
-  const providers = [
-    ['AniList', () => findAniListCharacterImages(query)],
-    ['Pixabay', () => findPixabayImages(query, wanted)],
-    ['SerpApi', () => findSerpApiImages(query)]
-  ];
-
-  for (const [name, run] of providers) {
-    try {
-      const result = await run();
-
-      if (result?.length) return result;
-    } catch (error) {
-      logger.warn({ err: error }, `Fournisseur d'images ${name} indisponible.`);
-    }
-  }
-
-  return null;
-}
-
-async function searchImage(jid, message, rawQuery) {
-  const { query, count } = parseImageRequest(rawQuery);
-
-  if (!query) {
+async function searchImage(jid, message, query) {
+  if (!CONFIG.serpApiKey) {
     await sendReply(
       jid,
-      'Utilisation : Ximg-sasuke 3\n(le nombre d’images est facultatif, 5 maximum)',
+      moduleMessage(
+        '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
+        "Le service Ximg n'est pas encore relié à son fournisseur externe."
+      ),
       message
     );
+
+    return false;
+  }
+
+  if (!query || !query.trim()) {
+    await sendReply(jid, 'Utilisation : Ximg Naruto, paysage, animal...', message);
     return false;
   }
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
-  const found = await collectImageCandidates(query, count);
+  try {
+    const response = await axios.get('https://serpapi.com/search.json', {
+      params: {
+        engine: 'google_images',
+        q: query.trim(),
+        api_key: CONFIG.serpApiKey,
+        safe: 'active',
+        ijn: '0'
+      },
+      timeout: 30000
+    });
 
-  if (!found) {
-    await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
-    return false;
-  }
+    const results = response.data?.images_results || [];
 
-  let sent = 0;
-
-  for (const item of found) {
-    if (sent >= count) break;
-
-    try {
-      const downloaded = await downloadImageBuffer(item.url);
-      const counter = count > 1 ? ` (${sent + 1}/${count})` : '';
-
-      await sock.sendMessage(
-        jid,
-        {
-          image: downloaded.buffer,
-          mimetype: downloaded.contentType,
-          caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${item.label}${counter}\n\n${SIGNATURE}`
-        },
-        { quoted: message }
-      );
-
-      sent += 1;
-    } catch (error) {
-      logger.warn({ err: error }, 'Image trouvée mais non téléchargeable.');
+    if (!results.length) {
+      await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
+      return false;
     }
-  }
 
-  if (!sent) {
+    for (const item of results.slice(0, 5)) {
+      const imageUrl = item.original || item.thumbnail;
+
+      if (!imageUrl) continue;
+
+      try {
+        const downloaded = await downloadImageBuffer(imageUrl);
+
+        await sock.sendMessage(
+          jid,
+          {
+            image: downloaded.buffer,
+            mimetype: downloaded.contentType,
+            caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${query.trim()}\n\n${SIGNATURE}`
+          },
+          { quoted: message }
+        );
+
+        return true;
+      } catch (error) {
+        logger.warn({ err: error }, 'Résultat SerpApi non téléchargeable.');
+      }
+    }
+
     await sendReply(
       jid,
       'Les résultats ont été trouvés, mais aucune image n’a pu être téléchargée.',
       message
     );
+
+    return false;
+  } catch (error) {
+    logger.error({ err: error }, 'Erreur de recherche SerpApi.');
+
+    await sendReply(
+      jid,
+      'La recherche d’images a échoué. Vérifie SERPAPI_KEY et réessaie.',
+      message
+    );
+
     return false;
   }
-
-  if (sent < count) {
-    await sendReply(jid, `Seulement ${sent} image(s) trouvée(s) sur ${count} demandée(s).`, message);
-  }
-
-  return true;
 }
 
 // Explique clairement l'erreur renvoyée par Cloudflare.
@@ -2340,7 +2099,7 @@ async function multimediaNotIntegrated(jid, message, command) {
 // ------------------------------------------------------------
 
 function parseCommand(text = '') {
-  const match = String(text).trim().match(/^x([a-z]+)(?:[\s-]+([\s\S]*))?$/i);
+  const match = String(text).trim().match(/^x([a-z]+)(?:\s+([\s\S]*))?$/i);
 
   if (!match) return null;
 
@@ -2607,7 +2366,7 @@ async function handleImageCommand(jid, message, args) {
   if (!args) {
     await sendReply(
       jid,
-      'Utilisation :\nXimg-sasuke 3\n(3 = nombre d’images, facultatif, 5 maximum)\n\nPour créer une image :\nXimg create un dragon futuriste bleu',
+      'Utilisation :\nXimg Naruto\n\nPour créer une image :\nXimg create un dragon futuriste bleu',
       message
     );
 

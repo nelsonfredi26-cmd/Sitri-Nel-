@@ -720,6 +720,7 @@ function getMenu() {
 ╭─〔 𝟬𝟲 ⌬ 𝗡𝗘𝗧𝗪𝗢𝗥𝗞 〕
 │
 ├ ◈ 𝚇𝚝𝚊𝚐𝚊𝚕𝚕
+├ ◈ 𝚇𝚑𝚝𝚊𝚐
 ├ ◈ 𝚇𝚊𝚗𝚗𝚘𝚗𝚌𝚎
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
@@ -789,7 +790,7 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. INTELLIGENCE ARTIFICIELLE — GROQ UNIQUEMENT
+// 16. INTELLIGENCE ARTIFICIELLE — GROQ ROBUSTE
 // ------------------------------------------------------------
 
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
@@ -803,7 +804,7 @@ async function listGroqModels() {
     });
     return (res.data?.data || [])
       .map(m => m.id)
-      .filter(id => !/whisper|guard|tts|audio|distil/i.test(id));
+      .filter(id => !/whisper|guard|tts|audio|distil|prompt-guard/i.test(id));
   } catch {
     return [];
   }
@@ -840,13 +841,15 @@ async function askGroq(prompt, jid, options = {}) {
     { role: 'user', content: String(prompt).trim() }
   ];
 
+  const dynamicModels = await listGroqModels();
   const candidateModels = [
     ...new Set([
       CONFIG.groqModel,
       'llama-3.3-70b-versatile',
       'llama-3.1-8b-instant',
       'meta-llama/llama-4-scout-17b-16e-instruct',
-      'qwen/qwen3-32b'
+      'qwen/qwen3-32b',
+      ...dynamicModels
     ])
   ];
 
@@ -1126,7 +1129,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
   if (!isGroupJid(jid)) return false;
 
   const groupCommands = [
-    'onlyadmin', 'xonlyadmin', 'tag', 'tagall',
+    'onlyadmin', 'xonlyadmin', 'tag', 'tagall', 'htag', 'hidetag',
     'kick', 'add', 'annonce', 'clear'
   ];
 
@@ -1168,6 +1171,65 @@ async function handleGroupCommand(jid, message, sender, command, args) {
         : '🔓 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́\nLes membres peuvent de nouveau utiliser les commandes ordinaires.',
       message
     );
+    return true;
+  }
+
+  if (command === 'htag' || command === 'hidetag') {
+    const quoted = getQuotedMessage(message);
+    const note = String(args || '').trim();
+
+    if (!quoted?.stanzaId && !note) {
+      await sendReply(
+        jid,
+        '📌 Réponds à un message avec Xhtag, ou écris : Xhtag votre message',
+        message
+      );
+      return true;
+    }
+
+    const mentions = (metadata.participants || [])
+      .map(item => item.id || item.jid)
+      .filter(Boolean)
+      .filter(participant => !isBotParticipant(participant));
+
+    if (!mentions.length) {
+      await sendReply(jid, 'Aucun membre à mentionner.', message);
+      return true;
+    }
+
+    const cooldown = await acquireTagCooldown(jid);
+
+    if (!cooldown.allowed) {
+      await sendReply(
+        jid,
+        `⏳ 𝗔𝗡𝗧𝗜-𝗦𝗣𝗔𝗠 𝗔𝗖𝗧𝗜𝗙\nUne mention collective vient déjà d'être effectuée.\n\nNouvelle utilisation possible dans : ${formatDuration(cooldown.remaining)}.\n\nLe délai est partagé par tous les membres du groupe.`,
+        message
+      );
+      return true;
+    }
+
+    try {
+      await sock.sendMessage(
+        jid,
+        {
+          text: note
+            ? `📢 𝗔𝗣𝗣𝗘𝗟 𝗔̀ 𝗧𝗢𝗨𝗦
+
+${note}
+
+${SIGNATURE}`
+            : `📢 𝗔𝗣𝗣𝗘𝗟 𝗔̀ 𝗧𝗢𝗨𝗦
+
+${SIGNATURE}`,
+          mentions
+        },
+        { quoted: message }
+      );
+    } catch (error) {
+      logger.error({ err: error }, 'Échec du hidetag.');
+      await sendReply(jid, 'Le hidetag a échoué. Vérifie les permissions du groupe.', message);
+    }
+
     return true;
   }
 
@@ -1793,7 +1855,7 @@ async function answerQuiz(chatJid, userJid, answer) {
 }
 
 // ------------------------------------------------------------
-// 23. IMAGES : RECHERCHE ANILIST (SANS CLÉ API) ET GÉNÉRATION
+// 23. RECHERCHE D'IMAGES UNIVERSELLE (ANIMÉS, LOGOS, OBJETS, TOUT)
 // ------------------------------------------------------------
 
 async function downloadImageBuffer(url) {
@@ -1807,8 +1869,9 @@ async function downloadImageBuffer(url) {
     maxContentLength: CONFIG.maxImageBytes,
     maxBodyLength: CONFIG.maxImageBytes,
     headers: {
-      'User-Agent': 'Mozilla/5.0 SitriNel/Ultimate',
-      Accept: 'image/png,image/jpeg,image/webp,image/gif'
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      Accept: 'image/png,image/jpeg,image/webp,image/gif,*/*;q=0.8'
     },
     validateStatus: status => status === 200
   });
@@ -1829,8 +1892,6 @@ async function downloadImageBuffer(url) {
 }
 
 const MAX_IMAGES_PER_REQUEST = 5;
-
-// Nombre minimal de fans AniList pour considérer un résultat comme un vrai personnage.
 const MIN_CHARACTER_FAVOURITES = 5;
 
 function parseImageRequest(raw = '') {
@@ -1853,38 +1914,77 @@ function uniqueUrls(list) {
   return [...new Set(list.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url)))];
 }
 
-const ANILIST_CHARACTER_QUERY =
-  'query ($search: String, $perPage: Int) { Page(page: 1, perPage: $perPage) { characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) { name { full } image { large } favourites media(perPage: 3, sort: POPULARITY_DESC) { nodes { title { romaji english } } } } } }';
-
-async function queryAniListRaw(searchTerm, perPage = 10) {
-  const response = await axios.post(
-    'https://graphql.anilist.co',
-    {
-      query: ANILIST_CHARACTER_QUERY,
-      variables: { search: searchTerm, perPage }
-    },
-    {
-      timeout: 15000,
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
+const ANILIST_SEARCH_QUERY = `
+query ($search: String, $perPage: Int) {
+  Page(page: 1, perPage: $perPage) {
+    characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) {
+      name { full }
+      image { large }
+      favourites
+      media(perPage: 3, sort: POPULARITY_DESC) {
+        nodes { title { romaji english } }
       }
     }
-  );
-  return response.data?.data?.Page?.characters || [];
+    media(search: $search, type: ANIME, sort: [SEARCH_MATCH, POPULARITY_DESC]) {
+      title { romaji english }
+      coverImage { extraLarge large }
+      bannerImage
+      popularity
+    }
+  }
+}`;
+
+async function queryAniListAll(searchTerm, perPage = 8) {
+  try {
+    const response = await axios.post(
+      'https://graphql.anilist.co',
+      {
+        query: ANILIST_SEARCH_QUERY,
+        variables: { search: searchTerm, perPage }
+      },
+      {
+        timeout: 15000,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        }
+      }
+    );
+    return response.data?.data?.Page || { characters: [], media: [] };
+  } catch {
+    return { characters: [], media: [] };
+  }
 }
 
-// AniList : gère "sasuke", "rudo gachiakuta" ou "free beyblade"
-async function findAniListCharacterImages(query, wanted = 1) {
-  const clean = String(query).trim();
-  const words = clean.split(/\s+/);
+async function findAniListImages(query) {
+  const clean = String(query)
+    .replace(/^(photo|image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+)?/i, '')
+    .trim();
 
-  let characters = await queryAniListRaw(clean, 10);
+  if (!clean) return [];
+
+  const page = await queryAniListAll(clean, 8);
+  const results = [];
+
+  for (const m of page.media || []) {
+    if (Number(m.popularity || 0) < 500) continue;
+    const title = m.title?.english || m.title?.romaji || clean;
+    if (m.coverImage?.extraLarge || m.coverImage?.large) {
+      results.push({ label: title, url: m.coverImage.extraLarge || m.coverImage.large });
+    }
+    if (m.bannerImage) {
+      results.push({ label: `${title} (Bannière)`, url: m.bannerImage });
+    }
+  }
+
+  let characters = page.characters || [];
+  const words = clean.split(/\s+/);
 
   if (!characters.length && words.length > 1) {
     const firstWord = words[0];
     const animeHint = words.slice(1).join(' ').toLowerCase();
-    const fallbackChars = await queryAniListRaw(firstWord, 15);
+    const fallbackPage = await queryAniListAll(firstWord, 15);
+    const fallbackChars = fallbackPage.characters || [];
 
     const matchedWithAnime = fallbackChars.filter(item => {
       const titles = (item.media?.nodes || [])
@@ -1899,103 +1999,155 @@ async function findAniListCharacterImages(query, wanted = 1) {
     characters = matchedWithAnime.length ? matchedWithAnime : fallbackChars;
   }
 
-  return characters
-    .filter(item => Number(item.favourites || 0) >= MIN_CHARACTER_FAVOURITES)
-    .map(item => {
-      const charName = item.name?.full || clean;
-      const animeNode = item.media?.nodes?.[0]?.title;
-      const animeTitle = animeNode?.english || animeNode?.romaji || '';
-      const label = animeTitle ? `${charName} (${animeTitle})` : charName;
-      return { label, url: item.image?.large };
-    })
-    .filter(item => /^https?:\/\//i.test(String(item.url)));
-}
+  for (const item of characters) {
+    if (Number(item.favourites || 0) < MIN_CHARACTER_FAVOURITES) continue;
+    const charName = item.name?.full || clean;
+    const animeNode = item.media?.nodes?.[0]?.title;
+    const animeTitle = animeNode?.english || animeNode?.romaji || '';
+    const label = animeTitle ? `${charName} (${animeTitle})` : charName;
+    if (item.image?.large) {
+      results.push({ label, url: item.image.large });
+    }
+  }
 
-async function findPixabayImages(query, wanted) {
-  if (!CONFIG.pixabayKey) return null;
-
-  const response = await axios.get('https://pixabay.com/api/', {
-    params: {
-      key: CONFIG.pixabayKey,
-      q: query.slice(0, 100),
-      image_type: 'photo',
-      safe_search: 'true',
-      per_page: Math.max(wanted * 2, 3)
-    },
-    timeout: 15000
-  });
-
-  const urls = (response.data?.hits || []).map(
-    hit => hit.largeImageURL || hit.webformatURL
-  );
-
-  return uniqueUrls(urls).map(url => ({ label: query, url }));
+  return results.filter(item => /^https?:\/\//i.test(String(item.url)));
 }
 
 async function findSerpApiImages(query) {
-  if (!CONFIG.serpApiKey) return null;
+  if (!CONFIG.serpApiKey) return [];
+  try {
+    const response = await axios.get('https://serpapi.com/search.json', {
+      params: {
+        engine: 'google_images',
+        q: query,
+        api_key: CONFIG.serpApiKey,
+        safe: 'active',
+        ijn: '0'
+      },
+      timeout: 30000
+    });
 
-  const response = await axios.get('https://serpapi.com/search.json', {
-    params: {
-      engine: 'google_images',
-      q: query,
-      api_key: CONFIG.serpApiKey,
-      safe: 'active',
-      ijn: '0'
-    },
-    timeout: 30000
-  });
+    const urls = (response.data?.images_results || [])
+      .slice(0, 12)
+      .map(item => item.original || item.thumbnail);
 
-  const urls = (response.data?.images_results || [])
-    .slice(0, 10)
-    .map(item => item.original || item.thumbnail);
-
-  return uniqueUrls(urls).map(url => ({ label: query, url }));
+    return uniqueUrls(urls).map(url => ({ label: query, url }));
+  } catch {
+    return [];
+  }
 }
 
-async function collectImageCandidates(query, wanted, photoOnly = false) {
-  if (photoOnly) {
-    for (const [name, run] of [
-      ['Pixabay', () => findPixabayImages(query, wanted)],
-      ['SerpApi', () => findSerpApiImages(query)]
-    ]) {
-      try {
-        const result = await run();
-        if (result?.length) return result;
-      } catch (error) {
-        logger.warn({ err: error }, 'Fournisseur d images ' + name + ' indisponible.');
-      }
-    }
-    return null;
-  }
-
+async function findDuckDuckGoImages(query) {
   try {
-    const aniResult = await findAniListCharacterImages(query, wanted);
-    if (aniResult?.length) return aniResult;
-  } catch (error) {
-    logger.warn({ err: error }, 'AniList indisponible.');
-  }
+    const ua =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+    const tokenRes = await axios.get('https://duckduckgo.com/', {
+      params: { q: query, iax: 'images', ia: 'images' },
+      headers: { 'User-Agent': ua },
+      timeout: 15000
+    });
 
+    const html = String(tokenRes.data || '');
+    const vqdMatch =
+      html.match(/vqd=["']([^"']+)["']/) ||
+      html.match(/vqd=([0-9-]+)/);
+
+    if (!vqdMatch?.[1]) return [];
+
+    const imgRes = await axios.get('https://duckduckgo.com/i.js', {
+      params: {
+        l: 'fr-fr',
+        o: 'json',
+        q: query,
+        vqd: vqdMatch[1],
+        f: ',,,',
+        p: '1'
+      },
+      headers: {
+        'User-Agent': ua,
+        Referer: 'https://duckduckgo.com/'
+      },
+      timeout: 15000
+    });
+
+    const urls = (imgRes.data?.results || [])
+      .slice(0, 12)
+      .flatMap(item => [item.image, item.thumbnail]);
+
+    return uniqueUrls(urls).map(url => ({ label: query, url }));
+  } catch {
+    return [];
+  }
+}
+
+async function findPixabayImages(query, wanted) {
+  if (!CONFIG.pixabayKey) return [];
   try {
-    const serpResult = await findSerpApiImages(`${query} anime`);
-    if (serpResult?.length) return serpResult;
-  } catch (error) {
-    logger.warn({ err: error }, 'SerpApi indisponible.');
+    const response = await axios.get('https://pixabay.com/api/', {
+      params: {
+        key: CONFIG.pixabayKey,
+        q: query.slice(0, 100),
+        image_type: 'all',
+        safe_search: 'true',
+        per_page: Math.max(wanted * 2, 5)
+      },
+      timeout: 15000
+    });
+
+    const urls = (response.data?.hits || []).map(
+      hit => hit.largeImageURL || hit.webformatURL
+    );
+
+    return uniqueUrls(urls).map(url => ({ label: query, url }));
+  } catch {
+    return [];
+  }
+}
+
+async function collectImageCandidates(query, wanted) {
+  const results = [];
+  const isAnimeQuery = /\banime\b|\bmanga\b|\bpersonnage\b/i.test(query);
+
+  if (isAnimeQuery) {
+    const ani = await findAniListImages(query);
+    if (ani.length) results.push(...ani);
   }
 
-  return null;
+  const serp = await findSerpApiImages(query);
+  if (serp.length) results.push(...serp);
+
+  if (results.length < wanted * 2) {
+    const ddg = await findDuckDuckGoImages(query);
+    if (ddg.length) results.push(...ddg);
+  }
+
+  if (!isAnimeQuery && results.length < wanted * 2) {
+    const ani = await findAniListImages(query);
+    if (ani.length) results.push(...ani);
+  }
+
+  if (results.length < wanted * 2) {
+    const pix = await findPixabayImages(query, wanted);
+    if (pix.length) results.push(...pix);
+  }
+
+  const seen = new Set();
+  return results.filter(item => {
+    if (seen.has(item.url)) return false;
+    seen.add(item.url);
+    return true;
+  });
 }
 
 async function searchImage(jid, message, rawQuery) {
   const parsed = parseImageRequest(rawQuery);
-  const photoOnly = /^photos?\s+/i.test(parsed.query);
-  const query = parsed.query.replace(/^photos?\s+/i, '').trim();
+  const query = parsed.query.trim();
   const count = parsed.count;
 
   if (!query) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg-sasuke 3 (personnage, 5 max)\n• Ximg photo lion 2 (photos réelles)',
+      'Utilisation :\n• Ximg photo de anime Jujutsu Kaisen\n• Ximg logo Lamborghini 2\n• Ximg pièce de monnaie ancienne\n• Ximg-sasuke 3',
       message
     );
     return false;
@@ -2003,9 +2155,9 @@ async function searchImage(jid, message, rawQuery) {
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
-  const found = await collectImageCandidates(query, count, photoOnly);
+  const found = await collectImageCandidates(query, count);
 
-  if (!found) {
+  if (!found || !found.length) {
     await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
     return false;
   }
@@ -2017,7 +2169,7 @@ async function searchImage(jid, message, rawQuery) {
 
     try {
       const downloaded = await downloadImageBuffer(item.url);
-      const counter = count > 1 ? ' (' + (sent + 1) + '/' + count + ')' : '';
+      const counter = count > 1 ? ` (${sent + 1}/${count})` : '';
 
       await sock.sendMessage(
         jid,
@@ -2454,7 +2606,7 @@ const KNOWN_COMMANDS = new Set([
   'daily', 'coins', 'p', 'rank', 'profil',
   'quiz', 'reponse',
   'img', 'play', 'video',
-  'tag', 'tagall', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
+  'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'off', 'restart', 'upt', 'menu', 'models'
 ]);
 

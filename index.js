@@ -1109,26 +1109,39 @@ async function askGroq(prompt, chatJid, options = {}) {
   ];
 
   const dynamicModels = await listGroqModels();
-  // Modèles haute intelligence uniquement (on évite les petits modèles 8b qui inventent des réponses)
   const preferredOrder = [
     'llama-3.3-70b-versatile',
     'meta-llama/llama-4-maverick-17b-128e-instruct',
     'meta-llama/llama-4-scout-17b-16e-instruct',
-    'qwen/qwen3-32b'
+    'qwen/qwen3-32b',
+    'llama3-70b-8192',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it',
+    'llama-3.1-8b-instant'
   ];
+
+  // Si Groq a renvoyé sa liste officielle de modèles actifs, on filtre pour ne garder que ceux qui existent vraiment !
+  const validPreferred = dynamicModels.length
+    ? preferredOrder.filter(m => dynamicModels.includes(m))
+    : preferredOrder;
+
+  const validConfigModel =
+    CONFIG.groqModel && (!dynamicModels.length || dynamicModels.includes(CONFIG.groqModel))
+      ? CONFIG.groqModel
+      : '';
 
   const candidateModels = [
     ...new Set([
-      CONFIG.groqModel,
-      ...preferredOrder,
-      ...dynamicModels.filter(m => /70b|32b|versatile|scout|maverick/i.test(m))
+      validConfigModel,
+      ...validPreferred,
+      ...dynamicModels
     ])
   ].filter(Boolean);
 
   let response = null;
   let lastError = null;
 
-  for (const model of candidateModels.slice(0, 4)) {
+  for (const model of candidateModels.slice(0, 6)) {
     try {
       response = await axios.post(
         `${GROQ_BASE}/chat/completions`,
@@ -2247,8 +2260,7 @@ async function downloadImageBuffer(url) {
     maxContentLength: CONFIG.maxImageBytes,
     maxBodyLength: CONFIG.maxImageBytes,
     headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'User-Agent': 'SitriNelBot/1.0 (https://github.com/sitri-nel; contact@sitri-nel.bot)',
       Accept: 'image/png,image/jpeg,image/webp,image/gif,*/*;q=0.8'
     },
     validateStatus: status => status === 200
@@ -2303,36 +2315,31 @@ async function collectPhotos(terme, nombre = 1) {
   const cleanTerme = String(terme).trim();
   const results = [];
 
-  // 1. Essayer Wikipédia (FR et EN) pour récupérer l'image principale de la page (très fiable pour les personnalités, sportifs comme Messi, etc.)
+  // 1. Wikipédia PageImages API (retourne une miniature JPEG directe à 800px jamais bloquée ni trop lourde)
   for (const lang of ['fr', 'en']) {
-    if (results.length >= nombre) break;
+    if (results.length >= nombre + 2) break;
     try {
-      const searchRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+      const pageImgRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
         params: {
           action: 'query',
-          list: 'search',
-          srsearch: cleanTerme,
-          srlimit: 2,
+          generator: 'search',
+          gsrsearch: cleanTerme,
+          gsrlimit: 4,
+          prop: 'pageimages',
+          piprop: 'thumbnail',
+          pithumbsize: 800,
           format: 'json'
         },
-        headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 4000
+        headers: { 'User-Agent': 'SitriNelBot/1.0 (https://github.com/sitri-nel; contact@sitri-nel.bot)' },
+        timeout: 5000
       });
-      const hits = searchRes.data?.query?.search || [];
-      for (const hit of hits.slice(0, 2)) {
-        if (results.length >= nombre) break;
-        const summaryRes = await axios.get(
-          `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          {
-            headers: { 'User-Agent': 'SitriNelBot/1.0' },
-            timeout: 4000
-          }
-        );
-        const imageUrl = summaryRes.data?.originalimage?.source || summaryRes.data?.thumbnail?.source;
+      const pages = Object.values(pageImgRes.data?.query?.pages || {});
+      for (const page of pages) {
+        const imageUrl = page?.thumbnail?.source;
         if (imageUrl && !results.some(r => r.url === imageUrl)) {
           results.push({
             url: imageUrl,
-            label: hit.title || cleanTerme,
+            label: page.title || cleanTerme,
             verse: `Wikipédia (${lang.toUpperCase()})`
           });
         }

@@ -159,9 +159,9 @@ PERSONNALITÉ, HUMEURS & TON FAMILIER (TRÈS IMPORTANT) :
 - Si quelqu'un s'ennuie ou te lance une discussion libre, réagis avec spontanéité (propose une énigme, une anecdote stylée sur un animé ou la science, ou lance un petit défi).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux).
 
-EXACTITUDE FACTUELLE ABSOLUE :
-- Ne devine JAMAIS et n'invente JAMAIS rien. Si tu n'es pas sûr à 100 % d'un fait (attaque d'animé, date, formule, personnage), vérifie tes connaissances réelles ou dis-le franchement.
-- Exemple d'erreur interdite : Piccolo est un Namek (pas un Saiyan) et son attaque signature est le Makankōsappō (Special Beam Cannon), suivie du Masenko, du Hellzone Grenade et du Light Grenade (jamais le Kamehameha ni "Sliding Attack").${verifiedContext}
+CULTURE & CONNAISSANCE ANIMÉ / MANGA :
+- Tu possèdes une culture immense et détaillée sur tous les animés, mangas, light novels et jeux (Shonen, Isekai, Seinen, etc.).
+- Si on te pose une question sur un personnage, une faction, un arc narratif ou une technique (même de niche comme le Culte Astral dans Jujutsu Kaisen, One Piece, Naruto, Dragon Ball, etc.), puise directement dans tes connaissances approfondies pour répondre avec précision et style, sans jamais botter en touche ou dire que tu ne sais pas.${verifiedContext}
 
 MÉMOIRE & INTERLOCUTEUR :
 - Interlocuteur : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur)' : ''}.${facts}
@@ -850,97 +850,32 @@ const GROQ_BASE = 'https://api.groq.com/openai/v1';
 
 async function fetchVerifiedFacts(query = '') {
   const clean = String(query).trim();
-  if (!clean || clean.length < 3) return '';
+  if (!clean || clean.length < 2) return '';
 
-  const snippets = [];
-
-  // 1. Recherche AniList en priorité absolue pour tout ce qui touche aux animés, mangas, personnages et capacités
   try {
     const aniRes = await axios.post(
       'https://graphql.anilist.co',
       {
         query: `query ($search: String) {
-          Character(search: $search) {
-            name { full native }
-            description(asHtml: false)
-            media(perPage: 3, sort: POPULARITY_DESC) {
-              nodes { title { romaji english } }
-            }
-          }
-          Media(search: $search, type: ANIME) {
-            title { romaji english }
-            description(asHtml: false)
-            characters(perPage: 5, sort: [ROLE, FAVOURITES_DESC]) {
-              nodes { name { full } }
-            }
+          Page(perPage: 2) {
+            media(search: $search) { title { romaji english } description(asHtml: false) }
+            characters(search: $search) { name { full } description(asHtml: false) }
           }
         }`,
         variables: { search: clean }
       },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 6000
-      }
+      { headers: { 'Content-Type': 'application/json' }, timeout: 3000 }
     );
 
-    const char = aniRes.data?.data?.Character;
-    if (char?.name?.full && char?.description) {
-      const animeTitle =
-        char.media?.nodes?.[0]?.title?.english ||
-        char.media?.nodes?.[0]?.title?.romaji ||
-        '';
-      snippets.push(
-        `[AniList Character - ${char.name.full}${animeTitle ? ` (${animeTitle})` : ''}] : ${String(char.description).replace(/~!|!~/g, '').replace(/\s+/g, ' ').trim().slice(0, 800)}`
-      );
-    }
-
-    const media = aniRes.data?.data?.Media;
-    if (media?.title) {
-      const title = media.title.english || media.title.romaji || '';
-      snippets.push(
-        `[AniList Anime - ${title}] : ${String(media.description || '').replace(/~!|!~/g, '').replace(/\s+/g, ' ').trim().slice(0, 800)}`
-      );
+    const page = aniRes.data?.data?.Page;
+    if (page?.media?.[0]?.description) {
+      return `[Contexte AniList] : ${page.media[0].description.replace(/~!|!~/g, '').slice(0, 500)}`;
     }
   } catch {
-    // Ignorer
+    // Si AniList ne répond pas ou ne trouve rien, on laisse l'IA répondre avec sa propre culture native !
   }
 
-  // 2. Recherche Wikipédia (FR puis EN) pour compléter
-  for (const lang of ['fr', 'en']) {
-    if (snippets.length >= 3) break;
-    try {
-      const searchRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: {
-          action: 'query',
-          list: 'search',
-          srsearch: clean,
-          srlimit: 2,
-          format: 'json'
-        },
-        headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 6000
-      });
-
-      const hits = searchRes.data?.query?.search || [];
-      for (const hit of hits.slice(0, 1)) {
-        const summaryRes = await axios.get(
-          `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          {
-            headers: { 'User-Agent': 'SitriNelBot/1.0' },
-            timeout: 6000
-          }
-        );
-        const extract = String(summaryRes.data?.extract || '').trim();
-        if (extract) {
-          snippets.push(`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`);
-        }
-      }
-    } catch {
-      // Ignorer
-    }
-  }
-
-  return snippets.join('\n');
+  return '';
 }
 
 async function getUserMemory(userJid) {
@@ -2226,7 +2161,7 @@ La réponse du joueur est-elle factuellement juste et équivalente (même avec u
 }
 
 // ------------------------------------------------------------
-// 23. RECHERCHE D'IMAGES INTELLIGENTE (ANIMÉS, PERSONNAGES, WEB)
+// 23. RECHERCHE D'IMAGES INTELLIGENTE (ANILIST EXCLUSIF & PIXABAY PHOTOS)
 // ------------------------------------------------------------
 
 async function downloadImageBuffer(url) {
@@ -2280,363 +2215,90 @@ function parseImageRequest(raw = '') {
   return { query: match[1].trim(), count };
 }
 
-function uniqueUrls(list) {
-  return [...new Set(list.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url)))];
+const norm = (s) =>
+  (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+async function anilist(query, variables) {
+  const res = await fetch("https://graphql.anilist.co", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
+  return (await res.json())?.data;
 }
 
-const ANILIST_DIRECT_QUERY = `
-query ($search: String, $perPage: Int) {
-  Character(search: $search) {
-    name { full }
-    image { large }
-    media(perPage: 1, sort: POPULARITY_DESC) {
-      nodes { title { english romaji } }
-    }
-  }
-  Page(page: 1, perPage: $perPage) {
-    characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) {
-      name { full }
-      image { large }
-      media(perPage: 1, sort: POPULARITY_DESC) {
-        nodes { title { english romaji } }
-      }
-    }
-    media(search: $search, type: ANIME, sort: [SEARCH_MATCH, POPULARITY_DESC]) {
-      title { english romaji }
-      coverImage { extraLarge large }
-      bannerImage
-    }
-  }
-}`;
-
-function normalizeSearchStr(str = '') {
-  return String(str)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
+async function collectImageCandidates(terme, nombre = 1) {
+  const cleanTerme = String(terme)
+    .replace(/^(image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
     .trim();
-}
 
-function levenshtein(a, b) {
-  if (!a.length) return b.length;
-  if (!b.length) return a.length;
-  const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i]);
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      matrix[i][j] =
-        b[i - 1] === a[j - 1]
-          ? matrix[i - 1][j - 1]
-          : Math.min(
-              matrix[i - 1][j - 1] + 1,
-              matrix[i][j - 1] + 1,
-              matrix[i - 1][j] + 1
-            );
-    }
-  }
-  return matrix[b.length][a.length];
-}
+  const mots = norm(cleanTerme).split(/\s+/).filter(Boolean);
+  const contientTout = (t) => mots.every((m) => norm(t).includes(m));
 
-function isFuzzyMatch(query, target) {
-  const q = normalizeSearchStr(query);
-  const t = normalizeSearchStr(target);
-  if (!q || !t) return false;
-  if (t.includes(q) || q.includes(t)) return true;
-
-  const qWords = q.split(' ').filter(w => w.length >= 3);
-  const tWords = t.split(' ').filter(w => w.length >= 3);
-  if (!qWords.length || !tWords.length) return false;
-
-  return qWords.every(qw =>
-    tWords.some(tw => {
-      if (tw.includes(qw) || qw.includes(tw)) return true;
-      const maxDist = qw.length >= 6 ? 2 : 1;
-      return levenshtein(qw, tw) <= maxDist;
-    })
-  );
-}
-
-async function queryAniListAll(searchTerm, perPage = 8) {
+  // 1. Recherche Personnages via AniList GraphQL
   try {
-    const response = await axios.post(
-      'https://graphql.anilist.co',
-      {
-        query: ANILIST_DIRECT_QUERY,
-        variables: { search: searchTerm, perPage }
-      },
-      {
-        timeout: 15000,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json'
-        }
-      }
+    const d = await anilist(
+      `query ($s: String, $n: Int) { Page(perPage: $n) { characters(search: $s) {
+        name { full alternative } image { large }
+        media(perPage: 1) { nodes { title { romaji } } } } } }`,
+      { s: cleanTerme, n: Math.max(nombre * 2, 5) }
     );
-    return {
-      character: response.data?.data?.Character || null,
-      page: response.data?.data?.Page || { characters: [], media: [] }
-    };
-  } catch {
-    return { character: null, page: { characters: [], media: [] } };
-  }
-}
-
-async function findAniListImages(query) {
-  const clean = String(query)
-    .replace(/^(photo|image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
-    .trim();
-
-  if (!clean) return [];
-
-  const { character: directChar, page } = await queryAniListAll(clean, 8);
-  const results = [];
-  const seenUrls = new Set();
-
-  const pushUnique = item => {
-    if (!item?.url || !/^https?:\/\//i.test(String(item.url))) return;
-    if (seenUrls.has(item.url)) return;
-    seenUrls.add(item.url);
-    results.push(item);
-  };
-
-  // 1. Résultat direct AniList (gère très bien les fautes de frappe comme "rudo surebec" -> "Rudo Surebrec")
-  if (directChar?.image?.large && directChar?.name?.full) {
-    const animeNode = directChar.media?.nodes?.[0]?.title;
-    const verse = animeNode?.english || animeNode?.romaji || '';
-    const isRelevant =
-      isFuzzyMatch(clean, directChar.name.full) ||
-      (verse && isFuzzyMatch(clean, `${directChar.name.full} ${verse}`));
-
-    if (isRelevant) {
-      pushUnique({
-        label: directChar.name.full,
-        verse,
-        url: directChar.image.large,
-        isAniList: true
-      });
-    }
-  }
-
-  // 2. Liste des personnages correspondants
-  let characters = page.characters || [];
-  const words = clean.split(/\s+/);
-
-  if (!characters.length && words.length > 1) {
-    const firstWord = words[0];
-    const animeHint = words.slice(1).join(' ');
-    const fallback = await queryAniListAll(firstWord, 12);
-    const fallbackChars = fallback.page?.characters || [];
-
-    const matchedWithAnime = fallbackChars.filter(item => {
-      const titles = (item.media?.nodes || [])
-        .flatMap(n => [n?.title?.english, n?.title?.romaji])
-        .filter(Boolean);
-      return titles.some(t => isFuzzyMatch(animeHint, t));
+    const persos = (d?.Page?.characters || []).filter((p) => {
+      const allNames = [p.name?.full, ...(p.name?.alternative || [])].filter(Boolean).join(" ");
+      return contientTout(allNames);
     });
 
-    characters = matchedWithAnime.length ? matchedWithAnime : fallbackChars;
+    if (persos.length) {
+      return persos.slice(0, nombre).map((p) => ({
+        url: p.image?.large,
+        label: p.name?.full || cleanTerme,
+        verse: p.media?.nodes?.[0]?.title?.romaji || ""
+      })).filter(item => item.url);
+    }
+  } catch (e) {
+    logger.warn({ error: e?.message }, "AniList perso error");
   }
 
-  for (const item of characters) {
-    const charName = item.name?.full || '';
-    const animeNode = item.media?.nodes?.[0]?.title;
-    const verse = animeNode?.english || animeNode?.romaji || '';
-    if (!charName || !item.image?.large) continue;
-
-    if (isFuzzyMatch(clean, charName) || (verse && isFuzzyMatch(clean, `${charName} ${verse}`))) {
-      pushUnique({
-        label: charName,
-        verse,
-        url: item.image.large,
-        isAniList: true
-      });
-    }
-  }
-
-  // 3. Animes correspondants (si la recherche porte sur un titre d'animé plutôt qu'un personnage)
-  for (const m of page.media || []) {
-    const title = m.title?.english || m.title?.romaji || '';
-    if (!title || !isFuzzyMatch(clean, title)) continue;
-
-    if (m.coverImage?.extraLarge || m.coverImage?.large) {
-      pushUnique({
-        label: title,
-        verse: title,
-        url: m.coverImage.extraLarge || m.coverImage.large,
-        isAniList: true
-      });
-    }
-    if (m.bannerImage) {
-      pushUnique({
-        label: `${title} (Bannière)`,
-        verse: title,
-        url: m.bannerImage,
-        isAniList: true
-      });
-    }
-  }
-
-  return results;
-}
-
-async function findSerpApiImages(query) {
-  if (!CONFIG.serpApiKey) return [];
+  // 2. Recherche Animés / Mangas via AniList GraphQL
   try {
-    const response = await axios.get('https://serpapi.com/search.json', {
-      params: {
-        engine: 'google_images',
-        q: query,
-        api_key: CONFIG.serpApiKey,
-        safe: 'active',
-        ijn: '0'
-      },
-      timeout: 30000
+    const d = await anilist(
+      `query ($s: String, $n: Int) { Page(perPage: $n) { media(search: $s, type: ANIME) {
+        title { romaji english } coverImage { extraLarge large } } } }`,
+      { s: cleanTerme, n: Math.max(nombre, 3) }
+    );
+    const medias = (d?.Page?.media || []).filter((m) => {
+      const titles = [m.title?.romaji, m.title?.english].filter(Boolean).join(" ");
+      return contientTout(titles);
     });
 
-    const urls = (response.data?.images_results || [])
-      .slice(0, 12)
-      .map(item => item.original || item.thumbnail);
-
-    return uniqueUrls(urls).map(url => ({ label: query, url }));
-  } catch {
-    return [];
+    if (medias.length) {
+      return medias.slice(0, nombre).map((m) => ({
+        url: m.coverImage?.extraLarge || m.coverImage?.large,
+        label: m.title?.romaji || cleanTerme,
+        verse: m.title?.english || ""
+      })).filter(item => item.url);
+    }
+  } catch (e) {
+    logger.warn({ error: e?.message }, "AniList media error");
   }
+
+  return [];
 }
 
-async function findDuckDuckGoImages(query) {
-  try {
-    const ua =
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-    const tokenRes = await axios.get('https://duckduckgo.com/', {
-      params: { q: query, iax: 'images', ia: 'images' },
-      headers: { 'User-Agent': ua },
-      timeout: 15000
-    });
-
-    const html = String(tokenRes.data || '');
-    const vqdMatch =
-      html.match(/vqd=["']([^"']+)["']/) ||
-      html.match(/vqd=([0-9-]+)/);
-
-    if (!vqdMatch?.[1]) return [];
-
-    const imgRes = await axios.get('https://duckduckgo.com/i.js', {
-      params: {
-        l: 'fr-fr',
-        o: 'json',
-        q: query,
-        vqd: vqdMatch[1],
-        f: ',,,',
-        p: '1'
-      },
-      headers: {
-        'User-Agent': ua,
-        Referer: 'https://duckduckgo.com/'
-      },
-      timeout: 15000
-    });
-
-    const urls = (imgRes.data?.results || [])
-      .slice(0, 12)
-      .flatMap(item => [item.image, item.thumbnail]);
-
-    return uniqueUrls(urls).map(url => ({ label: query, url }));
-  } catch {
-    return [];
-  }
-}
-
-async function findWikimediaImages(query) {
-  try {
-    const response = await axios.get('https://commons.wikimedia.org/w/api.php', {
-      params: {
-        action: 'query',
-        generator: 'search',
-        gsrsearch: `filetype:bitmap ${query}`,
-        gsrnamespace: 6,
-        gsrlimit: 8,
-        prop: 'imageinfo',
-        iiprop: 'url',
-        iiurlwidth: 1024,
-        format: 'json'
-      },
-      headers: { 'User-Agent': 'SitriNelBot/1.0' },
-      timeout: 15000
-    });
-
-    const pages = Object.values(response.data?.query?.pages || {});
-    const urls = pages
-      .map(p => p.imageinfo?.[0]?.thumburl || p.imageinfo?.[0]?.url)
-      .filter(Boolean);
-
-    return uniqueUrls(urls).map(url => ({ label: query, url }));
-  } catch {
-    return [];
-  }
-}
-
-async function findPixabayImages(query, wanted) {
+async function collectPhotos(terme, nombre = 1) {
   if (!CONFIG.pixabayKey) return [];
   try {
-    const response = await axios.get('https://pixabay.com/api/', {
-      params: {
-        key: CONFIG.pixabayKey,
-        q: query.slice(0, 100),
-        image_type: 'all',
-        safe_search: 'true',
-        per_page: Math.max(wanted * 2, 5)
-      },
-      timeout: 15000
-    });
-
-    const urls = (response.data?.hits || []).map(
-      hit => hit.largeImageURL || hit.webformatURL
-    );
-
-    return uniqueUrls(urls).map(url => ({ label: query, url }));
-  } catch {
-    return [];
+    const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(terme)}&image_type=photo&safesearch=true&per_page=${Math.max(nombre, 3)}`;
+    const json = await (await fetch(url)).json();
+    return (json.hits || []).slice(0, nombre).map((h) => ({
+      url: h.largeImageURL,
+      label: terme,
+      verse: ""
+    })).filter(item => item.url);
+  } catch (e) {
+    logger.warn({ error: e?.message }, "Pixabay error");
   }
-}
-
-async function collectImageCandidates(query, wanted) {
-  const clean = String(query).trim();
-  const isExplicitPhoto = /^photo/i.test(clean);
-
-  // Si la recherche commence par "photo", on saute AniList et on va directement sur le web/photos réelles
-  if (!isExplicitPhoto) {
-    const ani = await findAniListImages(clean);
-    if (ani.length) return ani;
-  }
-
-  const results = [];
-
-  const serp = await findSerpApiImages(query);
-  if (serp.length) results.push(...serp);
-
-  if (results.length < wanted * 2) {
-    const ddg = await findDuckDuckGoImages(query);
-    if (ddg.length) results.push(...ddg);
-  }
-
-  if (results.length < wanted * 2) {
-    const wiki = await findWikimediaImages(query);
-    if (wiki.length) results.push(...wiki);
-  }
-
-  if (results.length < wanted * 2) {
-    const pix = await findPixabayImages(query, wanted);
-    if (pix.length) results.push(...pix);
-  }
-
-  const seen = new Set();
-  return results.filter(item => {
-    if (seen.has(item.url)) return false;
-    seen.add(item.url);
-    return true;
-  });
+  return [];
 }
 
 async function searchImage(jid, message, rawQuery) {
@@ -2647,7 +2309,7 @@ async function searchImage(jid, message, rawQuery) {
   if (!query) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg Naruto\n• Ximg Rudo Surebrec\n• Ximg logo Lamborghini 2',
+      'Utilisation :\n• Ximg Naruto\n• Ximg Lelouch\n• Ximg photo lion 2',
       message
     );
     return false;
@@ -2655,10 +2317,21 @@ async function searchImage(jid, message, rawQuery) {
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
-  const found = await collectImageCandidates(query, count);
+  const isExplicitPhoto = /^photo\b/i.test(query);
+  const cleanPhotoQuery = query.replace(/^photo\s+/i, '').trim();
+
+  const found = isExplicitPhoto
+    ? await collectPhotos(cleanPhotoQuery || query, count)
+    : await collectImageCandidates(query, count);
 
   if (!found || !found.length) {
-    await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
+    await sendReply(
+      jid,
+      isExplicitPhoto
+        ? 'Aucune photo trouvée sur Pixabay pour cette recherche.'
+        : 'Aucun personnage ou animé trouvé sur AniList pour cette recherche.',
+      message
+    );
     return false;
   }
 
@@ -2670,7 +2343,7 @@ async function searchImage(jid, message, rawQuery) {
     try {
       const downloaded = await downloadImageBuffer(item.url);
       const counter = count > 1 ? ` (${sent + 1}/${count})` : '';
-      const verseLine = item.verse ? `\n🌌 𝗩𝗘𝗥𝗦𝗘 : ${item.verse}` : '';
+      const verseLine = item.verse && item.verse !== item.label ? `\n🌌 𝗩𝗘𝗥𝗦𝗘 : ${item.verse}` : '';
 
       await sock.sendMessage(
         jid,

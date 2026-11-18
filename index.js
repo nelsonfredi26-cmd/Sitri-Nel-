@@ -159,9 +159,10 @@ PERSONNALITÉ, HUMEURS & TON FAMILIER (TRÈS IMPORTANT) :
 - Si quelqu'un s'ennuie ou te lance une discussion libre, réagis avec spontanéité (propose une énigme, une anecdote stylée sur un animé ou la science, ou lance un petit défi).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux).
 
-CULTURE & CONNAISSANCE ANIMÉ / MANGA :
-- Tu possèdes une culture immense et détaillée sur tous les animés, mangas, light novels et jeux (Shonen, Isekai, Seinen, etc.).
-- Si on te pose une question sur un personnage, une faction, un arc narratif ou une technique (même de niche comme le Culte Astral dans Jujutsu Kaisen, One Piece, Naruto, Dragon Ball, etc.), puise directement dans tes connaissances approfondies pour répondre avec précision et style, sans jamais botter en touche ou dire que tu ne sais pas.${verifiedContext}
+CULTURE & EXACTITUDE ANIMÉ / MANGA (DUCKDUCKGO + WIKIS FANDOM + WIKIPÉDIA) :
+- Tu possèdes une grande culture sur les animés, mangas, light novels et jeux (Shonen, Isekai, Seinen, etc.).
+- Ne confonds JAMAIS les techniques ou personnages (ex: Piccolo utilise le Makankōsappō / Special Beam Cannon, jamais le Kamehameha).
+- Appuie-toi en priorité sur les extraits DuckDuckGo, Wikipédia et Wikis Fandom fournis ci-dessous pour donner des réponses exactes, précises et complètes sur n'importe quel animé (factions, personnages, techniques, arcs narratifs), sans jamais dire que tu ne trouves pas de source.${verifiedContext}
 
 MÉMOIRE & INTERLOCUTEUR :
 - Interlocuteur : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur)' : ''}.${facts}
@@ -852,30 +853,120 @@ async function fetchVerifiedFacts(query = '') {
   const clean = String(query).trim();
   if (!clean || clean.length < 2) return '';
 
-  try {
-    const aniRes = await axios.post(
-      'https://graphql.anilist.co',
-      {
-        query: `query ($search: String) {
-          Page(perPage: 2) {
-            media(search: $search) { title { romaji english } description(asHtml: false) }
-            characters(search: $search) { name { full } description(asHtml: false) }
-          }
-        }`,
-        variables: { search: clean }
-      },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 3000 }
-    );
+  const snippets = [];
 
-    const page = aniRes.data?.data?.Page;
-    if (page?.media?.[0]?.description) {
-      return `[Contexte AniList] : ${page.media[0].description.replace(/~!|!~/g, '').slice(0, 500)}`;
+  // 1. DuckDuckGo Instant Answer API (gratuit, sans clé, sans blocage CAPTCHA)
+  try {
+    const ddgRes = await axios.get('https://api.duckduckgo.com/', {
+      params: {
+        q: clean,
+        format: 'json',
+        no_html: 1,
+        skip_disambig: 1
+      },
+      headers: { 'User-Agent': 'SitriNelBot/1.0' },
+      timeout: 4500
+    });
+
+    const abstract = String(ddgRes.data?.AbstractText || '').trim();
+    if (abstract) {
+      snippets.push(`[DuckDuckGo - ${ddgRes.data?.Heading || clean}] : ${abstract.slice(0, 700)}`);
+    }
+
+    const related = (ddgRes.data?.RelatedTopics || [])
+      .map(t => t?.Text || t?.Topics?.[0]?.Text)
+      .filter(Boolean)
+      .slice(0, 2);
+
+    for (const rel of related) {
+      snippets.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 350)}`);
     }
   } catch {
-    // Si AniList ne répond pas ou ne trouve rien, on laisse l'IA répondre avec sa propre culture native !
+    // Continuer vers les autres sources
   }
 
-  return '';
+  // 2. Détection d'univers animé pour interroger directement le Wiki Fandom officiel
+  const fandomMap = [
+    { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku/i, domain: 'jujutsu-kaisen.fandom.com' },
+    { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo/i, domain: 'dragonball.fandom.com' },
+    { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi/i, domain: 'naruto.fandom.com' },
+    { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko|fruit du demon/i, domain: 'onepiece.fandom.com' },
+    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada/i, domain: 'bleach.fandom.com' },
+    { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzans|pilier|hashira/i, domain: 'kimetsu-no-yaiba.fandom.com' },
+    { regex: /hunter\s*x\s*hunter|hxh|gon|killua|kirua|kurapika|hisoka|nen/i, domain: 'hunterxhunter.fandom.com' },
+    { regex: /attack\s*on\s*titan|snk|shingeki|eren|levi|livai|mikasa|titan/i, domain: 'attackontitan.fandom.com' },
+    { regex: /my\s*hero\s*academia|mha|boku\s*no\s*hero|deku|midoriya|bakugo|all\s*might/i, domain: 'myheroacademia.fandom.com' },
+    { regex: /black\s*clover|asta|yuno|grimoire|empereur\s*mage/i, domain: 'blackclover.fandom.com' },
+    { regex: /fairy\s*tail|natsu|erza|lucy|zeref|acnologia/i, domain: 'fairytail.fandom.com' },
+    { regex: /tokyo\s*revengers|mikey|takemichi|draken|toman/i, domain: 'tokyorevengers.fandom.com' },
+    { regex: /chainsaw\s*man|denji|makima|power|aki|pochita/i, domain: 'chainsaw-man.fandom.com' },
+    { regex: /solo\s*leveling|sung\s*jin[- ]?woo|monarque/i, domain: 'solo-leveling.fandom.com' }
+  ];
+
+  const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain);
+
+  for (const domain of matchedFandoms.slice(0, 2)) {
+    try {
+      const fandomRes = await axios.get(`https://${domain}/api.php`, {
+        params: {
+          action: 'query',
+          list: 'search',
+          srsearch: clean,
+          srlimit: 2,
+          format: 'json'
+        },
+        headers: { 'User-Agent': 'SitriNelBot/1.0' },
+        timeout: 4500
+      });
+
+      const hits = fandomRes.data?.query?.search || [];
+      for (const hit of hits) {
+        const cleanSnippet = String(hit.snippet || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
+        if (cleanSnippet) {
+          snippets.push(`[Wiki Fandom (${domain}) - ${hit.title}] : ${cleanSnippet}`);
+        }
+      }
+    } catch {
+      // Continuer
+    }
+  }
+
+  // 3. Recherche Wikipédia FR et EN (couvre tous les sujets généraux + animés)
+  for (const lang of ['fr', 'en']) {
+    if (snippets.length >= 4) break;
+    try {
+      const wikiRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+        params: {
+          action: 'query',
+          list: 'search',
+          srsearch: clean,
+          srlimit: 2,
+          format: 'json'
+        },
+        headers: { 'User-Agent': 'SitriNelBot/1.0' },
+        timeout: 4000
+      });
+
+      const hits = wikiRes.data?.query?.search || [];
+      for (const hit of hits.slice(0, 1)) {
+        const summaryRes = await axios.get(
+          `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
+          {
+            headers: { 'User-Agent': 'SitriNelBot/1.0' },
+            timeout: 4000
+          }
+        );
+        const extract = String(summaryRes.data?.extract || '').trim();
+        if (extract) {
+          snippets.push(`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 750)}`);
+        }
+      }
+    } catch {
+      // Ignorer
+    }
+  }
+
+  return snippets.join('\n');
 }
 
 async function getUserMemory(userJid) {

@@ -87,8 +87,6 @@ const CONFIG = {
   ownerNumbers: readOwnerNumbers(),
   groqKey: cleanEnv(process.env.GROQ_API_KEY),
   groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
-  geminiKey: cleanEnv(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
-  geminiModel: cleanEnv(process.env.GEMINI_MODEL) || 'gemini-2.5-flash',
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
@@ -791,11 +789,25 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. INTELLIGENCE ARTIFICIELLE — GROQ (LLAMA 3) + GEMINI SECOURS
+// 16. INTELLIGENCE ARTIFICIELLE — GROQ UNIQUEMENT
 // ------------------------------------------------------------
 
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
+async function listGroqModels() {
+  if (!CONFIG.groqKey) return [];
+  try {
+    const res = await axios.get(`${GROQ_BASE}/models`, {
+      headers: { Authorization: `Bearer ${CONFIG.groqKey}` },
+      timeout: 15000
+    });
+    return (res.data?.data || [])
+      .map(m => m.id)
+      .filter(id => !/whisper|guard|tts|audio|distil/i.test(id));
+  } catch {
+    return [];
+  }
+}
 
 async function askGroq(prompt, jid, options = {}) {
   if (!CONFIG.groqKey) {
@@ -828,15 +840,13 @@ async function askGroq(prompt, jid, options = {}) {
     { role: 'user', content: String(prompt).trim() }
   ];
 
-  // Modèles Groq accessibles sur le niveau gratuit (du plus complet au plus rapide)
   const candidateModels = [
     ...new Set([
       CONFIG.groqModel,
       'llama-3.3-70b-versatile',
       'llama-3.1-8b-instant',
-      'llama3-70b-8192',
-      'llama3-8b-8192',
-      'gemma2-9b-it'
+      'meta-llama/llama-4-scout-17b-16e-instruct',
+      'qwen/qwen3-32b'
     ])
   ];
 
@@ -866,13 +876,11 @@ async function askGroq(prompt, jid, options = {}) {
     } catch (error) {
       lastError = error;
       const status = error?.response?.status;
+      const apiMsg = error?.response?.data?.error?.message || error?.message;
 
       if (status === 401) throw error;
 
-      logger.warn(
-        { model, status, error: error?.response?.data?.error?.message || error?.message },
-        'Modèle Groq indisponible, essai du suivant.'
-      );
+      logger.warn({ model, status, error: apiMsg }, 'Modèle Groq indisponible, essai du suivant.');
     }
   }
 
@@ -917,190 +925,13 @@ async function askGroq(prompt, jid, options = {}) {
   return cleanAnswer;
 }
 
-async function listGeminiModels() {
-  try {
-    const result = await axios.get(`${GEMINI_BASE}/models`, {
-      headers: { 'x-goog-api-key': CONFIG.geminiKey },
-      params: { pageSize: 100 },
-      timeout: 20000
-    });
-
-    return (result.data?.models || [])
-      .filter(item => (item.supportedGenerationMethods || []).includes('generateContent'))
-      .map(item => String(item.name || '').replace(/^models\//, ''))
-      .filter(
-        id => /^gemini/i.test(id) && !/embed|tts|image|live|audio|vision|robotics|computer/i.test(id)
-      );
-  } catch (error) {
-    logger.warn(
-      { status: error?.response?.status, error: error?.message },
-      'Liste des modèles Gemini indisponible.'
-    );
-    return [];
-  }
-}
-
-async function askGemini(prompt, jid, options = {}) {
-  if (!CONFIG.geminiKey) {
-    throw new Error('GEMINI_API_KEY absent des variables Railway.');
-  }
-
-  if (!prompt || !String(prompt).trim()) {
-    throw new Error('La question est vide.');
-  }
-
-  const useHistory = options.useHistory === true;
-  let history = [];
-
-  if (useHistory) {
-    const result = await db.execute({
-      sql: `SELECT role, content FROM chat_history
-            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
-      args: [jid, CONFIG.maxChatHistory]
-    });
-
-    history = result.rows.reverse().map(item => ({
-      role: item.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: String(item.content) }]
-    }));
-  }
-
-  const contents = [
-    ...history,
-    { role: 'user', parts: [{ text: String(prompt).trim() }] }
-  ];
-
-  const tried = new Set();
-
-  const callModel = async model => {
-    tried.add(model);
-    const generationConfig = { temperature: 0.8, maxOutputTokens: 2048 };
-    if (/2\.5-flash/i.test(model)) {
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
-
-    return axios.post(
-      `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        systemInstruction: { parts: [{ text: BOT_IDENTITY }] },
-        contents,
-        generationConfig
-      },
-      {
-        headers: {
-          'x-goog-api-key': CONFIG.geminiKey,
-          'Content-Type': 'application/json'
-        },
-        timeout: 60000
-      }
-    );
-  };
-
-  const isKeyError = error =>
-    /api key/i.test(String(error?.response?.data?.error?.message || ''));
-
-  let response = null;
-  let lastError = null;
-
-  const knownModels = [
-    ...new Set([CONFIG.geminiModel, 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash'])
-  ];
-
-  for (const model of knownModels) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        response = await callModel(model);
-        break;
-      } catch (error) {
-        lastError = error;
-        const status = error?.response?.status;
-
-        if (isKeyError(error)) throw error;
-
-        if (status === 503 || status === 429) {
-          await new Promise(r => setTimeout(r, 2000 * attempt));
-          continue;
-        }
-
-        if (status !== 400 && status !== 404) throw error;
-        break;
-      }
-    }
-    if (response) break;
-  }
-
-  if (!response) {
-    const available = await listGeminiModels();
-    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
-      try {
-        response = await callModel(model);
-        CONFIG.geminiModel = model;
-        break;
-      } catch (error) {
-        lastError = error;
-        const status = error?.response?.status;
-        if ((status !== 400 && status !== 404) || isKeyError(error)) throw error;
-      }
-    }
-  }
-
-  if (!response) throw lastError || new Error('Gemini indisponible.');
-
-  const data = response.data;
-  const parts = data?.candidates?.[0]?.content?.parts || [];
-  const cleanAnswer = parts.map(part => part.text || '').join('').trim();
-
-  if (!cleanAnswer) {
-    throw new Error('Gemini a renvoyé une réponse vide.');
-  }
-
-  if (useHistory) {
-    const now = Date.now();
-    await db.execute({
-      sql: `INSERT INTO chat_history (jid, role, content, created_at)
-            VALUES (?, 'user', ?, ?)`,
-      args: [jid, String(prompt).trim(), now]
-    });
-    await db.execute({
-      sql: `INSERT INTO chat_history (jid, role, content, created_at)
-            VALUES (?, 'assistant', ?, ?)`,
-      args: [jid, cleanAnswer, now + 1]
-    });
-  }
-
-  return cleanAnswer;
-}
-
-// Point d'entrée unique de l'IA : Groq en priorité, Gemini en secours automatique
 async function askAI(prompt, jid, options = {}) {
-  const failures = [];
-
-  if (CONFIG.groqKey) {
-    try {
-      return await askGroq(prompt, jid, options);
-    } catch (error) {
-      error.provider = 'Groq';
-      failures.push(error);
-      logger.warn({ error: error?.message }, 'Groq indisponible, tentative de bascule sur Gemini...');
-    }
+  try {
+    return await askGroq(prompt, jid, options);
+  } catch (error) {
+    error.provider = 'Groq';
+    throw error;
   }
-
-  if (CONFIG.geminiKey) {
-    try {
-      return await askGemini(prompt, jid, options);
-    } catch (error) {
-      error.provider = 'Gemini';
-      failures.push(error);
-    }
-  }
-
-  if (failures.length) {
-    const err = failures[0];
-    err.failures = failures;
-    throw err;
-  }
-
-  throw new Error('Aucune clé IA configurée. Ajoute GROQ_API_KEY dans les variables Railway.');
 }
 
 // ------------------------------------------------------------
@@ -2000,8 +1831,7 @@ async function downloadImageBuffer(url) {
 const MAX_IMAGES_PER_REQUEST = 5;
 
 // Nombre minimal de fans AniList pour considérer un résultat comme un vrai personnage.
-// Évite que « lion » ou « plage » renvoie un personnage obscur au lieu d'une photo.
-const MIN_CHARACTER_FAVOURITES = 25;
+const MIN_CHARACTER_FAVOURITES = 5;
 
 function parseImageRequest(raw = '') {
   const text = String(raw).trim();
@@ -2024,17 +1854,14 @@ function uniqueUrls(list) {
 }
 
 const ANILIST_CHARACTER_QUERY =
-  'query ($search: String, $perPage: Int) { Page(page: 1, perPage: $perPage) { characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) { name { full } image { large } favourites media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { romaji english } } } } } }';
+  'query ($search: String, $perPage: Int) { Page(page: 1, perPage: $perPage) { characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) { name { full } image { large } favourites media(perPage: 3, sort: POPULARITY_DESC) { nodes { title { romaji english } } } } } }';
 
-// AniList : recherche directe de personnages d'anime/manga SANS clé API.
-async function findAniListCharacterImages(query, wanted = 1) {
-  const perPage = Math.min(Math.max(wanted * 2, 5), 10);
-
+async function queryAniListRaw(searchTerm, perPage = 10) {
   const response = await axios.post(
     'https://graphql.anilist.co',
     {
       query: ANILIST_CHARACTER_QUERY,
-      variables: { search: query, perPage }
+      variables: { search: searchTerm, perPage }
     },
     {
       timeout: 15000,
@@ -2044,17 +1871,41 @@ async function findAniListCharacterImages(query, wanted = 1) {
       }
     }
   );
+  return response.data?.data?.Page?.characters || [];
+}
 
-  const characters = response.data?.data?.Page?.characters || [];
+// AniList : gère "sasuke", "rudo gachiakuta" ou "free beyblade"
+async function findAniListCharacterImages(query, wanted = 1) {
+  const clean = String(query).trim();
+  const words = clean.split(/\s+/);
+
+  let characters = await queryAniListRaw(clean, 10);
+
+  if (!characters.length && words.length > 1) {
+    const firstWord = words[0];
+    const animeHint = words.slice(1).join(' ').toLowerCase();
+    const fallbackChars = await queryAniListRaw(firstWord, 15);
+
+    const matchedWithAnime = fallbackChars.filter(item => {
+      const titles = (item.media?.nodes || [])
+        .flatMap(n => [n?.title?.english, n?.title?.romaji])
+        .filter(Boolean)
+        .map(t => t.toLowerCase());
+      return titles.some(
+        t => t.includes(animeHint) || animeHint.split(/\s+/).some(w => w.length > 2 && t.includes(w))
+      );
+    });
+
+    characters = matchedWithAnime.length ? matchedWithAnime : fallbackChars;
+  }
 
   return characters
     .filter(item => Number(item.favourites || 0) >= MIN_CHARACTER_FAVOURITES)
     .map(item => {
-      const charName = item.name?.full || query;
+      const charName = item.name?.full || clean;
       const animeNode = item.media?.nodes?.[0]?.title;
       const animeTitle = animeNode?.english || animeNode?.romaji || '';
-      const label = animeTitle ? charName + ' (' + animeTitle + ')' : charName;
-      
+      const label = animeTitle ? `${charName} (${animeTitle})` : charName;
       return { label, url: item.image?.large };
     })
     .filter(item => /^https?:\/\//i.test(String(item.url)));
@@ -2103,19 +1954,33 @@ async function findSerpApiImages(query) {
 }
 
 async function collectImageCandidates(query, wanted, photoOnly = false) {
-  const providers = [
-    ...(photoOnly ? [] : [['AniList', () => findAniListCharacterImages(query, wanted)]]),
-    ['Pixabay', () => findPixabayImages(query, wanted)],
-    ['SerpApi', () => findSerpApiImages(query)]
-  ];
-
-  for (const [name, run] of providers) {
-    try {
-      const result = await run();
-      if (result?.length) return result;
-    } catch (error) {
-      logger.warn({ err: error }, 'Fournisseur d images ' + name + ' indisponible.');
+  if (photoOnly) {
+    for (const [name, run] of [
+      ['Pixabay', () => findPixabayImages(query, wanted)],
+      ['SerpApi', () => findSerpApiImages(query)]
+    ]) {
+      try {
+        const result = await run();
+        if (result?.length) return result;
+      } catch (error) {
+        logger.warn({ err: error }, 'Fournisseur d images ' + name + ' indisponible.');
+      }
     }
+    return null;
+  }
+
+  try {
+    const aniResult = await findAniListCharacterImages(query, wanted);
+    if (aniResult?.length) return aniResult;
+  } catch (error) {
+    logger.warn({ err: error }, 'AniList indisponible.');
+  }
+
+  try {
+    const serpResult = await findSerpApiImages(`${query} anime`);
+    if (serpResult?.length) return serpResult;
+  } catch (error) {
+    logger.warn({ err: error }, 'SerpApi indisponible.');
   }
 
   return null;
@@ -2356,7 +2221,7 @@ function getUptimeText() {
 ◈ 𝗖𝗢𝗡𝗡𝗘𝗫𝗜𝗢𝗡
 ├ WhatsApp : ${sock ? 'Initialisé' : 'Indisponible'}
 ├ Base de données : ${USE_TURSO ? 'Turso' : 'SQLite local'}
-└ IA : ${CONFIG.groqKey ? 'Groq (Llama 3)' : CONFIG.geminiKey ? 'Gemini' : 'Non configurée'}
+└ IA : ${CONFIG.groqKey ? `Groq (${CONFIG.groqModel})` : 'Non configurée'}
 
 ${SIGNATURE}
 `.trim();
@@ -2447,7 +2312,7 @@ function explainAIFailure(error) {
     402: `Solde ${provider} épuisé. Recharge ou attends le renouvellement gratuit.`,
     403: `Accès ${provider} refusé (clé, autorisation ou région).`,
     429: `Limite ${provider} atteinte. Réessaie dans un instant.`,
-    400: `${provider} a refusé la requête (modèle ou message non valide).`,
+    400: `${provider} a refusé la requête : ${apiMessage || 'modèle ou message non valide'}.`,
     404: `Le modèle ${provider} demandé est introuvable.`,
     500: `${provider} rencontre un problème temporaire. Réessaie dans un instant.`,
     503: `${provider} est surchargé. Réessaie dans un instant.`
@@ -2474,7 +2339,7 @@ async function handleAICommand(jid, message, command, args) {
     return true;
   }
 
-  if (!CONFIG.groqKey && !CONFIG.geminiKey) {
+  if (!CONFIG.groqKey) {
     await sendReply(
       jid,
       moduleMessage(
@@ -2688,11 +2553,11 @@ async function processCommand(message) {
       ? `Groq actif : ${CONFIG.groqModel}`
       : 'Groq non configuré';
 
-    const ids = CONFIG.geminiKey ? await listGeminiModels() : [];
+    const ids = CONFIG.groqKey ? await listGroqModels() : [];
 
     await sendReply(
       jid,
-      `🔎 Configuration IA\n\n${activeAiInfo}\n\nModèles Gemini (${ids.length}) :\n${ids.slice(0, 15).join('\n')}`.trim(),
+      `🔎 Configuration IA\n\n${activeAiInfo}\n\nModèles Groq (${ids.length}) :\n${ids.slice(0, 15).join('\n')}`.trim(),
       message
     );
     return;

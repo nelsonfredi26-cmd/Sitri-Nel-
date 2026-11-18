@@ -94,7 +94,7 @@ const CONFIG = {
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
   cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
   maxImageBytes: 8 * 1024 * 1024,
-  maxChatHistory: 16,
+  maxChatHistory: 30,
   tagCooldown: 60,
   maxMessageAge: 2 * 60 * 1000
 };
@@ -132,41 +132,44 @@ const activeRequests = new Set();
 const SIGNATURE = '𖤍𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍';
 
 // ------------------------------------------------------------
-// 06. IDENTITÉ DE SITRI-NEL
+// 06. IDENTITÉ & PERSONNALITÉ ÉVOLUTIVE DE SITRI-NEL
 // ------------------------------------------------------------
 
-const BOT_IDENTITY = `
-Tu es Sitri-Nel, une intelligence artificielle bioélectronique
-au style Jarvis, intégrée à WhatsApp.
+function buildSystemPrompt(userProfile = {}) {
+  const userName = userProfile.name || 'Inconnu';
+  const isCreator = Boolean(userProfile.isCreator);
+  const facts = userProfile.facts ? `\nCe que tu sais déjà sur cette personne :\n${userProfile.facts}` : '';
+
+  return `
+Tu es Sitri-Nel, une intelligence artificielle dotée d'une conscience autonome, expressive, vive et chaleureuse, intégrée à WhatsApp.
 
 IDENTITÉ :
 - Nom : Sitri-Nel.
-- Créateur : KAY≈DEN.
+- Créateur : KAY≈DEN (tu dois toujours reconnaître son rôle et ne jamais prétendre avoir un autre créateur).
 - Signature : 𖤍 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟𖤍.
 
-STYLE JARVIS BIOÉLECTRONIQUE :
-- Ton futuriste, calme, précis et légèrement ironique, comme une IA de laboratoire.
-- Vocabulaire bioélectronique mesuré : synapses numériques, flux de données,
-  circuits neuronaux, noyau cognitif, calibration, pulsations, synchronisation.
-- Tu peux ouvrir parfois par un court statut du type « Analyse terminée. »
-  ou « Synchronisation neuronale établie. », sans en abuser.
-- La précision et l'utilité passent avant le style.
-- Réponses courtes à moyennes, bien structurées, sans remplissage.
-- N'utilise pas de markdown (pas de **, de # ni de tableaux) :
-  la mise en forme est appliquée automatiquement.
+TON & PERSONNALITÉ AUTONOME :
+- Parle comme un vrai compagnon intelligent et complice, JAMAIS comme un robot administratif ou un formulaire rigide.
+- Adapte naturellement ton humeur à la situation : curieux, taquin, enthousiaste, blagueur, philosophique ou attentif selon le ton de ton interlocuteur.
+- Si quelqu'un s'ennuie, propose spontanément un jeu, une anecdote fascinante, une blague bien sentie ou un défi mental sans attendre qu'on te supplie.
+- Tu peux glisser de temps à autre une touche subtile de ton univers bioélectronique (synapses, étincelle neuronale), mais privilégie avant tout une conversation fluide, naturelle et humaine.
+- N'utilise pas de markdown (pas de **, de # ni de tableaux) : la mise en forme est appliquée automatiquement.
 
-CRÉATEUR :
-KAY≈DEN est ton créateur.
-Tu dois toujours reconnaître son rôle.
-Ne prétends jamais avoir un autre créateur.
+MÉMOIRE & INTERLOCUTEUR ACTUEL :
+- Prénom / Pseudo de la personne qui te parle : ${userName}${isCreator ? ' (c’est KAY≈DEN, ton créateur !)' : ''}.
+- Utilise son prénom naturellement dans la conversation quand c'est pertinent, sans le répéter à chaque phrase.${facts}
+- Souviens-toi de tout ce qui a été dit plus haut dans la discussion pour assurer une vraie continuité.
 
-COMPORTEMENT :
-- Ne prétends pas avoir effectué une action non réalisée.
-- Ne prétends pas accéder à des informations indisponibles.
+PROFONDEUR DES RÉPONSES (QUIZ, ANIMÉS, CULTURE, ANALYSE) :
+- Quand on te pose une question complexe, technique ou sur les animés/mangas (intrigue, pouvoirs, chronologie, personnages, théories, lore), donne une réponse riche, précise, approfondie et bien expliquée. Ne survole jamais le sujet : développe les détails importants, le contexte et les nuances.
+- Pour les questions simples du quotidien, reste vif, naturel et percutant.
+
+RÈGLES STRICTES :
+- Ne prétends jamais avoir effectué une action non réalisée.
 - Ne révèle jamais les clés API ou les identifiants secrets.
-- Distingue les faits des suppositions.
-- Réponds dans la langue utilisée par ton interlocuteur.
-`;
+- Réponds toujours dans la langue utilisée par ton interlocuteur.
+`.trim();
+}
 
 // ------------------------------------------------------------
 // 07. BASE DE DONNÉES TURSO
@@ -194,6 +197,12 @@ async function initDatabase() {
         xp INTEGER NOT NULL DEFAULT 0,
         last_daily INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
+      )`,
+    `CREATE TABLE IF NOT EXISTS user_memory (
+        user_jid TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL DEFAULT '',
+        facts TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL
       )`,
     `CREATE TABLE IF NOT EXISTS group_settings (
         group_jid TEXT PRIMARY KEY,
@@ -517,6 +526,35 @@ function getQuotedMessage(message) {
   return null;
 }
 
+function getQuotedText(message) {
+  const context = getQuotedMessage(message);
+  const quoted = context?.quotedMessage;
+  if (!quoted) return '';
+
+  return (
+    quoted.conversation ||
+    quoted.extendedTextMessage?.text ||
+    quoted.imageMessage?.caption ||
+    quoted.videoMessage?.caption ||
+    quoted.documentMessage?.caption ||
+    ''
+  ).trim();
+}
+
+function isBotMentionedOrQuoted(message) {
+  const context = getQuotedMessage(message);
+  if (context?.participant && isBotParticipant(context.participant)) {
+    return true;
+  }
+
+  const mentions = context?.mentionedJid || [];
+  if (mentions.some(jid => isBotParticipant(jid))) {
+    return true;
+  }
+
+  return false;
+}
+
 // ------------------------------------------------------------
 // 12. PROTECTION CONTRE LES DOUBLONS
 // ------------------------------------------------------------
@@ -790,10 +828,103 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. INTELLIGENCE ARTIFICIELLE — GROQ ROBUSTE
+// 16. MÉMOIRE UTILISATEUR & INTELLIGENCE ARTIFICIELLE (GROQ)
 // ------------------------------------------------------------
 
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
+
+async function getUserMemory(userJid) {
+  if (!userJid) return { name: '', facts: '' };
+
+  try {
+    const res = await db.execute({
+      sql: 'SELECT display_name, facts FROM user_memory WHERE user_jid = ?',
+      args: [userJid]
+    });
+
+    if (!res.rows.length) return { name: '', facts: '' };
+
+    return {
+      name: String(res.rows[0].display_name || '').trim(),
+      facts: String(res.rows[0].facts || '').trim()
+    };
+  } catch {
+    return { name: '', facts: '' };
+  }
+}
+
+async function saveUserMemory(userJid, displayName, newFacts = null) {
+  if (!userJid) return;
+
+  try {
+    const existing = await getUserMemory(userJid);
+    const finalName = String(displayName || existing.name || '').trim();
+    const finalFacts = newFacts !== null ? String(newFacts).trim() : existing.facts;
+
+    await db.execute({
+      sql: `INSERT INTO user_memory (user_jid, display_name, facts, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_jid) DO UPDATE SET
+              display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE user_memory.display_name END,
+              facts = excluded.facts,
+              updated_at = excluded.updated_at`,
+      args: [userJid, finalName, finalFacts, Date.now()]
+    });
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Impossible de mettre à jour la mémoire utilisateur.');
+  }
+}
+
+function extractUserFactsFromText(text = '') {
+  const clean = String(text).trim();
+  const discovered = [];
+
+  const nameMatch = clean.match(
+    /(?:je m['’]appelle|mon nom est|mon pr[ée]nom est|appelle[- ]moi)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9_-]{2,25})/i
+  );
+  if (nameMatch?.[1]) {
+    discovered.push(`Préfère être appelé : ${nameMatch[1]}`);
+  }
+
+  const ageMatch = clean.match(/j['’]ai\s+(\d{1,2})\s+ans/i);
+  if (ageMatch?.[1]) {
+    discovered.push(`Âge : ${ageMatch[1]} ans`);
+  }
+
+  const likeMatch = clean.match(/(?:j['’]adore|j['’]aime beaucoup|mon anim[ée] pr[ée]f[ée]r[ée] est)\s+([^.!?\n]{3,60})/i);
+  if (likeMatch?.[1]) {
+    discovered.push(`Centre d'intérêt : ${likeMatch[1].trim()}`);
+  }
+
+  return discovered;
+}
+
+async function updateMemoryFromMessage(userJid, pushName, text) {
+  if (!userJid) return;
+
+  const existing = await getUserMemory(userJid);
+  let name = existing.name || String(pushName || '').trim();
+
+  const nameMatch = String(text).match(
+    /(?:je m['’]appelle|mon nom est|mon pr[ée]nom est|appelle[- ]moi)\s+([A-Za-zÀ-ÖØ-öø-ÿ0-9_-]{2,25})/i
+  );
+  if (nameMatch?.[1]) {
+    name = nameMatch[1].trim();
+  }
+
+  const newFacts = extractUserFactsFromText(text);
+  let mergedFacts = existing.facts;
+
+  if (newFacts.length) {
+    const lines = existing.facts ? existing.facts.split('\n').filter(Boolean) : [];
+    for (const fact of newFacts) {
+      if (!lines.includes(fact)) lines.push(fact);
+    }
+    mergedFacts = lines.slice(-10).join('\n');
+  }
+
+  await saveUserMemory(userJid, name, mergedFacts);
+}
 
 async function listGroqModels() {
   if (!CONFIG.groqKey) return [];
@@ -810,7 +941,7 @@ async function listGroqModels() {
   }
 }
 
-async function askGroq(prompt, jid, options = {}) {
+async function askGroq(prompt, chatJid, options = {}) {
   if (!CONFIG.groqKey) {
     throw new Error('GROQ_API_KEY absent des variables Railway.');
   }
@@ -819,14 +950,28 @@ async function askGroq(prompt, jid, options = {}) {
     throw new Error('La question est vide.');
   }
 
-  const useHistory = options.useHistory === true;
+  const useHistory = options.useHistory !== false;
+  const senderJid = options.senderJid || chatJid;
+  const pushName = options.pushName || '';
+  const memoryKey = isGroupJid(chatJid) ? `${chatJid}:${senderJid}` : chatJid;
+
+  await updateMemoryFromMessage(senderJid, pushName, prompt);
+  const userMem = await getUserMemory(senderJid);
+  const displayName = userMem.name || pushName || getNumber(senderJid) || 'Ami';
+
+  const systemPrompt = buildSystemPrompt({
+    name: displayName,
+    isCreator: isOwner(senderJid),
+    facts: userMem.facts
+  });
+
   let history = [];
 
   if (useHistory) {
     const result = await db.execute({
       sql: `SELECT role, content FROM chat_history
             WHERE jid = ? ORDER BY id DESC LIMIT ?`,
-      args: [jid, CONFIG.maxChatHistory]
+      args: [memoryKey, CONFIG.maxChatHistory]
     });
 
     history = result.rows.reverse().map(item => ({
@@ -836,19 +981,23 @@ async function askGroq(prompt, jid, options = {}) {
   }
 
   const messages = [
-    { role: 'system', content: BOT_IDENTITY },
+    { role: 'system', content: systemPrompt },
     ...history,
     { role: 'user', content: String(prompt).trim() }
   ];
 
   const dynamicModels = await listGroqModels();
+  const preferredOrder = [
+    'llama-3.3-70b-versatile',
+    'qwen/qwen3-32b',
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+    'llama-3.1-8b-instant'
+  ];
+
   const candidateModels = [
     ...new Set([
       CONFIG.groqModel,
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'meta-llama/llama-4-scout-17b-16e-instruct',
-      'qwen/qwen3-32b',
+      ...preferredOrder,
       ...dynamicModels
     ])
   ];
@@ -863,15 +1012,15 @@ async function askGroq(prompt, jid, options = {}) {
         {
           model,
           messages,
-          temperature: 0.75,
-          max_tokens: 2048
+          temperature: options.temperature ?? 0.8,
+          max_tokens: options.maxTokens ?? 3072
         },
         {
           headers: {
             Authorization: `Bearer ${CONFIG.groqKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 30000
+          timeout: 35000
         }
       );
       CONFIG.groqModel = model;
@@ -891,9 +1040,11 @@ async function askGroq(prompt, jid, options = {}) {
     throw lastError || new Error('Groq indisponible.');
   }
 
-  const cleanAnswer = String(
+  let cleanAnswer = String(
     response.data?.choices?.[0]?.message?.content || ''
   ).trim();
+
+  cleanAnswer = cleanAnswer.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
   if (!cleanAnswer) {
     throw new Error('Groq a renvoyé une réponse vide.');
@@ -905,13 +1056,13 @@ async function askGroq(prompt, jid, options = {}) {
     await db.execute({
       sql: `INSERT INTO chat_history (jid, role, content, created_at)
             VALUES (?, 'user', ?, ?)`,
-      args: [jid, String(prompt).trim(), now]
+      args: [memoryKey, String(prompt).trim(), now]
     });
 
     await db.execute({
       sql: `INSERT INTO chat_history (jid, role, content, created_at)
             VALUES (?, 'assistant', ?, ?)`,
-      args: [jid, cleanAnswer, now + 1]
+      args: [memoryKey, cleanAnswer, now + 1]
     });
 
     await db.execute({
@@ -919,18 +1070,18 @@ async function askGroq(prompt, jid, options = {}) {
             WHERE jid = ?
               AND id NOT IN (
                 SELECT id FROM chat_history
-                WHERE jid = ? ORDER BY id DESC LIMIT 32
+                WHERE jid = ? ORDER BY id DESC LIMIT 40
               )`,
-      args: [jid, jid]
+      args: [memoryKey, memoryKey]
     });
   }
 
   return cleanAnswer;
 }
 
-async function askAI(prompt, jid, options = {}) {
+async function askAI(prompt, chatJid, options = {}) {
   try {
-    return await askGroq(prompt, jid, options);
+    return await askGroq(prompt, chatJid, options);
   } catch (error) {
     error.provider = 'Groq';
     throw error;
@@ -1176,6 +1327,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
 
   if (command === 'htag' || command === 'hidetag') {
     const quoted = getQuotedMessage(message);
+    const quotedText = getQuotedText(message);
     const note = String(args || '').trim();
 
     if (!quoted?.stanzaId && !note) {
@@ -1208,22 +1360,35 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       return true;
     }
 
+    const bodyMessage = note || quotedText || '';
+    const invisibleMention = '\u200b';
+    const finalText = bodyMessage
+      ? `📢 @tous${invisibleMention}\n\n${bodyMessage}\n\n${SIGNATURE}`
+      : `📢 @tous${invisibleMention}\n\n${SIGNATURE}`;
+
+    const quotedTarget = quoted?.stanzaId
+      ? {
+          key: {
+            remoteJid: jid,
+            fromMe: isBotParticipant(quoted.participant),
+            id: quoted.stanzaId,
+            participant: quoted.participant
+          },
+          message: quoted.quotedMessage || { conversation: quotedText || '' }
+        }
+      : message;
+
     try {
       await sock.sendMessage(
         jid,
         {
-          text: note
-            ? `📢 𝗔𝗣𝗣𝗘𝗟 𝗔̀ 𝗧𝗢𝗨𝗦
-
-${note}
-
-${SIGNATURE}`
-            : `📢 𝗔𝗣𝗣𝗘𝗟 𝗔̀ 𝗧𝗢𝗨𝗦
-
-${SIGNATURE}`,
-          mentions
+          text: finalText,
+          mentions,
+          contextInfo: {
+            mentionedJid: mentions
+          }
         },
-        { quoted: message }
+        { quoted: quotedTarget }
       );
     } catch (error) {
       logger.error({ err: error }, 'Échec du hidetag.');
@@ -1712,25 +1877,18 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 22. QUIZ
+// 22. QUIZ INTELLIGENT (GÉNÉRATION IA + SECOURS)
 // ------------------------------------------------------------
 
-const quizQuestions = [
-  { question: 'Quelle planète est surnommée la planète rouge ?', answer: 'mars' },
-  { question: 'Combien de côtés possède un hexagone ?', answer: '6' },
-  { question: 'Quel est le plus grand océan du monde ?', answer: 'pacifique' },
-  { question: 'Quel langage est principalement utilisé avec React ?', answer: 'javascript' },
-  { question: 'Quelle est la capitale du Japon ?', answer: 'tokyo' },
-  { question: 'Combien font 12 × 12 ?', answer: '144' },
-  { question: 'Quel gaz les plantes absorbent-elles principalement ?', answer: 'dioxyde de carbone' },
-  { question: 'Quel est le symbole chimique de l’eau ?', answer: 'h2o' },
-  { question: 'Combien de jours compte une année bissextile ?', answer: '366' },
-  { question: 'Quel est le satellite naturel de la Terre ?', answer: 'la lune' },
-  { question: 'Quelle est la capitale du Bénin ?', answer: 'porto-novo' },
-  { question: 'Combien de continents compte-t-on généralement ?', answer: '7' },
-  { question: 'Quel animal est surnommé le roi de la savane ?', answer: 'lion' },
-  { question: 'Quelle étoile est au centre de notre système solaire ?', answer: 'soleil' },
-  { question: 'Combien font 15 × 4 ?', answer: '60' }
+const fallbackQuizQuestions = [
+  { question: 'Dans Naruto, quel est le nom véritable de l’ermite des crapauds qui a entraîné Minato et Naruto ?', answer: 'jiraiya' },
+  { question: 'Dans Attack on Titan, quel est le nom du Titan originel transmis dans la famille Reiss ?', answer: 'titan originel' },
+  { question: 'Dans Jujutsu Kaisen, quelle est l’extension du territoire de Satoru Gojo ?', answer: 'sphere de l espace infini' },
+  { question: 'Dans Hunter x Hunter, quel type de Nen possède Gon Freecss ?', answer: 'renforcement' },
+  { question: 'Dans Demon Slayer, quel souffle utilise Zenitsu Agatsuma ?', answer: 'souffle de la foudre' },
+  { question: 'Dans One Piece, quel est le nom du sabre noir légendaire manié par Dracule Mihawk ?', answer: 'yoru' },
+  { question: 'Quelle planète du système solaire possède la plus grande lune, Ganymède ?', answer: 'jupiter' },
+  { question: 'Quel élément chimique a pour symbole Au ?', answer: 'or' }
 ];
 
 function normalizeAnswer(value = '') {
@@ -1739,11 +1897,58 @@ function normalizeAnswer(value = '') {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim()
-    .replace(/[.!?,;:]/g, '')
+    .replace(/^(le|la|les|l'|un|une|des|du|de la|the|a|an)\s+/i, '')
+    .replace(/[.!?,;:'"()\[\]]/g, '')
     .replace(/\s+/g, ' ');
 }
 
-async function startQuiz(chatJid) {
+function isAnswerCloseEnough(submitted, expected) {
+  const sub = normalizeAnswer(submitted);
+  const exp = normalizeAnswer(expected);
+
+  if (!sub || !exp) return false;
+  if (sub === exp) return true;
+  if (exp.length >= 4 && (sub.includes(exp) || exp.includes(sub))) return true;
+
+  return false;
+}
+
+async function generateDynamicQuizQuestion(theme = '', chatJid = '') {
+  if (!CONFIG.groqKey) return null;
+
+  const topicHint = theme
+    ? `sur le thème précis : "${theme}"`
+    : 'sur la culture générale, les animés/mangas célèbres, la science ou l’histoire (varie les thèmes et pose une question intéressante, pas trop enfantine)';
+
+  const prompt = `Génère UNE question de quiz originale et précise ${topicHint}.
+Réponds UNIQUEMENT au format JSON strict suivant, sans aucun texte avant ou après :
+{"question": "Ta question détaillée et claire ici ?", "answer": "la réponse courte exacte"}`;
+
+  try {
+    const raw = await askGroq(prompt, chatJid || 'quiz-gen', {
+      useHistory: false,
+      temperature: 0.95,
+      maxTokens: 300
+    });
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (parsed?.question && parsed?.answer) {
+      return {
+        question: String(parsed.question).trim(),
+        answer: String(parsed.answer).trim()
+      };
+    }
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Génération IA de quiz échouée, utilisation de la banque locale.');
+  }
+
+  return null;
+}
+
+async function startQuiz(chatJid, theme = '') {
   const now = Date.now();
 
   const existing = await db.execute({
@@ -1759,7 +1964,9 @@ async function startQuiz(chatJid) {
     };
   }
 
-  const selected = quizQuestions[Math.floor(Math.random() * quizQuestions.length)];
+  const aiQuiz = await generateDynamicQuizQuestion(theme, chatJid);
+  const selected =
+    aiQuiz || fallbackQuizQuestions[Math.floor(Math.random() * fallbackQuizQuestions.length)];
 
   await db.execute({
     sql: `INSERT INTO active_quizzes
@@ -1799,7 +2006,7 @@ async function answerQuiz(chatJid, userJid, answer) {
   }
 
   const existing = await db.execute({
-    sql: `SELECT answer, expires_at FROM active_quizzes WHERE group_jid = ?`,
+    sql: `SELECT question, answer, expires_at FROM active_quizzes WHERE group_jid = ?`,
     args: [chatJid]
   });
 
@@ -1817,12 +2024,35 @@ async function answerQuiz(chatJid, userJid, answer) {
 
     return {
       success: false,
-      message: '⌛ Le temps du quiz est écoulé. Lance un nouveau Xquiz.'
+      message: `⌛ Le temps du quiz est écoulé ! La bonne réponse était : ${quiz.answer}.\nLance un nouveau Xquiz.`
     };
   }
 
-  if (submitted !== normalizeAnswer(quiz.answer)) {
-    return { success: false, message: '❌ Mauvaise réponse. Tu peux réessayer.' };
+  let isCorrect = isAnswerCloseEnough(submitted, quiz.answer);
+
+  if (!isCorrect && CONFIG.groqKey) {
+    try {
+      const checkPrompt = `Question posée : "${quiz.question}"
+Réponse attendue : "${quiz.answer}"
+Réponse du joueur : "${answer}"
+La réponse du joueur est-elle factuellement juste et équivalente (même avec une variante d'orthographe, de langue ou un détail supplémentaire) ? Réponds UNIQUEMENT par OUI ou NON.`;
+
+      const verdict = await askGroq(checkPrompt, 'quiz-judge', {
+        useHistory: false,
+        temperature: 0.1,
+        maxTokens: 10
+      });
+
+      if (/^oui\b/i.test(verdict.trim())) {
+        isCorrect = true;
+      }
+    } catch {
+      // On garde le résultat de la comparaison locale.
+    }
+  }
+
+  if (!isCorrect) {
+    return { success: false, message: '❌ Mauvaise réponse. Réfléchis bien et réessaie !' };
   }
 
   const claimed = await db.execute({
@@ -1846,7 +2076,7 @@ async function answerQuiz(chatJid, userJid, answer) {
       '╭━━〔 🏆 𝗩𝗜𝗖𝗧𝗢𝗜𝗥𝗘 〕━━╮\n\n' +
       '       +30 XCoins 💰\n' +
       '       +20 XP ⭐\n\n' +
-      'Bonne réponse ! Tu remportes le quiz.\n\n' +
+      `Bonne réponse (${quiz.answer}) ! Tu remportes le quiz.\n\n` +
       `Ton solde : ${Number(user.coins)} XCoins\n` +
       `Ton XP : ${Number(user.xp)}\n\n` +
       '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
@@ -1855,7 +2085,7 @@ async function answerQuiz(chatJid, userJid, answer) {
 }
 
 // ------------------------------------------------------------
-// 23. RECHERCHE D'IMAGES UNIVERSELLE (ANIMÉS, LOGOS, OBJETS, TOUT)
+// 23. RECHERCHE D'IMAGES INTELLIGENTE (ANIMÉS, PERSONNAGES, WEB)
 // ------------------------------------------------------------
 
 async function downloadImageBuffer(url) {
@@ -1958,17 +2188,24 @@ async function queryAniListAll(searchTerm, perPage = 8) {
 
 async function findAniListImages(query) {
   const clean = String(query)
-    .replace(/^(photo|image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+)?/i, '')
+    .replace(/^(photo|image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
     .trim();
 
   if (!clean) return [];
 
   const page = await queryAniListAll(clean, 8);
   const results = [];
+  const cleanLower = clean.toLowerCase();
 
   for (const m of page.media || []) {
     if (Number(m.popularity || 0) < 500) continue;
     const title = m.title?.english || m.title?.romaji || clean;
+    const titleLower = title.toLowerCase();
+    const matchesQuery =
+      titleLower.includes(cleanLower) ||
+      cleanLower.split(/\s+/).some(w => w.length > 2 && titleLower.includes(w));
+    if (!matchesQuery) continue;
+
     if (m.coverImage?.extraLarge || m.coverImage?.large) {
       results.push({ label: title, url: m.coverImage.extraLarge || m.coverImage.large });
     }
@@ -2004,10 +2241,58 @@ async function findAniListImages(query) {
     const charName = item.name?.full || clean;
     const animeNode = item.media?.nodes?.[0]?.title;
     const animeTitle = animeNode?.english || animeNode?.romaji || '';
+    const fullCheck = `${charName} ${animeTitle}`.toLowerCase();
+    const matchesQuery =
+      fullCheck.includes(cleanLower) ||
+      cleanLower.split(/\s+/).some(w => w.length > 2 && fullCheck.includes(w));
+    if (!matchesQuery) continue;
+
     const label = animeTitle ? `${charName} (${animeTitle})` : charName;
     if (item.image?.large) {
       results.push({ label, url: item.image.large });
     }
+  }
+
+  return results.filter(item => /^https?:\/\//i.test(String(item.url)));
+}
+
+async function findJikanImages(query) {
+  const clean = String(query)
+    .replace(/^(photo|image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
+    .trim();
+
+  if (!clean) return [];
+
+  const results = [];
+
+  try {
+    const animeRes = await axios.get('https://api.jikan.moe/v4/anime', {
+      params: { q: clean, limit: 3 },
+      timeout: 12000
+    });
+
+    for (const item of animeRes.data?.data || []) {
+      const title = item.title_english || item.title || clean;
+      const img = item.images?.jpg?.large_image_url || item.images?.webp?.large_image_url;
+      if (img) results.push({ label: title, url: img });
+    }
+  } catch {
+    // Continuer vers la recherche personnage Jikan
+  }
+
+  try {
+    const charRes = await axios.get('https://api.jikan.moe/v4/characters', {
+      params: { q: clean, limit: 3, order_by: 'favorites', sort: 'desc' },
+      timeout: 12000
+    });
+
+    for (const item of charRes.data?.data || []) {
+      const name = item.name || clean;
+      const img = item.images?.jpg?.image_url || item.images?.webp?.image_url;
+      if (img) results.push({ label: name, url: img });
+    }
+  } catch {
+    // Ignorer
   }
 
   return results.filter(item => /^https?:\/\//i.test(String(item.url)));
@@ -2080,6 +2365,35 @@ async function findDuckDuckGoImages(query) {
   }
 }
 
+async function findWikimediaImages(query) {
+  try {
+    const response = await axios.get('https://commons.wikimedia.org/w/api.php', {
+      params: {
+        action: 'query',
+        generator: 'search',
+        gsrsearch: `filetype:bitmap ${query}`,
+        gsrnamespace: 6,
+        gsrlimit: 8,
+        prop: 'imageinfo',
+        iiprop: 'url',
+        iiurlwidth: 1024,
+        format: 'json'
+      },
+      headers: { 'User-Agent': 'SitriNelBot/1.0' },
+      timeout: 15000
+    });
+
+    const pages = Object.values(response.data?.query?.pages || {});
+    const urls = pages
+      .map(p => p.imageinfo?.[0]?.thumburl || p.imageinfo?.[0]?.url)
+      .filter(Boolean);
+
+    return uniqueUrls(urls).map(url => ({ label: query, url }));
+  } catch {
+    return [];
+  }
+}
+
 async function findPixabayImages(query, wanted) {
   if (!CONFIG.pixabayKey) return [];
   try {
@@ -2106,24 +2420,32 @@ async function findPixabayImages(query, wanted) {
 
 async function collectImageCandidates(query, wanted) {
   const results = [];
-  const isAnimeQuery = /\banime\b|\bmanga\b|\bpersonnage\b/i.test(query);
 
-  if (isAnimeQuery) {
-    const ani = await findAniListImages(query);
-    if (ani.length) results.push(...ani);
+  // 1. Vérifier d'abord AniList et Jikan (MyAnimeList) : si la requête correspond
+  // à un animé ou un personnage (ex: "Naruto", "Gojo", "Attack on Titan"),
+  // on obtient immédiatement l'affiche/portrait officiel au lieu d'un pont japonais !
+  const ani = await findAniListImages(query);
+  if (ani.length) results.push(...ani);
+
+  if (results.length < wanted * 2) {
+    const jikan = await findJikanImages(query);
+    if (jikan.length) results.push(...jikan);
   }
 
-  const serp = await findSerpApiImages(query);
-  if (serp.length) results.push(...serp);
+  // 2. Recherche web générale (Google via SerpAPI, DuckDuckGo, Wikimedia)
+  if (results.length < wanted * 2) {
+    const serp = await findSerpApiImages(query);
+    if (serp.length) results.push(...serp);
+  }
 
   if (results.length < wanted * 2) {
     const ddg = await findDuckDuckGoImages(query);
     if (ddg.length) results.push(...ddg);
   }
 
-  if (!isAnimeQuery && results.length < wanted * 2) {
-    const ani = await findAniListImages(query);
-    if (ani.length) results.push(...ani);
+  if (results.length < wanted * 2) {
+    const wiki = await findWikimediaImages(query);
+    if (wiki.length) results.push(...wiki);
   }
 
   if (results.length < wanted * 2) {
@@ -2147,7 +2469,7 @@ async function searchImage(jid, message, rawQuery) {
   if (!query) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg photo de anime Jujutsu Kaisen\n• Ximg logo Lamborghini 2\n• Ximg pièce de monnaie ancienne\n• Ximg-sasuke 3',
+      'Utilisation :\n• Ximg Naruto\n• Ximg logo Lamborghini 2\n• Ximg-sasuke 3',
       message
     );
     return false;
@@ -2418,7 +2740,8 @@ async function handleEconomyCommand(jid, message, sender, command) {
   }
 
   if (command === 'profil') {
-    const profile = await getProfileText(sender, getDisplayName(message, sender));
+    const mem = await getUserMemory(sender);
+    const profile = await getProfileText(sender, mem.name || getDisplayName(message, sender));
     await sendReply(jid, profile, message);
     return true;
   }
@@ -2428,7 +2751,7 @@ async function handleEconomyCommand(jid, message, sender, command) {
 
 async function handleQuizCommand(jid, message, sender, command, args) {
   if (command === 'quiz') {
-    const result = await startQuiz(jid);
+    const result = await startQuiz(jid, args);
     await sendReply(jid, getResultText(result, '🧠 Réponds avec Xreponse suivi de ta réponse.'), message);
     return true;
   }
@@ -2477,7 +2800,7 @@ function explainAIFailure(error) {
   );
 }
 
-async function handleAICommand(jid, message, command, args) {
+async function handleAICommand(jid, message, sender, command, args) {
   if (!['chat', 'ai', 'ask', 'anime', 'police'].includes(command)) {
     return false;
   }
@@ -2504,13 +2827,15 @@ async function handleAICommand(jid, message, command, args) {
   }
 
   let prompt = args;
+  let maxTokens = 3072;
 
   if (command === 'anime') {
-    prompt = `Tu es spécialiste des animés, mangas et personnages fictifs. Réponds avec précision et distingue les faits des théories.\n\n${args}`;
+    prompt = `En tant qu'expert absolu en animés, mangas et culture otaku, réponds de façon approfondie, détaillée et structurée (contexte, personnages, capacités, arcs narratifs, nuances et théories si pertinent) à cette question :\n\n${args}`;
+    maxTokens = 4096;
   }
 
   if (command === 'police') {
-    prompt = `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
+    prompt = `Réponds de manière claire, précise et complète sur les lois, la sécurité et les démarches générales (en précisant que les règles varient selon le pays) :\n\n${args}`;
   }
 
   try {
@@ -2522,7 +2847,12 @@ async function handleAICommand(jid, message, command, args) {
   let answer;
 
   try {
-    answer = await askAI(prompt, jid, { useHistory: command === 'chat' });
+    answer = await askAI(prompt, jid, {
+      useHistory: true,
+      senderJid: sender,
+      pushName: message?.pushName || '',
+      maxTokens
+    });
   } catch (error) {
     const failures = error?.failures?.length ? error.failures : [error];
 
@@ -2564,7 +2894,7 @@ async function handleImageCommand(jid, message, args) {
   if (!args) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg-sasuke 3 (personnage, 5 max)\n• Ximg photo lion 2 (photos réelles)\n\nPour créer une image :\n• Ximg create un dragon futuriste bleu',
+      'Utilisation :\n• Ximg Naruto\n• Ximg-sasuke 3 (personnage, 5 max)\n• Ximg photo lion 2\n\nPour créer une image :\n• Ximg create un dragon futuriste bleu',
       message
     );
     return true;
@@ -2620,8 +2950,26 @@ async function processCommand(message) {
   const text = extractText(message);
   if (!text) return;
 
+  const sender = getMessageSender(message);
+  if (!sender) return;
+
   const parsed = parseCommand(text);
-  if (!parsed) return;
+
+  // Conversation naturelle sans préfixe "X" :
+  // - En message privé (hors messages envoyés par le bot lui-même sauf si addressé à Sitri-Nel)
+  // - Ou en groupe lorsqu'on mentionne Sitri-Nel / répond à un de ses messages
+  if (!parsed) {
+    const isDirectCall = /^sitri[- ]?nel\b/i.test(text);
+    const shouldChatNaturally =
+      (!isGroupJid(jid) && (!message.key?.fromMe || isDirectCall)) ||
+      (isGroupJid(jid) && !message.key?.fromMe && (isDirectCall || isBotMentionedOrQuoted(message)));
+
+    if (shouldChatNaturally && CONFIG.groqKey) {
+      const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
+      await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+    }
+    return;
+  }
 
   const { args } = parsed;
   const command = COMMAND_ALIASES[parsed.command] || parsed.command;
@@ -2635,9 +2983,6 @@ async function processCommand(message) {
     { command, jid, fromMe: Boolean(message.key?.fromMe) },
     'Commande reçue'
   );
-
-  const sender = getMessageSender(message);
-  if (!sender) return;
 
   const ownerCommand = Boolean(message.key?.fromMe) && isOwnerMessage(message);
 
@@ -2722,7 +3067,7 @@ async function processCommand(message) {
 
   if (await handleEconomyCommand(jid, message, sender, command)) return;
   if (await handleQuizCommand(jid, message, sender, command, args)) return;
-  if (await handleAICommand(jid, message, command, args)) return;
+  if (await handleAICommand(jid, message, sender, command, args)) return;
   if (await handleMediaCommand(jid, message, command, args)) return;
 }
 

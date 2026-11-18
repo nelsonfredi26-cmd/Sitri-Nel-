@@ -2109,7 +2109,7 @@ async function collectImageCandidates(query, wanted) {
       const result = await run();
       if (result?.length) return result;
     } catch (error) {
-      logger.warn({ err: error }, `Fournisseur d'images ${name} indisponible.`);
+      logger.warn({ err: error }, 'Fournisseur d images ' + name + ' indisponible.');
     }
   }
 

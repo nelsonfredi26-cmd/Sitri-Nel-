@@ -1,5 +1,5 @@
 /* ============================================================
-   ⌬ SITRI-NEL ULTIMATE EDITION — VERSION CORRIGÉE
+   ⌬ SITRI-NEL ULTIMATE EDITION — GROQ + ANILIST EDITION
    Créé et développé par KAY≈DEN
    Fichier unique : index.js
    ============================================================ */
@@ -73,18 +73,26 @@ function readOwnerNumbers() {
 const cleanEnv = value =>
   String(value || '').trim().replace(/^["']+|["']+$/g, '').trim();
 
+const DEFAULT_PAIRING_NUMBER = '2290159418685';
+
+function resolvePairingNumber() {
+  const raw = cleanEnv(process.env.PAIRING_NUMBER) || DEFAULT_PAIRING_NUMBER;
+  return String(raw).replace(/\D/g, '');
+}
+
 const CONFIG = {
-  pairingNumber: String(process.env.PAIRING_NUMBER || '').replace(/\D/g, ''),
-  // Code de jumelage choisi par toi (8 caractères A-Z / 0-9), optionnel.
+  pairingNumber: resolvePairingNumber(),
   pairingCode: String(process.env.PAIRING_CODE || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
-  // Un même code reste affiché pendant cette durée (ms) avant d'en demander un nouveau.
   pairingRefreshMs: Number(process.env.PAIRING_REFRESH_MS || 300000),
   ownerNumbers: readOwnerNumbers(),
+  groqKey: cleanEnv(process.env.GROQ_API_KEY),
+  groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
   geminiKey: cleanEnv(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
   geminiModel: cleanEnv(process.env.GEMINI_MODEL) || 'gemini-2.5-flash',
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
+  pixabayKey: cleanEnv(process.env.PIXABAY_API_KEY),
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
   cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
   maxImageBytes: 8 * 1024 * 1024,
@@ -106,7 +114,6 @@ const logger = pino({
   }
 });
 
-// Logger séparé et silencieux pour Baileys (évite les logs géants).
 const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
 
 // ------------------------------------------------------------
@@ -236,13 +243,8 @@ async function initDatabase() {
 // ------------------------------------------------------------
 // 08. SESSION WHATSAPP STOCKÉE DANS TURSO
 // ------------------------------------------------------------
-// La session survit ainsi aux redéploiements Railway :
-// plus besoin de relier le bot à chaque fois.
 
 async function useDatabaseAuthState() {
-  // Toutes les écritures passent par une file d'attente : l'ordre est garanti.
-  // Sans ça, une ancienne version de la session peut écraser la plus récente
-  // et le bot redemande un jumelage.
   let queue = Promise.resolve();
 
   const enqueue = task => {
@@ -259,12 +261,10 @@ async function useDatabaseAuthState() {
         return await task();
       } catch (error) {
         lastError = error;
-
         logger.warn(
           { attempt, error: error?.message },
           'Accès à la session (base de données) échoué, nouvel essai.'
         );
-
         await new Promise(resolve => setTimeout(resolve, 500 * attempt));
       }
     }
@@ -304,7 +304,6 @@ async function useDatabaseAuthState() {
       keys: {
         get: async (type, ids) => {
           await queue;
-
           const data = {};
 
           await Promise.all(
@@ -352,7 +351,6 @@ async function useDatabaseAuthState() {
       }
     },
 
-    // La session est sérialisée au moment de l'écriture : c'est toujours la plus récente.
     saveCreds: () => enqueue(() => withRetry(() => writeData('creds', creds)))
   };
 }
@@ -402,7 +400,6 @@ function isGroupJid(jid = '') {
   return String(jid).endsWith('@g.us');
 }
 
-// Préfère l'identifiant téléphone (@s.whatsapp.net) à l'identifiant LID.
 function pickPhoneJid(...candidates) {
   const list = candidates.filter(Boolean).map(String);
 
@@ -433,7 +430,12 @@ function getMessageSender(message) {
 
   if (key.fromMe) {
     return normalizeJid(
-      botJid || key.participant || key.remoteJid || ''
+      botJid ||
+        sock?.user?.id ||
+        key.participant ||
+        (CONFIG.pairingNumber ? `${CONFIG.pairingNumber}@s.whatsapp.net` : '') ||
+        key.remoteJid ||
+        ''
     );
   }
 
@@ -447,9 +449,8 @@ function getMessageSender(message) {
 }
 
 function isOwnerMessage(message) {
-  if (!message?.key?.fromMe) return false;
-
-  return isOwner(botJid || getMessageSender(message));
+  if (message?.key?.fromMe) return true;
+  return isOwner(getMessageSender(message));
 }
 
 // ------------------------------------------------------------
@@ -512,7 +513,6 @@ function getQuotedMessage(message) {
 
   for (const type of messageTypes) {
     const context = content[type]?.contextInfo;
-
     if (context?.stanzaId) return context;
   }
 
@@ -527,7 +527,6 @@ function hasProcessedMessage(message) {
   const id = message?.key?.id;
 
   if (!id) return false;
-
   if (processedMessages.has(id)) return true;
 
   processedMessages.add(id);
@@ -565,7 +564,6 @@ function formatDuration(totalSeconds = 0) {
   return parts.join(' ');
 }
 
-// Gras Unicode « serif » (𝐀𝐛𝐜), accents conservés (𝐞́).
 function boldSerif(value = '') {
   return Array.from(String(value).normalize('NFD'), char => {
     const code = char.codePointAt(0);
@@ -582,7 +580,6 @@ function moduleMessage(title, text) {
   return `${title}\n\n${boldSerif(text)}`;
 }
 
-// Transforme la réponse de l'IA : markdown retiré, texte en gras Unicode.
 function formatAIReply(raw) {
   const parts = String(raw || '').replace(/\r/g, '').split(/(```[\s\S]*?```)/g);
 
@@ -623,8 +620,6 @@ function formatAIReply(raw) {
   return `⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\n${body.trim()}\n\n𖤍 𝗞𝗔𝗬≈𝗗𝗘𝗡`;
 }
 
-// Convertit tout texte envoyé en gras Unicode,
-// sans casser les liens, les @tags et les blocs de code.
 function styleText(value = '') {
   return String(value)
     .split(/(```[\s\S]*?```|https?:\/\/\S+|@\d+)/g)
@@ -645,7 +640,6 @@ async function sendText(jid, text, options = {}) {
 
 async function sendReply(jid, text, message) {
   if (!message) return sendText(jid, text);
-
   return sendText(jid, text, { quoted: message });
 }
 
@@ -658,7 +652,6 @@ async function sendOfficialImage(jid, message = null) {
       '⚠️ Image officielle introuvable. Vérifie que sitri-nel.png est à la racine du dépôt GitHub.',
       message
     );
-
     return false;
   }
 
@@ -798,39 +791,15 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. INTELLIGENCE ARTIFICIELLE — GEMINI
+// 16. INTELLIGENCE ARTIFICIELLE — GROQ (LLAMA 3) + GEMINI SECOURS
 // ------------------------------------------------------------
 
+const GROQ_BASE = 'https://api.groq.com/openai/v1';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
-// Liste des modèles Gemini utilisables avec la clé.
-async function listGeminiModels() {
-  try {
-    const result = await axios.get(`${GEMINI_BASE}/models`, {
-      headers: { 'x-goog-api-key': CONFIG.geminiKey },
-      params: { pageSize: 100 },
-      timeout: 20000
-    });
-
-    return (result.data?.models || [])
-      .filter(item => (item.supportedGenerationMethods || []).includes('generateContent'))
-      .map(item => String(item.name || '').replace(/^models\//, ''))
-      .filter(
-        id => /^gemini/i.test(id) && !/embed|tts|image|live|audio|vision|robotics|computer/i.test(id)
-      );
-  } catch (error) {
-    logger.warn(
-      { status: error?.response?.status, error: error?.message },
-      'Liste des modèles Gemini indisponible.'
-    );
-
-    return [];
-  }
-}
-
-async function askGemini(prompt, jid, options = {}) {
-  if (!CONFIG.geminiKey) {
-    throw new Error('GEMINI_API_KEY absent des variables Railway.');
+async function askGroq(prompt, jid, options = {}) {
+  if (!CONFIG.groqKey) {
+    throw new Error('GROQ_API_KEY absent des variables Railway.');
   }
 
   if (!prompt || !String(prompt).trim()) {
@@ -838,7 +807,6 @@ async function askGemini(prompt, jid, options = {}) {
   }
 
   const useHistory = options.useHistory === true;
-
   let history = [];
 
   if (useHistory) {
@@ -849,118 +817,75 @@ async function askGemini(prompt, jid, options = {}) {
     });
 
     history = result.rows.reverse().map(item => ({
-      role: item.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: String(item.content) }]
+      role: item.role === 'assistant' ? 'assistant' : 'user',
+      content: String(item.content)
     }));
   }
 
-  const contents = [
+  const messages = [
+    { role: 'system', content: BOT_IDENTITY },
     ...history,
-    { role: 'user', parts: [{ text: String(prompt).trim() }] }
+    { role: 'user', content: String(prompt).trim() }
   ];
 
-  const tried = new Set();
-
-  const callModel = async model => {
-    tried.add(model);
-
-    const generationConfig = { temperature: 0.8, maxOutputTokens: 2048 };
-
-    // Pas de « réflexion » interne pour 2.5-flash : réponses rapides et complètes.
-    if (/2\.5-flash/i.test(model)) {
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
-
-    return axios.post(
-      `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        systemInstruction: { parts: [{ text: BOT_IDENTITY }] },
-        contents,
-        generationConfig
-      },
-      {
-        headers: {
-          'x-goog-api-key': CONFIG.geminiKey,
-          'Content-Type': 'application/json'
-        },
-        timeout: 60000
-      }
-    );
-  };
-
-  const isKeyError = error =>
-    /api key/i.test(String(error?.response?.data?.error?.message || ''));
+  // Modèles Groq accessibles sur le niveau gratuit (du plus complet au plus rapide)
+  const candidateModels = [
+    ...new Set([
+      CONFIG.groqModel,
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama3-70b-8192',
+      'llama3-8b-8192',
+      'gemma2-9b-it'
+    ])
+  ];
 
   let response = null;
   let lastError = null;
 
-  const knownModels = [
-    ...new Set([CONFIG.geminiModel, 'gemini-2.5-flash', 'gemini-2.5-flash-lite'])
-  ];
-
-  for (const model of knownModels) {
+  for (const model of candidateModels) {
     try {
-      response = await callModel(model);
+      response = await axios.post(
+        `${GROQ_BASE}/chat/completions`,
+        {
+          model,
+          messages,
+          temperature: 0.75,
+          max_tokens: 2048
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${CONFIG.groqKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+      CONFIG.groqModel = model;
       break;
     } catch (error) {
       lastError = error;
-
       const status = error?.response?.status;
 
-      if ((status !== 400 && status !== 404) || isKeyError(error)) throw error;
+      if (status === 401) throw error;
 
       logger.warn(
-        { model, status, data: error?.response?.data },
-        'Modèle Gemini refusé, essai du suivant.'
+        { model, status, error: error?.response?.data?.error?.message || error?.message },
+        'Modèle Groq indisponible, essai du suivant.'
       );
     }
   }
 
   if (!response) {
-    const available = await listGeminiModels();
-
-    logger.info({ available }, 'Modèles Gemini disponibles pour cette clé.');
-
-    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
-      try {
-        response = await callModel(model);
-        CONFIG.geminiModel = model;
-
-        logger.info(`Modèle Gemini utilisé : ${model}`);
-        break;
-      } catch (error) {
-        lastError = error;
-
-        const status = error?.response?.status;
-
-        if ((status !== 400 && status !== 404) || isKeyError(error)) throw error;
-      }
-    }
+    throw lastError || new Error('Groq indisponible.');
   }
 
-  if (!response) throw lastError || new Error('Gemini indisponible.');
-
-  const data = response.data;
-  const parts = data?.candidates?.[0]?.content?.parts || [];
-  const cleanAnswer = parts.map(part => part.text || '').join('').trim();
+  const cleanAnswer = String(
+    response.data?.choices?.[0]?.message?.content || ''
+  ).trim();
 
   if (!cleanAnswer) {
-    const blockReason = data?.promptFeedback?.blockReason;
-    const finishReason = data?.candidates?.[0]?.finishReason;
-    const blocked = Boolean(blockReason) || finishReason === 'SAFETY';
-
-    const error = new Error(
-      `Gemini : réponse vide (${blockReason || finishReason || 'inconnue'}).`
-    );
-
-    error.userMessage = blocked
-      ? 'Cette demande a été bloquée par les filtres de sécurité de Gemini.'
-      : 'Gemini a renvoyé une réponse vide. Réessaie avec une autre formulation.';
-
-    // Une demande bloquée pour sécurité n'est pas renvoyée aux autres fournisseurs.
-    error.noFallback = blocked;
-
-    throw error;
+    throw new Error('Groq a renvoyé une réponse vide.');
   }
 
   if (useHistory) {
@@ -992,14 +917,190 @@ async function askGemini(prompt, jid, options = {}) {
   return cleanAnswer;
 }
 
-// Point d'entrée unique de l'IA : Gemini est le seul cerveau du bot.
-async function askAI(prompt, jid, options = {}) {
+async function listGeminiModels() {
   try {
-    return await askGemini(prompt, jid, options);
+    const result = await axios.get(`${GEMINI_BASE}/models`, {
+      headers: { 'x-goog-api-key': CONFIG.geminiKey },
+      params: { pageSize: 100 },
+      timeout: 20000
+    });
+
+    return (result.data?.models || [])
+      .filter(item => (item.supportedGenerationMethods || []).includes('generateContent'))
+      .map(item => String(item.name || '').replace(/^models\//, ''))
+      .filter(
+        id => /^gemini/i.test(id) && !/embed|tts|image|live|audio|vision|robotics|computer/i.test(id)
+      );
   } catch (error) {
-    error.provider = 'Gemini';
-    throw error;
+    logger.warn(
+      { status: error?.response?.status, error: error?.message },
+      'Liste des modèles Gemini indisponible.'
+    );
+    return [];
   }
+}
+
+async function askGemini(prompt, jid, options = {}) {
+  if (!CONFIG.geminiKey) {
+    throw new Error('GEMINI_API_KEY absent des variables Railway.');
+  }
+
+  if (!prompt || !String(prompt).trim()) {
+    throw new Error('La question est vide.');
+  }
+
+  const useHistory = options.useHistory === true;
+  let history = [];
+
+  if (useHistory) {
+    const result = await db.execute({
+      sql: `SELECT role, content FROM chat_history
+            WHERE jid = ? ORDER BY id DESC LIMIT ?`,
+      args: [jid, CONFIG.maxChatHistory]
+    });
+
+    history = result.rows.reverse().map(item => ({
+      role: item.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: String(item.content) }]
+    }));
+  }
+
+  const contents = [
+    ...history,
+    { role: 'user', parts: [{ text: String(prompt).trim() }] }
+  ];
+
+  const tried = new Set();
+
+  const callModel = async model => {
+    tried.add(model);
+    const generationConfig = { temperature: 0.8, maxOutputTokens: 2048 };
+    if (/2\.5-flash/i.test(model)) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    return axios.post(
+      `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        systemInstruction: { parts: [{ text: BOT_IDENTITY }] },
+        contents,
+        generationConfig
+      },
+      {
+        headers: {
+          'x-goog-api-key': CONFIG.geminiKey,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000
+      }
+    );
+  };
+
+  const isKeyError = error =>
+    /api key/i.test(String(error?.response?.data?.error?.message || ''));
+
+  let response = null;
+  let lastError = null;
+
+  const knownModels = [
+    ...new Set([CONFIG.geminiModel, 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash'])
+  ];
+
+  for (const model of knownModels) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await callModel(model);
+        break;
+      } catch (error) {
+        lastError = error;
+        const status = error?.response?.status;
+
+        if (isKeyError(error)) throw error;
+
+        if (status === 503 || status === 429) {
+          await new Promise(r => setTimeout(r, 2000 * attempt));
+          continue;
+        }
+
+        if (status !== 400 && status !== 404) throw error;
+        break;
+      }
+    }
+    if (response) break;
+  }
+
+  if (!response) {
+    const available = await listGeminiModels();
+    for (const model of available.filter(id => !tried.has(id)).slice(0, 5)) {
+      try {
+        response = await callModel(model);
+        CONFIG.geminiModel = model;
+        break;
+      } catch (error) {
+        lastError = error;
+        const status = error?.response?.status;
+        if ((status !== 400 && status !== 404) || isKeyError(error)) throw error;
+      }
+    }
+  }
+
+  if (!response) throw lastError || new Error('Gemini indisponible.');
+
+  const data = response.data;
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const cleanAnswer = parts.map(part => part.text || '').join('').trim();
+
+  if (!cleanAnswer) {
+    throw new Error('Gemini a renvoyé une réponse vide.');
+  }
+
+  if (useHistory) {
+    const now = Date.now();
+    await db.execute({
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'user', ?, ?)`,
+      args: [jid, String(prompt).trim(), now]
+    });
+    await db.execute({
+      sql: `INSERT INTO chat_history (jid, role, content, created_at)
+            VALUES (?, 'assistant', ?, ?)`,
+      args: [jid, cleanAnswer, now + 1]
+    });
+  }
+
+  return cleanAnswer;
+}
+
+// Point d'entrée unique de l'IA : Groq en priorité, Gemini en secours automatique
+async function askAI(prompt, jid, options = {}) {
+  const failures = [];
+
+  if (CONFIG.groqKey) {
+    try {
+      return await askGroq(prompt, jid, options);
+    } catch (error) {
+      error.provider = 'Groq';
+      failures.push(error);
+      logger.warn({ error: error?.message }, 'Groq indisponible, tentative de bascule sur Gemini...');
+    }
+  }
+
+  if (CONFIG.geminiKey) {
+    try {
+      return await askGemini(prompt, jid, options);
+    } catch (error) {
+      error.provider = 'Gemini';
+      failures.push(error);
+    }
+  }
+
+  if (failures.length) {
+    const err = failures[0];
+    err.failures = failures;
+    throw err;
+  }
+
+  throw new Error('Aucune clé IA configurée. Ajoute GROQ_API_KEY dans les variables Railway.');
 }
 
 // ------------------------------------------------------------
@@ -1039,7 +1140,6 @@ async function setOnlyAdmin(groupJid, enabled) {
 
 async function getGroupMetadata(groupJid) {
   if (!sock) throw new Error('Connexion WhatsApp indisponible.');
-
   return sock.groupMetadata(groupJid);
 }
 
@@ -1054,9 +1154,7 @@ function sameParticipant(a, b) {
   const firstNumber = getNumber(first);
   const secondNumber = getNumber(second);
 
-  return Boolean(
-    firstNumber && secondNumber && firstNumber === secondNumber
-  );
+  return Boolean(firstNumber && secondNumber && firstNumber === secondNumber);
 }
 
 function isParticipantAdmin(metadata, jid) {
@@ -1089,12 +1187,69 @@ async function canUseOrdinaryGroupCommand(groupJid, sender) {
   if (isOwner(sender)) return true;
 
   const settings = await getGroupSettings(groupJid);
-
   if (!Number(settings.only_admin)) return true;
 
   const metadata = await getGroupMetadata(groupJid);
-
   return isParticipantAdmin(metadata, sender);
+}
+
+// ------------------------------------------------------------
+// 18 bis. AIDES POUR XADD / XKICK
+// ------------------------------------------------------------
+
+function phoneCandidates(raw = '') {
+  const digits = normalizeNumber(raw);
+
+  if (!digits) return [];
+
+  if (/^01\d{8}$/.test(digits)) return ['229' + digits, '229' + digits.slice(2)];
+  if (/^2290\d{9}$/.test(digits)) return [digits, '229' + digits.slice(5)];
+  if (/^229\d{8}$/.test(digits)) return [digits, '22901' + digits.slice(3)];
+  if (/^\d{8}$/.test(digits)) return ['22901' + digits, '229' + digits];
+
+  return [digits];
+}
+
+function getContextInfo(message) {
+  const content = unwrapContent(message);
+  if (!content) return null;
+
+  const types = [
+    'extendedTextMessage', 'imageMessage', 'videoMessage',
+    'documentMessage', 'audioMessage', 'stickerMessage'
+  ];
+
+  for (const type of types) {
+    if (content[type]?.contextInfo) return content[type].contextInfo;
+  }
+
+  return null;
+}
+
+function findGroupParticipant(metadata, jid) {
+  return (
+    (metadata?.participants || []).find(item =>
+      [item.id, item.jid, item.phoneNumber, item.lid].some(candidate =>
+        sameParticipant(candidate, jid)
+      )
+    ) || null
+  );
+}
+
+function participantLabel(item) {
+  const number = getNumber(item?.phoneNumber || item?.jid || item?.id || '');
+  return number ? `+${number}` : 'ce membre';
+}
+
+function getKickTargetJid(message, args) {
+  const context = getContextInfo(message);
+  const mentioned = context?.mentionedJid?.[0];
+
+  if (mentioned) return mentioned;
+  if (context?.stanzaId && context?.participant) return context.participant;
+
+  const candidate = phoneCandidates(args)[0];
+  return candidate ? `${candidate}@s.whatsapp.net` : null;
 }
 
 // ------------------------------------------------------------
@@ -1128,10 +1283,7 @@ async function acquireTagCooldown(groupJid) {
 
   return {
     allowed: false,
-    remaining: Math.max(
-      0,
-      Math.ceil((cooldownMs - (now - lastTag)) / 1000)
-    )
+    remaining: Math.max(0, Math.ceil((cooldownMs - (now - lastTag)) / 1000))
   };
 }
 
@@ -1147,52 +1299,35 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     'kick', 'add', 'annonce', 'clear'
   ];
 
-  // Évite des appels WhatsApp inutiles pour les autres commandes.
   if (!groupCommands.includes(command)) return false;
 
   const owner = isOwner(sender);
-
   let metadata;
 
   try {
     metadata = await getGroupMetadata(jid);
   } catch (error) {
     logger.error({ err: error }, 'Impossible de récupérer les informations du groupe.');
-
-    await sendReply(
-      jid,
-      'Impossible de vérifier les permissions du groupe actuellement.',
-      message
-    );
-
+    await sendReply(jid, 'Impossible de vérifier les permissions du groupe actuellement.', message);
     return true;
   }
 
   const senderIsAdmin = owner || isParticipantAdmin(metadata, sender);
   const botIsAdmin = isBotGroupAdmin(metadata);
 
-  // ---------------- XONLYADMIN ----------------
-
   if (command === 'onlyadmin') {
     if (!senderIsAdmin) {
-      await sendReply(
-        jid,
-        '⛔ Cette commande est réservée au propriétaire et aux administrateurs.',
-        message
-      );
-
+      await sendReply(jid, '⛔ Cette commande est réservée au propriétaire et aux administrateurs.', message);
       return true;
     }
 
     const value = String(args || '').trim().toLowerCase();
-
     if (!['on', 'off'].includes(value)) {
       await sendReply(jid, 'Utilisation : Xonlyadmin on ou Xonlyadmin off', message);
       return true;
     }
 
     const enabled = value === 'on';
-
     await setOnlyAdmin(jid, enabled);
 
     await sendReply(
@@ -1202,11 +1337,8 @@ async function handleGroupCommand(jid, message, sender, command, args) {
         : '🔓 𝗠𝗢𝗗𝗘 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗧𝗘𝗨𝗥𝗦 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́\nLes membres peuvent de nouveau utiliser les commandes ordinaires.',
       message
     );
-
     return true;
   }
-
-  // ---------------- XTAG / XTAGALL ----------------
 
   if (command === 'tag' || command === 'tagall') {
     const quoted = getQuotedMessage(message);
@@ -1217,7 +1349,6 @@ async function handleGroupCommand(jid, message, sender, command, args) {
         '📌 Réponds d’abord à un message du groupe, puis utilise Xtag pour signaler ce message à tous les membres.',
         message
       );
-
       return true;
     }
 
@@ -1239,7 +1370,6 @@ async function handleGroupCommand(jid, message, sender, command, args) {
         `⏳ 𝗔𝗡𝗧𝗜-𝗦𝗣𝗔𝗠 𝗔𝗖𝗧𝗜𝗙\nUne mention collective vient déjà d'être effectuée.\n\nNouvelle utilisation possible dans : ${formatDuration(cooldown.remaining)}.\n\nLe délai est partagé par tous les membres du groupe.`,
         message
       );
-
       return true;
     }
 
@@ -1266,148 +1396,174 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       );
     } catch (error) {
       logger.error({ err: error }, 'Échec de la mention collective.');
-
-      await sendReply(
-        jid,
-        'La mention collective a échoué. Vérifie les permissions du groupe.',
-        message
-      );
+      await sendReply(jid, 'La mention collective a échoué. Vérifie les permissions du groupe.', message);
     }
 
     return true;
   }
-
-  // ---------------- COMMANDES SENSIBLES ----------------
 
   const settings = await getGroupSettings(jid);
 
   if (Number(settings.only_admin) && !senderIsAdmin) {
-    await sendReply(
-      jid,
-      '🔒 Cette commande est réservée aux administrateurs du groupe.',
-      message
-    );
-
+    await sendReply(jid, '🔒 Cette commande est réservée aux administrateurs du groupe.', message);
     return true;
   }
 
   if (!senderIsAdmin) {
-    await sendReply(
-      jid,
-      '⛔ Autorisation refusée. Cette commande est réservée aux administrateurs et au propriétaire.',
-      message
-    );
-
+    await sendReply(jid, '⛔ Autorisation refusée. Cette commande est réservée aux administrateurs et au propriétaire.', message);
     return true;
   }
 
-  // Pas de blocage préalable : on tente l'action et on signale un refus éventuel.
   if (!botIsAdmin) {
-    logger.warn(
-      {
-        botJid,
-        botLid,
-        admins: (metadata.participants || [])
-          .filter(item => item.admin)
-          .map(item => ({ id: item.id, lid: item.lid, phone: item.phoneNumber }))
-      },
-      'Diagnostic : le compte du bot n’est pas reconnu comme admin, tentative quand même.'
-    );
+    logger.warn({ botJid, botLid }, 'Diagnostic : le compte du bot n’est pas reconnu comme admin, tentative quand même.');
   }
 
-  // ---------------- XKICK ----------------
-
   if (command === 'kick') {
-    const quoted = getQuotedMessage(message);
-    const target = quoted?.participant;
+    const targetJid = getKickTargetJid(message, args);
 
-    if (!target) {
+    if (!targetJid) {
       await sendReply(
         jid,
-        'Réponds au message de la personne à expulser, puis utilise Xkick.',
+        'Réponds au message de la personne, ou mentionne-la (@), ou écris son numéro : Xkick 229XXXXXXXXXX',
         message
       );
-
       return true;
     }
 
+    const candidates = getContextInfo(message)?.mentionedJid?.length || getContextInfo(message)?.stanzaId
+      ? [targetJid]
+      : phoneCandidates(args).map(number => `${number}@s.whatsapp.net`);
+
+    const member = candidates
+      .map(candidate => findGroupParticipant(metadata, candidate))
+      .find(Boolean);
+
+    if (!member) {
+      await sendReply(jid, 'Cette personne n’est pas dans le groupe.', message);
+      return true;
+    }
+
+    const memberId = member.id || member.jid;
+
     if (
-      isBotParticipant(target) ||
-      isOwner(target) ||
-      isParticipantAdmin(metadata, target)
+      isBotParticipant(memberId) ||
+      isOwner(memberId) ||
+      isOwner(member.phoneNumber || '') ||
+      member.admin
     ) {
       await sendReply(
         jid,
-        '⛔ Cette personne ne peut pas être expulsée par cette commande.',
+        '⛔ Cette personne ne peut pas être expulsée par cette commande (propriétaire ou administrateur).',
         message
       );
-
       return true;
     }
 
     try {
-      await sock.groupParticipantsUpdate(jid, [target], 'remove');
+      const result = await sock.groupParticipantsUpdate(jid, [memberId], 'remove');
+      const status = String(result?.[0]?.status || '200');
 
-      await sendReply(
-        jid,
-        `✅ La demande d'expulsion de @${getNumber(target)} a été effectuée.`,
-        message
-      );
+      if (status === '200') {
+        await sendReply(jid, `✅ ${participantLabel(member)} a été expulsé du groupe.`, message);
+      } else if (status === '403' || status === '401') {
+        await sendReply(
+          jid,
+          `WhatsApp a refusé (code ${status}) : ce compte n’est pas administrateur du groupe, ou la personne est protégée.`,
+          message
+        );
+      } else {
+        await sendReply(jid, `L’expulsion n’a pas abouti (code WhatsApp ${status}).`, message);
+      }
     } catch (error) {
-      logger.error({ err: error }, 'Erreur Xkick');
-
-      await sendReply(
-        jid,
-        "Impossible d'expulser ce membre. WhatsApp a refusé l'action : vérifie que ce compte est bien administrateur du groupe.",
-        message
-      );
+      logger.error({ err: error, memberId }, 'Erreur Xkick');
+      await sendReply(jid, `Impossible d’expulser ce membre. Détail : ${error?.message || 'erreur inconnue'}.`, message);
     }
 
     return true;
   }
 
-  // ---------------- XADD ----------------
-
   if (command === 'add') {
-    const number = normalizeNumber(args);
+    const candidates = phoneCandidates(args);
 
-    if (!number || number.length < 8 || number.length > 15) {
-      await sendReply(jid, 'Utilisation : Xadd 229XXXXXXXXXX', message);
+    if (!candidates.length || candidates.some(number => number.length < 8 || number.length > 15)) {
+      await sendReply(jid, 'Utilisation : Xadd 229XXXXXXXXXX (ou 01XXXXXXXX pour le Bénin)', message);
+      return true;
+    }
+
+    let targetJid = null;
+
+    try {
+      const checks = await sock.onWhatsApp(
+        ...candidates.map(number => `${number}@s.whatsapp.net`)
+      );
+
+      targetJid = (checks || []).find(item => item?.exists)?.jid || null;
+
+      if (!targetJid) {
+        await sendReply(
+          jid,
+          'Ce numéro n’est pas sur WhatsApp. Vérifie-le (exemple : Xadd 2290143420472).',
+          message
+        );
+        return true;
+      }
+    } catch (error) {
+      logger.warn({ err: error }, 'Vérification du numéro impossible, essai direct.');
+      targetJid = `${candidates[0]}@s.whatsapp.net`;
+    }
+
+    if (findGroupParticipant(metadata, targetJid)) {
+      await sendReply(jid, 'Cette personne est déjà dans le groupe.', message);
       return true;
     }
 
     try {
-      const result = await sock.groupParticipantsUpdate(
-        jid,
-        [`${number}@s.whatsapp.net`],
-        'add'
-      );
+      const result = await sock.groupParticipantsUpdate(jid, [targetJid], 'add');
+      const status = String(result?.[0]?.status || '');
 
-      const status = result?.[0]?.status;
-
-      if (String(status) === '200') {
-        await sendReply(jid, `✅ Demande d'ajout envoyée pour ${number}.`, message);
-      } else {
+      if (status === '200') {
+        await sendReply(jid, `✅ +${getNumber(targetJid)} a été ajouté au groupe.`, message);
+      } else if (status === '409') {
+        await sendReply(jid, 'Cette personne est déjà dans le groupe.', message);
+      } else if (status === '408') {
         await sendReply(
           jid,
-          `La demande a été traitée avec le statut ${status || 'inconnu'}. WhatsApp peut imposer une invitation selon les paramètres de confidentialité.`,
+          'Cette personne a quitté le groupe récemment : WhatsApp bloque un nouvel ajout pendant un moment.',
           message
         );
+      } else if (status === '403' || status === '401') {
+        try {
+          const code = await sock.groupInviteCode(jid);
+
+          await sock.sendMessage(targetJid, {
+            text:
+              `📩 𝗜𝗡𝗩𝗜𝗧𝗔𝗧𝗜𝗢𝗡\n\nTu es invité à rejoindre le groupe :\n` +
+              `https://chat.whatsapp.com/${code}\n\n${SIGNATURE}`
+          });
+
+          await sendReply(
+            jid,
+            `📩 +${getNumber(targetJid)} ne peut pas être ajouté directement (confidentialité). Une invitation lui a été envoyée en privé.`,
+            message
+          );
+        } catch (inviteError) {
+          logger.warn({ err: inviteError }, 'Envoi de l’invitation impossible.');
+          await sendReply(
+            jid,
+            'Ses paramètres de confidentialité empêchent l’ajout, et l’invitation n’a pas pu être envoyée. Partage-lui le lien du groupe manuellement.',
+            message
+          );
+        }
+      } else {
+        await sendReply(jid, `L’ajout n’a pas abouti (code WhatsApp ${status || 'inconnu'}).`, message);
       }
     } catch (error) {
       logger.warn({ err: error }, 'Échec de Xadd');
-
-      await sendReply(
-        jid,
-        'WhatsApp n’autorise pas directement cet ajout. Une invitation peut être nécessaire selon les paramètres de confidentialité du membre.',
-        message
-      );
+      await sendReply(jid, `Impossible d’ajouter ce numéro. Détail : ${error?.message || 'erreur inconnue'}.`, message);
     }
 
     return true;
   }
-
-  // ---------------- XANNONCE ----------------
 
   if (command === 'annonce') {
     const announcement = String(args || '').trim();
@@ -1417,7 +1573,6 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       return true;
     }
 
-    // Tag invisible : tous les membres sont alertés, le texte reste propre.
     const everyone = (metadata.participants || [])
       .map(item => item.id || item.jid)
       .filter(Boolean)
@@ -1426,8 +1581,7 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     await sock.sendMessage(
       jid,
       {
-        text:
-          `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n${announcement}\n\n${SIGNATURE}`,
+        text: `📢 𝗔𝗡𝗡𝗢𝗡𝗖𝗘 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟𝗟𝗘\n\n${announcement}\n\n${SIGNATURE}`,
         mentions: everyone
       },
       { quoted: message }
@@ -1436,29 +1590,20 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     return true;
   }
 
-  // ---------------- XCLEAR ----------------
-
   if (command === 'clear') {
     const quoted = getQuotedMessage(message);
 
     if (!quoted?.stanzaId) {
-      await sendReply(
-        jid,
-        'Réponds à un message envoyé par Sitri-Nel pour le supprimer.',
-        message
-      );
-
+      await sendReply(jid, 'Réponds à un message envoyé par Sitri-Nel pour le supprimer.', message);
       return true;
     }
 
-    // contextInfo n'a pas de champ fromMe : on compare l'auteur au bot.
     if (!isBotParticipant(quoted.participant)) {
       await sendReply(
         jid,
         'Pour des raisons de permissions WhatsApp, Xclear ne supprime ici que les messages envoyés par Sitri-Nel.',
         message
       );
-
       return true;
     }
 
@@ -1474,7 +1619,6 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       await sendReply(jid, '🧹 Message de Sitri-Nel supprimé.', message);
     } catch (error) {
       logger.error({ err: error }, 'Erreur Xclear');
-
       await sendReply(jid, 'Impossible de supprimer ce message.', message);
     }
 
@@ -1587,20 +1731,14 @@ async function dailyReward(jid) {
   }
 
   const user = await getUser(jid);
-
-  const remaining = Math.max(
-    0,
-    cooldown - (now - Number(user.last_daily))
-  );
+  const remaining = Math.max(0, cooldown - (now - Number(user.last_daily)));
 
   return {
     success: false,
     remaining: Math.ceil(remaining / 1000),
     message:
       '╭━━〔 ⏳ 𝗗𝗔𝗜𝗟𝗬 𝗟𝗢𝗖𝗞 〕━━╮\n\n' +
-      `Prochaine récompense dans :\n${formatDuration(
-        Math.ceil(remaining / 1000)
-      )}\n\n` +
+      `Prochaine récompense dans :\n${formatDuration(Math.ceil(remaining / 1000))}\n\n` +
       'La patience fait aussi partie du jeu.\n\n' +
       '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
       SIGNATURE
@@ -1728,8 +1866,7 @@ async function startQuiz(chatJid) {
     };
   }
 
-  const selected =
-    quizQuestions[Math.floor(Math.random() * quizQuestions.length)];
+  const selected = quizQuestions[Math.floor(Math.random() * quizQuestions.length)];
 
   await db.execute({
     sql: `INSERT INTO active_quizzes
@@ -1795,7 +1932,6 @@ async function answerQuiz(chatJid, userJid, answer) {
     return { success: false, message: '❌ Mauvaise réponse. Tu peux réessayer.' };
   }
 
-  // Suppression conditionnelle : un seul gagnant possible.
   const claimed = await db.execute({
     sql: `DELETE FROM active_quizzes
           WHERE group_jid = ? AND expires_at > ?
@@ -1819,14 +1955,14 @@ async function answerQuiz(chatJid, userJid, answer) {
       '       +20 XP ⭐\n\n' +
       'Bonne réponse ! Tu remportes le quiz.\n\n' +
       `Ton solde : ${Number(user.coins)} XCoins\n` +
-      `Ton XP : ${Number(user.xp)}\n\n` +
+      `Ton XP : ${Number(user.xp)}\n\n' +
       '╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n' +
       SIGNATURE
   };
 }
 
 // ------------------------------------------------------------
-// 23. IMAGES : RECHERCHE ET GÉNÉRATION
+// 23. IMAGES : RECHERCHE ANILIST (SANS CLÉ API) ET GÉNÉRATION
 // ------------------------------------------------------------
 
 async function downloadImageBuffer(url) {
@@ -1861,100 +1997,202 @@ async function downloadImageBuffer(url) {
   return { buffer, contentType };
 }
 
-async function searchImage(jid, message, query) {
-  if (!CONFIG.serpApiKey) {
-    await sendReply(
-      jid,
-      moduleMessage(
-        '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
-        "Le service Ximg n'est pas encore relié à son fournisseur externe."
-      ),
-      message
-    );
+const MAX_IMAGES_PER_REQUEST = 5;
 
-    return false;
+function parseImageRequest(raw = '') {
+  const text = String(raw).trim();
+  const match = text.match(/^([\s\S]*?)[\s-]+(\d{1,2})$/);
+
+  if (!match || !match[1].trim()) {
+    return { query: text, count: 1 };
   }
 
-  if (!query || !query.trim()) {
-    await sendReply(jid, 'Utilisation : Ximg Naruto, paysage, animal...', message);
+  const count = Math.min(
+    Math.max(parseInt(match[2], 10) || 1, 1),
+    MAX_IMAGES_PER_REQUEST
+  );
+
+  return { query: match[1].trim(), count };
+}
+
+function uniqueUrls(list) {
+  return [...new Set(list.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url)))];
+}
+
+// AniList : recherche directe de personnages d'anime/manga SANS clé API.
+async function findAniListCharacterImages(query, wanted = 1) {
+  const perPage = Math.min(Math.max(wanted * 2, 5), 10);
+
+  const response = await axios.post(
+    'https://graphql.anilist.co',
+    {
+      query: `query ($search: String, $perPage: Int) {
+        Page(page: 1, perPage: $perPage) {
+          characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) {
+            name { full }
+            image { large }
+            media(perPage: 1, sort: POPULARITY_DESC) {
+              nodes {
+                title { romaji english }
+              }
+            }
+          }
+        }
+      }`,
+      variables: { search: query, perPage }
+    },
+    {
+      timeout: 15000,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      }
+    }
+  );
+
+  const characters = response.data?.data?.Page?.characters || [];
+
+  return characters
+    .map(item => {
+      const charName = item.name?.full || query;
+      const animeNode = item.media?.nodes?.[0]?.title;
+      const animeTitle = animeNode?.english || animeNode?.romaji || '';
+      const label = animeTitle ? `${charName} (${animeTitle})` : charName;
+      return { label, url: item.image?.large };
+    })
+    .filter(item => /^https?:\/\//i.test(String(item.url)));
+}
+
+async function findPixabayImages(query, wanted) {
+  if (!CONFIG.pixabayKey) return null;
+
+  const response = await axios.get('https://pixabay.com/api/', {
+    params: {
+      key: CONFIG.pixabayKey,
+      q: query.slice(0, 100),
+      image_type: 'photo',
+      safe_search: 'true',
+      per_page: Math.max(wanted * 2, 3)
+    },
+    timeout: 15000
+  });
+
+  const urls = (response.data?.hits || []).map(
+    hit => hit.largeImageURL || hit.webformatURL
+  );
+
+  return uniqueUrls(urls).map(url => ({ label: query, url }));
+}
+
+async function findSerpApiImages(query) {
+  if (!CONFIG.serpApiKey) return null;
+
+  const response = await axios.get('https://serpapi.com/search.json', {
+    params: {
+      engine: 'google_images',
+      q: query,
+      api_key: CONFIG.serpApiKey,
+      safe: 'active',
+      ijn: '0'
+    },
+    timeout: 30000
+  });
+
+  const urls = (response.data?.images_results || [])
+    .slice(0, 10)
+    .map(item => item.original || item.thumbnail);
+
+  return uniqueUrls(urls).map(url => ({ label: query, url }));
+}
+
+async function collectImageCandidates(query, wanted) {
+  const providers = [
+    ['AniList', () => findAniListCharacterImages(query, wanted)],
+    ['Pixabay', () => findPixabayImages(query, wanted)],
+    ['SerpApi', () => findSerpApiImages(query)]
+  ];
+
+  for (const [name, run] of providers) {
+    try {
+      const result = await run();
+      if (result?.length) return result;
+    } catch (error) {
+      logger.warn({ err: error }, `Fournisseur d'images ${name} indisponible.`);
+    }
+  }
+
+  return null;
+}
+
+async function searchImage(jid, message, rawQuery) {
+  const { query, count } = parseImageRequest(rawQuery);
+
+  if (!query) {
+    await sendReply(
+      jid,
+      'Utilisation :\n• Ximg naruto\n• Ximg gojo 3 (jusqu’à 5 images sur AniList)',
+      message
+    );
     return false;
   }
 
   await sendReply(jid, '🔎 Recherche de visuels en cours...', message);
 
-  try {
-    const response = await axios.get('https://serpapi.com/search.json', {
-      params: {
-        engine: 'google_images',
-        q: query.trim(),
-        api_key: CONFIG.serpApiKey,
-        safe: 'active',
-        ijn: '0'
-      },
-      timeout: 30000
-    });
+  const found = await collectImageCandidates(query, count);
 
-    const results = response.data?.images_results || [];
+  if (!found) {
+    await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
+    return false;
+  }
 
-    if (!results.length) {
-      await sendReply(jid, 'Aucune image trouvée pour cette recherche.', message);
-      return false;
+  let sent = 0;
+
+  for (const item of found) {
+    if (sent >= count) break;
+
+    try {
+      const downloaded = await downloadImageBuffer(item.url);
+      const counter = count > 1 ? ` (${sent + 1}/${count})` : '';
+
+      await sock.sendMessage(
+        jid,
+        {
+          image: downloaded.buffer,
+          mimetype: downloaded.contentType,
+          caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${item.label}${counter}\n\n${SIGNATURE}`
+        },
+        { quoted: message }
+      );
+
+      sent += 1;
+    } catch (error) {
+      logger.warn({ err: error }, 'Image trouvée mais non téléchargeable.');
     }
+  }
 
-    for (const item of results.slice(0, 5)) {
-      const imageUrl = item.original || item.thumbnail;
-
-      if (!imageUrl) continue;
-
-      try {
-        const downloaded = await downloadImageBuffer(imageUrl);
-
-        await sock.sendMessage(
-          jid,
-          {
-            image: downloaded.buffer,
-            mimetype: downloaded.contentType,
-            caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${query.trim()}\n\n${SIGNATURE}`
-          },
-          { quoted: message }
-        );
-
-        return true;
-      } catch (error) {
-        logger.warn({ err: error }, 'Résultat SerpApi non téléchargeable.');
-      }
-    }
-
+  if (!sent) {
     await sendReply(
       jid,
       'Les résultats ont été trouvés, mais aucune image n’a pu être téléchargée.',
       message
     );
-
-    return false;
-  } catch (error) {
-    logger.error({ err: error }, 'Erreur de recherche SerpApi.');
-
-    await sendReply(
-      jid,
-      'La recherche d’images a échoué. Vérifie SERPAPI_KEY et réessaie.',
-      message
-    );
-
     return false;
   }
+
+  if (sent < count) {
+    await sendReply(jid, `Seulement ${sent} image(s) trouvée(s) sur ${count} demandée(s).`, message);
+  }
+
+  return true;
 }
 
-// Explique clairement l'erreur renvoyée par Cloudflare.
 function describeCloudflareError(error) {
   const status = error?.response?.status;
-
   let apiMessage = '';
 
   try {
     const raw = error?.response?.data;
     const text = raw ? Buffer.from(raw).toString('utf8') : '';
-
     apiMessage = JSON.parse(text)?.errors?.[0]?.message || '';
   } catch {
     apiMessage = '';
@@ -1984,7 +2222,6 @@ async function generateImage(jid, message, prompt) {
       '⚠️ La génération nécessite CLOUDFLARE_API_TOKEN et CLOUDFLARE_ACCOUNT_ID dans Railway.',
       message
     );
-
     return false;
   }
 
@@ -1994,15 +2231,10 @@ async function generateImage(jid, message, prompt) {
       'Utilisation : Ximg create un dragon futuriste dans une ville cyberpunk',
       message
     );
-
     return false;
   }
 
-  await sendReply(
-    jid,
-    '🎨 𝗖𝗥𝗘́𝗔𝗧𝗜𝗢𝗡 𝗩𝗜𝗦𝗨𝗘𝗟𝗟𝗘\nJe prépare ton image...',
-    message
-  );
+  await sendReply(jid, '🎨 𝗖𝗥𝗘́𝗔𝗧𝗜𝗢𝗡 𝗩𝗜𝗦𝗨𝗘𝗟𝗟𝗘\nJe prépare ton image...', message);
 
   try {
     const endpoint =
@@ -2029,22 +2261,17 @@ async function generateImage(jid, message, prompt) {
     let mimetype = 'image/png';
 
     if (contentType.startsWith('image/')) {
-      // Certains modèles renvoient directement l'image.
       buffer = Buffer.from(response.data);
       mimetype = contentType.split(';')[0];
     } else {
-      // Flux renvoie du JSON avec l'image encodée en base64.
       const json = JSON.parse(Buffer.from(response.data).toString('utf8'));
       const base64 = json?.result?.image || json?.image;
 
       if (!base64) {
-        throw new Error(
-          `Cloudflare : ${json?.errors?.[0]?.message || 'réponse sans image'}`
-        );
+        throw new Error(`Cloudflare : ${json?.errors?.[0]?.message || 'réponse sans image'}`);
       }
 
       buffer = Buffer.from(base64, 'base64');
-
       if (buffer[0] === 0xff && buffer[1] === 0xd8) mimetype = 'image/jpeg';
     }
 
@@ -2065,18 +2292,8 @@ async function generateImage(jid, message, prompt) {
     return true;
   } catch (error) {
     const detail = describeCloudflareError(error);
-
-    logger.error(
-      { status: error?.response?.status, detail, error: error?.message },
-      'Erreur de génération Cloudflare.'
-    );
-
-    await sendReply(
-      jid,
-      `⚠️ La génération a échoué.\n${detail || error?.message || ''}`,
-      message
-    );
-
+    logger.error({ status: error?.response?.status, detail, error: error?.message }, 'Erreur de génération Cloudflare.');
+    await sendReply(jid, `⚠️ La génération a échoué.\n${detail || error?.message || ''}`, message);
     return false;
   }
 }
@@ -2099,8 +2316,7 @@ async function multimediaNotIntegrated(jid, message, command) {
 // ------------------------------------------------------------
 
 function parseCommand(text = '') {
-  const match = String(text).trim().match(/^x([a-z]+)(?:\s+([\s\S]*))?$/i);
-
+  const match = String(text).trim().match(/^x([a-z]+)(?:[\s-]+([\s\S]*))?$/i);
   if (!match) return null;
 
   return {
@@ -2140,7 +2356,7 @@ function getUptimeText() {
 ◈ 𝗖𝗢𝗡𝗡𝗘𝗫𝗜𝗢𝗡
 ├ WhatsApp : ${sock ? 'Initialisé' : 'Indisponible'}
 ├ Base de données : ${USE_TURSO ? 'Turso' : 'SQLite local'}
-└ IA : ${CONFIG.geminiKey ? 'Gemini' : 'Non configurée'}
+└ IA : ${CONFIG.groqKey ? 'Groq (Llama 3)' : CONFIG.geminiKey ? 'Gemini' : 'Non configurée'}
 
 ${SIGNATURE}
 `.trim();
@@ -2153,25 +2369,13 @@ ${SIGNATURE}
 async function handleEconomyCommand(jid, message, sender, command) {
   if (command === 'daily') {
     const result = await dailyReward(sender);
-
-    await sendReply(
-      jid,
-      getResultText(result, '🎁 Récompense quotidienne indisponible.'),
-      message
-    );
-
+    await sendReply(jid, getResultText(result, '🎁 Récompense quotidienne indisponible.'), message);
     return true;
   }
 
   if (command === 'coins') {
     const user = await getUser(sender);
-
-    await sendReply(
-      jid,
-      `💠 𝗫𝗖𝗢𝗜𝗡𝗦\n\nSolde : ${Number(user?.coins || 0)} XCoins\n\n${SIGNATURE}`,
-      message
-    );
-
+    await sendReply(jid, `💠 𝗫𝗖𝗢𝗜𝗡𝗦\n\nSolde : ${Number(user?.coins || 0)} XCoins\n\n${SIGNATURE}`, message);
     return true;
   }
 
@@ -2187,27 +2391,18 @@ async function handleEconomyCommand(jid, message, sender, command) {
       }\n\n${SIGNATURE}`,
       message
     );
-
     return true;
   }
 
   if (command === 'rank') {
     const result = await getRankText(sender);
-
-    await sendReply(
-      jid,
-      getResultText(result, '🏆 Classement momentanément indisponible.'),
-      message
-    );
-
+    await sendReply(jid, getResultText(result, '🏆 Classement momentanément indisponible.'), message);
     return true;
   }
 
   if (command === 'profil') {
     const profile = await getProfileText(sender, getDisplayName(message, sender));
-
     await sendReply(jid, profile, message);
-
     return true;
   }
 
@@ -2217,13 +2412,7 @@ async function handleEconomyCommand(jid, message, sender, command) {
 async function handleQuizCommand(jid, message, sender, command, args) {
   if (command === 'quiz') {
     const result = await startQuiz(jid);
-
-    await sendReply(
-      jid,
-      getResultText(result, '🧠 Réponds avec Xreponse suivi de ta réponse.'),
-      message
-    );
-
+    await sendReply(jid, getResultText(result, '🧠 Réponds avec Xreponse suivi de ta réponse.'), message);
     return true;
   }
 
@@ -2234,16 +2423,13 @@ async function handleQuizCommand(jid, message, sender, command, args) {
     }
 
     const result = await answerQuiz(jid, sender, args);
-
     await sendReply(jid, getResultText(result, 'La réponse a été traitée.'), message);
-
     return true;
   }
 
   return false;
 }
 
-// Phrase d'explication pour un fournisseur IA en échec.
 function explainAIFailure(error) {
   let status = error?.response?.status;
 
@@ -2252,7 +2438,6 @@ function explainAIFailure(error) {
     (typeof apiError === 'string' ? apiError : apiError?.message) || ''
   );
 
-  // Gemini signale une clé invalide par un code 400.
   if (/api key/i.test(apiMessage)) status = 401;
 
   const provider = error?.provider || 'IA';
@@ -2286,20 +2471,18 @@ async function handleAICommand(jid, message, command, args) {
       `✧ Que souhaites-tu me demander ?\n\nExemple : X${command} Explique-moi cette notion.\n\n${SIGNATURE}`,
       message
     );
-
     return true;
   }
 
-  if (!CONFIG.geminiKey) {
+  if (!CONFIG.groqKey && !CONFIG.geminiKey) {
     await sendReply(
       jid,
       moduleMessage(
         '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
-        'Le service IA n’est pas encore relié à son fournisseur externe.'
+        'Ajoute GROQ_API_KEY dans les variables Railway pour activer le cerveau du bot.'
       ),
       message
     );
-
     return true;
   }
 
@@ -2313,7 +2496,6 @@ async function handleAICommand(jid, message, command, args) {
     prompt = `Réponds comme un assistant informatif sur les lois, la sécurité et les démarches générales. Les règles dépendent du pays. Distingue les faits des suppositions.\n\n${args}`;
   }
 
-  // Indicateur « en train d'écrire ».
   try {
     await sock?.sendPresenceUpdate('composing', jid);
   } catch {
@@ -2347,7 +2529,6 @@ async function handleAICommand(jid, message, command, args) {
       ),
       message
     );
-
     return true;
   }
 
@@ -2366,10 +2547,9 @@ async function handleImageCommand(jid, message, args) {
   if (!args) {
     await sendReply(
       jid,
-      'Utilisation :\nXimg Naruto\n\nPour créer une image :\nXimg create un dragon futuriste bleu',
+      'Utilisation :\n• Ximg naruto\n• Ximg gojo 3 (jusqu’à 5 images sur AniList)\n\nPour créer une image :\n• Ximg create un dragon futuriste bleu',
       message
     );
-
     return true;
   }
 
@@ -2382,12 +2562,10 @@ async function handleImageCommand(jid, message, args) {
     }
 
     await generateImage(jid, message, prompt);
-
     return true;
   }
 
   await searchImage(jid, message, args);
-
   return true;
 }
 
@@ -2406,8 +2584,6 @@ async function handleMediaCommand(jid, message, command, args) {
 // 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
-// Liste fermée des commandes : toute autre commande est ignorée,
-// ce qui empêche tout mélange entre les commandes.
 const KNOWN_COMMANDS = new Set([
   'chat', 'ai', 'ask', 'anime', 'police', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
@@ -2417,7 +2593,6 @@ const KNOWN_COMMANDS = new Set([
   'off', 'restart', 'upt', 'menu', 'models'
 ]);
 
-// Xban fonctionne comme Xkick.
 const COMMAND_ALIASES = { ban: 'kick' };
 
 async function processCommand(message) {
@@ -2426,11 +2601,9 @@ async function processCommand(message) {
   if (!jid || jid === 'status@broadcast') return;
 
   const text = extractText(message);
-
   if (!text) return;
 
   const parsed = parseCommand(text);
-
   if (!parsed) return;
 
   const { args } = parsed;
@@ -2447,7 +2620,6 @@ async function processCommand(message) {
   );
 
   const sender = getMessageSender(message);
-
   if (!sender) return;
 
   const ownerCommand = Boolean(message.key?.fromMe) && isOwnerMessage(message);
@@ -2464,14 +2636,11 @@ async function processCommand(message) {
     return;
   }
 
-  // Commandes de groupe (la commande est normalisée : xkick → kick).
   if (isGroupJid(jid)) {
     const handled = await handleGroupCommand(jid, message, sender, command, args);
-
     if (handled) return;
   }
 
-  // Commandes propriétaire
   if (command === 'off' || command === 'restart') {
     if (!ownerCommand) {
       await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
@@ -2488,7 +2657,6 @@ async function processCommand(message) {
 
     isShuttingDown = true;
 
-    // exit(1) pour « restart » : Railway relance le service.
     setTimeout(async () => {
       await releaseInstanceLock();
       process.exit(command === 'off' ? 0 : 1);
@@ -2497,7 +2665,6 @@ async function processCommand(message) {
     return;
   }
 
-  // Mode Only Admin pour les commandes ordinaires
   if (isGroupJid(jid) && !['upt', 'menu', 'info'].includes(command)) {
     const allowed = await canUseOrdinaryGroupCommand(jid, sender);
 
@@ -2507,31 +2674,27 @@ async function processCommand(message) {
         '⛔ Le mode Only Admin est activé. Cette commande est réservée aux administrateurs du groupe et au propriétaire.',
         message
       );
-
       return;
     }
   }
 
-  // Xmodels : modèles Gemini réellement disponibles (propriétaire).
   if (command === 'models') {
     if (!ownerCommand) {
       await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
       return;
     }
 
-    if (!CONFIG.geminiKey) {
-      await sendReply(jid, 'GEMINI_API_KEY est absent des variables Railway.', message);
-      return;
-    }
+    const activeAiInfo = CONFIG.groqKey
+      ? `Groq actif : ${CONFIG.groqModel}`
+      : 'Groq non configuré';
 
-    const ids = await listGeminiModels();
+    const ids = CONFIG.geminiKey ? await listGeminiModels() : [];
 
     await sendReply(
       jid,
-      `🔎 Modèles Gemini (${ids.length})\n\nConfiguré : ${CONFIG.geminiModel}\n\n${ids.slice(0, 20).join('\n')}`.trim(),
+      `🔎 Configuration IA\n\n${activeAiInfo}\n\nModèles Gemini (${ids.length}) :\n${ids.slice(0, 15).join('\n')}`.trim(),
       message
     );
-
     return;
   }
 
@@ -2544,14 +2707,11 @@ async function processCommand(message) {
   if (await handleQuizCommand(jid, message, sender, command, args)) return;
   if (await handleAICommand(jid, message, command, args)) return;
   if (await handleMediaCommand(jid, message, command, args)) return;
-
-  // Commandes inconnues : silence.
 }
 
 async function handleIncomingMessage(message) {
   if (!message?.key?.id) return;
 
-  // Ignore les anciens messages (synchronisation / reconnexion).
   const timestamp = Number(message.messageTimestamp || 0) * 1000;
 
   if (timestamp && Date.now() - timestamp > CONFIG.maxMessageAge) {
@@ -2559,14 +2719,12 @@ async function handleIncomingMessage(message) {
       { ageSeconds: Math.round((Date.now() - timestamp) / 1000) },
       'Message ignoré : trop ancien'
     );
-
     return;
   }
 
   if (hasProcessedMessage(message)) return;
 
   const requestId = message.key.id;
-
   if (activeRequests.has(requestId)) return;
 
   activeRequests.add(requestId);
@@ -2589,10 +2747,7 @@ async function handleIncomingMessage(message) {
           message
         );
       } catch (sendError) {
-        logger.error(
-          { error: sendError?.message },
-          'Impossible d’envoyer le message d’erreur.'
-        );
+        logger.error({ error: sendError?.message }, 'Impossible d’envoyer le message d’erreur.');
       }
     }
   } finally {
@@ -2603,8 +2758,6 @@ async function handleIncomingMessage(message) {
 // ------------------------------------------------------------
 // 26 bis. VERROU : UNE SEULE INSTANCE CONNECTÉE À LA FOIS
 // ------------------------------------------------------------
-// Deux copies du bot avec la même session se déconnectent mutuellement
-// et finissent par perdre la session (nouveaux jumelages sans fin).
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -2637,10 +2790,7 @@ async function acquireInstanceLock() {
       return;
     }
 
-    logger.warn(
-      'Une autre instance du bot est déjà active (verrou). Attente avant de se connecter...'
-    );
-
+    logger.warn('Une autre instance du bot est déjà active (verrou). Attente avant de se connecter...');
     await sleep(5000);
   }
 }
@@ -2694,12 +2844,10 @@ function stopPairingTimer() {
     pairingTimer = null;
   }
 
-  // Un code lié à une connexion fermée n'est plus valable.
   pairingCodeText = '';
   pairingCodeAt = 0;
 }
 
-// Affiche le code bien en évidence dans les logs.
 function showPairingCode(code, ageMs) {
   console.log('\n');
   console.log('╔══════════════════════════════════╗');
@@ -2714,13 +2862,9 @@ function showPairingCode(code, ageMs) {
   );
 }
 
-// Demande le code de jumelage une seule fois, puis le réaffiche tel quel
-// (même code, sans le changer pendant que tu le tapes).
-// Un nouveau code n'est demandé qu'après PAIRING_REFRESH_MS.
 async function requestPairingCode(socket) {
   if (!socket || socket !== sock) return;
 
-  // Déjà jumelé : plus besoin de code.
   if (socket.authState?.creds?.registered || socket.authState?.creds?.me) {
     stopPairingTimer();
     return;
@@ -2754,10 +2898,8 @@ async function requestPairingCode(socket) {
 
     showPairingCode(pairingCodeText, 0);
   } catch (error) {
-    logger.error(
-      { error: error?.message || String(error) },
-      'Échec de la génération du pairing code.'
-    );
+    pairingRequested = false;
+    logger.error({ error: error?.message || String(error) }, 'Échec de la génération du pairing code.');
   }
 }
 
@@ -2802,7 +2944,6 @@ async function startBot() {
       ? await useDatabaseAuthState()
       : await useMultiFileAuthState(SESSION_DIR);
 
-    // Version WhatsApp Web la plus récente (évite les rejets 401/405).
     let version;
 
     try {
@@ -2840,7 +2981,6 @@ async function startBot() {
       generateHighQualityLinkPreview: false
     });
 
-    // Toutes les réponses (texte et légendes) passent en gras Unicode.
     const rawSend = socket.sendMessage.bind(socket);
 
     socket.sendMessage = (jid, content, options) => {
@@ -2866,16 +3006,22 @@ async function startBot() {
       }
     });
 
+    const triggerPairingFlow = async () => {
+      if (state.creds.registered || pairingTimer || pairingRequested) return;
+      pairingRequested = true;
+      await sleep(2500);
+      if (socket !== sock || state.creds.registered) return;
+      await requestPairingCode(socket);
+      pairingTimer = setInterval(() => requestPairingCode(socket), 20000);
+    };
+
     socket.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update;
 
-      // L'événement QR signale que la connexion est prête
-      // pour demander le code de jumelage.
-      if (qr && !state.creds.registered && !pairingTimer) {
-        await requestPairingCode(socket);
-
-        // Réaffiche le même code toutes les 20 s : il est toujours en bas des logs.
-        pairingTimer = setInterval(() => requestPairingCode(socket), 20000);
+      if ((qr || connection === 'connecting') && !state.creds.registered && !pairingTimer) {
+        triggerPairingFlow().catch(err =>
+          logger.error({ error: err?.message }, 'Erreur lors du lancement du pairing code.')
+        );
       }
 
       if (connection === 'connecting') {
@@ -2908,14 +3054,11 @@ async function startBot() {
         logger.warn(`Connexion fermée. Code : ${statusCode || 'inconnu'}`);
 
         if (sock === socket) sock = null;
-
         if (isShuttingDown) return;
 
-        // Session refusée par WhatsApp (401).
         if (statusCode === DisconnectReason.loggedOut) {
           loggedOutCount++;
 
-          // 1re fois : on réessaie avec la même session avant de tout effacer.
           if (loggedOutCount < 2) {
             logger.warn('Déconnexion 401 : nouvel essai avec la même session avant tout nettoyage.');
             scheduleReconnect(15000);
@@ -2925,17 +3068,13 @@ async function startBot() {
           connectionStatus = 'Session invalide : nouveau jumelage';
           loggedOutCount = 0;
 
-          logger.error(
-            'Session WhatsApp invalide (401 répété). Nettoyage et nouveau jumelage.'
-          );
+          logger.error('Session WhatsApp invalide (401 répété). Nettoyage et nouveau jumelage.');
 
           await clearAuthState();
-
           scheduleReconnect(10000);
           return;
         }
 
-        // Session ouverte ailleurs : attente plus longue.
         if (statusCode === DisconnectReason.connectionReplaced) {
           logger.warn('Session remplacée par une autre connexion.');
           scheduleReconnect(30000);
@@ -3009,7 +3148,6 @@ async function shutdown(signal) {
   connectionStatus = 'Arrêté';
 
   await releaseInstanceLock();
-
   process.exit(0);
 }
 
@@ -3017,10 +3155,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('unhandledRejection', reason => {
-  logger.error(
-    { error: reason?.message || String(reason) },
-    'Promesse rejetée non gérée.'
-  );
+  logger.error({ error: reason?.message || String(reason) }, 'Promesse rejetée non gérée.');
 });
 
 process.on('uncaughtException', error => {
@@ -3031,7 +3166,6 @@ process.on('uncaughtException', error => {
 // 29. LANCEMENT
 // ------------------------------------------------------------
 
-// Démarrage : base de données, verrou d'instance, puis connexion WhatsApp.
 const BOOT_DELAY_MS = Number(process.env.BOOT_DELAY_MS || 3000);
 
 async function boot() {
@@ -3045,7 +3179,6 @@ async function boot() {
         { error: error?.message || String(error) },
         'Démarrage : base de données indisponible, nouvel essai dans 5 secondes.'
       );
-
       await sleep(5000);
     }
   }
@@ -3055,11 +3188,7 @@ async function boot() {
   try {
     await startBot();
   } catch (error) {
-    logger.error(
-      { error: error?.message || String(error) },
-      'Impossible de démarrer Sitri-Nel.'
-    );
-
+    logger.error({ error: error?.message || String(error) }, 'Impossible de démarrer Sitri-Nel.');
     scheduleReconnect();
   }
 }

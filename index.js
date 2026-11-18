@@ -2252,7 +2252,6 @@ async function downloadImageBuffer(url) {
 }
 
 const MAX_IMAGES_PER_REQUEST = 5;
-const MIN_CHARACTER_FAVOURITES = 5;
 
 function parseImageRequest(raw = '') {
   const text = String(raw).trim();
@@ -2274,32 +2273,86 @@ function uniqueUrls(list) {
   return [...new Set(list.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url)))];
 }
 
-const ANILIST_SEARCH_QUERY = `
+const ANILIST_DIRECT_QUERY = `
 query ($search: String, $perPage: Int) {
+  Character(search: $search) {
+    name { full }
+    image { large }
+    media(perPage: 1, sort: POPULARITY_DESC) {
+      nodes { title { english romaji } }
+    }
+  }
   Page(page: 1, perPage: $perPage) {
     characters(search: $search, sort: [SEARCH_MATCH, FAVOURITES_DESC]) {
       name { full }
       image { large }
-      favourites
-      media(perPage: 3, sort: POPULARITY_DESC) {
-        nodes { title { romaji english } }
+      media(perPage: 1, sort: POPULARITY_DESC) {
+        nodes { title { english romaji } }
       }
     }
     media(search: $search, type: ANIME, sort: [SEARCH_MATCH, POPULARITY_DESC]) {
-      title { romaji english }
+      title { english romaji }
       coverImage { extraLarge large }
       bannerImage
-      popularity
     }
   }
 }`;
+
+function normalizeSearchStr(str = '') {
+  return String(str)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function levenshtein(a, b) {
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i]);
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      matrix[i][j] =
+        b[i - 1] === a[j - 1]
+          ? matrix[i - 1][j - 1]
+          : Math.min(
+              matrix[i - 1][j - 1] + 1,
+              matrix[i][j - 1] + 1,
+              matrix[i - 1][j] + 1
+            );
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function isFuzzyMatch(query, target) {
+  const q = normalizeSearchStr(query);
+  const t = normalizeSearchStr(target);
+  if (!q || !t) return false;
+  if (t.includes(q) || q.includes(t)) return true;
+
+  const qWords = q.split(' ').filter(w => w.length >= 3);
+  const tWords = t.split(' ').filter(w => w.length >= 3);
+  if (!qWords.length || !tWords.length) return false;
+
+  return qWords.every(qw =>
+    tWords.some(tw => {
+      if (tw.includes(qw) || qw.includes(tw)) return true;
+      const maxDist = qw.length >= 6 ? 2 : 1;
+      return levenshtein(qw, tw) <= maxDist;
+    })
+  );
+}
 
 async function queryAniListAll(searchTerm, perPage = 8) {
   try {
     const response = await axios.post(
       'https://graphql.anilist.co',
       {
-        query: ANILIST_SEARCH_QUERY,
+        query: ANILIST_DIRECT_QUERY,
         variables: { search: searchTerm, perPage }
       },
       {
@@ -2310,9 +2363,12 @@ async function queryAniListAll(searchTerm, perPage = 8) {
         }
       }
     );
-    return response.data?.data?.Page || { characters: [], media: [] };
+    return {
+      character: response.data?.data?.Character || null,
+      page: response.data?.data?.Page || { characters: [], media: [] }
+    };
   } catch {
-    return { characters: [], media: [] };
+    return { character: null, page: { characters: [], media: [] } };
   }
 }
 
@@ -2323,67 +2379,95 @@ async function findAniListImages(query) {
 
   if (!clean) return [];
 
-  const page = await queryAniListAll(clean, 8);
+  const { character: directChar, page } = await queryAniListAll(clean, 8);
   const results = [];
-  const cleanLower = clean.toLowerCase();
+  const seenUrls = new Set();
 
-  for (const m of page.media || []) {
-    if (Number(m.popularity || 0) < 500) continue;
-    const title = m.title?.english || m.title?.romaji || clean;
-    const titleLower = title.toLowerCase();
-    const matchesQuery =
-      titleLower.includes(cleanLower) ||
-      cleanLower.split(/\s+/).some(w => w.length > 2 && titleLower.includes(w));
-    if (!matchesQuery) continue;
+  const pushUnique = item => {
+    if (!item?.url || !/^https?:\/\//i.test(String(item.url))) return;
+    if (seenUrls.has(item.url)) return;
+    seenUrls.add(item.url);
+    results.push(item);
+  };
 
-    if (m.coverImage?.extraLarge || m.coverImage?.large) {
-      results.push({ label: title, url: m.coverImage.extraLarge || m.coverImage.large });
-    }
-    if (m.bannerImage) {
-      results.push({ label: `${title} (Bannière)`, url: m.bannerImage });
+  // 1. Résultat direct AniList (gère très bien les fautes de frappe comme "rudo surebec" -> "Rudo Surebrec")
+  if (directChar?.image?.large && directChar?.name?.full) {
+    const animeNode = directChar.media?.nodes?.[0]?.title;
+    const verse = animeNode?.english || animeNode?.romaji || '';
+    const isRelevant =
+      isFuzzyMatch(clean, directChar.name.full) ||
+      (verse && isFuzzyMatch(clean, `${directChar.name.full} ${verse}`));
+
+    if (isRelevant) {
+      pushUnique({
+        label: directChar.name.full,
+        verse,
+        url: directChar.image.large,
+        isAniList: true
+      });
     }
   }
 
+  // 2. Liste des personnages correspondants
   let characters = page.characters || [];
   const words = clean.split(/\s+/);
 
   if (!characters.length && words.length > 1) {
     const firstWord = words[0];
-    const animeHint = words.slice(1).join(' ').toLowerCase();
-    const fallbackPage = await queryAniListAll(firstWord, 15);
-    const fallbackChars = fallbackPage.characters || [];
+    const animeHint = words.slice(1).join(' ');
+    const fallback = await queryAniListAll(firstWord, 12);
+    const fallbackChars = fallback.page?.characters || [];
 
     const matchedWithAnime = fallbackChars.filter(item => {
       const titles = (item.media?.nodes || [])
         .flatMap(n => [n?.title?.english, n?.title?.romaji])
-        .filter(Boolean)
-        .map(t => t.toLowerCase());
-      return titles.some(
-        t => t.includes(animeHint) || animeHint.split(/\s+/).some(w => w.length > 2 && t.includes(w))
-      );
+        .filter(Boolean);
+      return titles.some(t => isFuzzyMatch(animeHint, t));
     });
 
     characters = matchedWithAnime.length ? matchedWithAnime : fallbackChars;
   }
 
   for (const item of characters) {
-    if (Number(item.favourites || 0) < MIN_CHARACTER_FAVOURITES) continue;
-    const charName = item.name?.full || clean;
+    const charName = item.name?.full || '';
     const animeNode = item.media?.nodes?.[0]?.title;
-    const animeTitle = animeNode?.english || animeNode?.romaji || '';
-    const fullCheck = `${charName} ${animeTitle}`.toLowerCase();
-    const matchesQuery =
-      fullCheck.includes(cleanLower) ||
-      cleanLower.split(/\s+/).some(w => w.length > 2 && fullCheck.includes(w));
-    if (!matchesQuery) continue;
+    const verse = animeNode?.english || animeNode?.romaji || '';
+    if (!charName || !item.image?.large) continue;
 
-    const label = animeTitle ? `${charName} (${animeTitle})` : charName;
-    if (item.image?.large) {
-      results.push({ label, url: item.image.large });
+    if (isFuzzyMatch(clean, charName) || (verse && isFuzzyMatch(clean, `${charName} ${verse}`))) {
+      pushUnique({
+        label: charName,
+        verse,
+        url: item.image.large,
+        isAniList: true
+      });
     }
   }
 
-  return results.filter(item => /^https?:\/\//i.test(String(item.url)));
+  // 3. Animes correspondants (si la recherche porte sur un titre d'animé plutôt qu'un personnage)
+  for (const m of page.media || []) {
+    const title = m.title?.english || m.title?.romaji || '';
+    if (!title || !isFuzzyMatch(clean, title)) continue;
+
+    if (m.coverImage?.extraLarge || m.coverImage?.large) {
+      pushUnique({
+        label: title,
+        verse: title,
+        url: m.coverImage.extraLarge || m.coverImage.large,
+        isAniList: true
+      });
+    }
+    if (m.bannerImage) {
+      pushUnique({
+        label: `${title} (Bannière)`,
+        verse: title,
+        url: m.bannerImage,
+        isAniList: true
+      });
+    }
+  }
+
+  return results;
 }
 
 async function findJikanImages(query) {
@@ -2396,30 +2480,34 @@ async function findJikanImages(query) {
   const results = [];
 
   try {
-    const animeRes = await axios.get('https://api.jikan.moe/v4/anime', {
-      params: { q: clean, limit: 3 },
-      timeout: 12000
-    });
-
-    for (const item of animeRes.data?.data || []) {
-      const title = item.title_english || item.title || clean;
-      const img = item.images?.jpg?.large_image_url || item.images?.webp?.large_image_url;
-      if (img) results.push({ label: title, url: img });
-    }
-  } catch {
-    // Continuer vers la recherche personnage Jikan
-  }
-
-  try {
     const charRes = await axios.get('https://api.jikan.moe/v4/characters', {
       params: { q: clean, limit: 3, order_by: 'favorites', sort: 'desc' },
       timeout: 12000
     });
 
     for (const item of charRes.data?.data || []) {
-      const name = item.name || clean;
+      const name = item.name || '';
       const img = item.images?.jpg?.image_url || item.images?.webp?.image_url;
-      if (img) results.push({ label: name, url: img });
+      if (img && name && isFuzzyMatch(clean, name)) {
+        results.push({ label: name, url: img });
+      }
+    }
+  } catch {
+    // Ignorer
+  }
+
+  try {
+    const animeRes = await axios.get('https://api.jikan.moe/v4/anime', {
+      params: { q: clean, limit: 3 },
+      timeout: 12000
+    });
+
+    for (const item of animeRes.data?.data || []) {
+      const title = item.title_english || item.title || '';
+      const img = item.images?.jpg?.large_image_url || item.images?.webp?.large_image_url;
+      if (img && title && isFuzzyMatch(clean, title)) {
+        results.push({ label: title, verse: title, url: img });
+      }
     }
   } catch {
     // Ignorer
@@ -2549,22 +2637,19 @@ async function findPixabayImages(query, wanted) {
 }
 
 async function collectImageCandidates(query, wanted) {
+  // 1. Priorité absolue à AniList pour les animés et personnages d'animé
+  const ani = await findAniListImages(query);
+  if (ani.length) return ani;
+
+  // 2. Secours MyAnimeList (Jikan) si AniList n'a rien renvoyé
+  const jikan = await findJikanImages(query);
+  if (jikan.length) return jikan;
+
+  // 3. Recherche web générale uniquement si ce n'est ni un personnage ni un animé
   const results = [];
 
-  // 1. AniList et Jikan (MyAnimeList) en priorité pour les personnages/animés
-  const ani = await findAniListImages(query);
-  if (ani.length) results.push(...ani);
-
-  if (results.length < wanted * 2) {
-    const jikan = await findJikanImages(query);
-    if (jikan.length) results.push(...jikan);
-  }
-
-  // 2. Recherche web générale
-  if (results.length < wanted * 2) {
-    const serp = await findSerpApiImages(query);
-    if (serp.length) results.push(...serp);
-  }
+  const serp = await findSerpApiImages(query);
+  if (serp.length) results.push(...serp);
 
   if (results.length < wanted * 2) {
     const ddg = await findDuckDuckGoImages(query);
@@ -2597,7 +2682,7 @@ async function searchImage(jid, message, rawQuery) {
   if (!query) {
     await sendReply(
       jid,
-      'Utilisation :\n• Ximg Naruto\n• Ximg logo Lamborghini 2\n• Ximg-sasuke 3',
+      'Utilisation :\n• Ximg Naruto\n• Ximg Rudo Surebrec\n• Ximg logo Lamborghini 2',
       message
     );
     return false;
@@ -2620,13 +2705,14 @@ async function searchImage(jid, message, rawQuery) {
     try {
       const downloaded = await downloadImageBuffer(item.url);
       const counter = count > 1 ? ` (${sent + 1}/${count})` : '';
+      const verseLine = item.verse ? `\n🌌 𝗩𝗘𝗥𝗦𝗘 : ${item.verse}` : '';
 
       await sock.sendMessage(
         jid,
         {
           image: downloaded.buffer,
           mimetype: downloaded.contentType,
-          caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${item.label}${counter}\n\n${SIGNATURE}`
+          caption: `🖼️ 𝗥𝗘𝗖𝗛𝗘𝗥𝗖𝗛𝗘 : ${item.label}${counter}${verseLine}\n\n${SIGNATURE}`
         },
         { quoted: message }
       );

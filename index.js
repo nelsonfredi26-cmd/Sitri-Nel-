@@ -205,72 +205,126 @@ if (!USE_TURSO) {
   );
 }
 
-async function initDatabase() {
-  const statements = [
-    `CREATE TABLE IF NOT EXISTS users (
-        jid TEXT PRIMARY KEY,
-        coins INTEGER NOT NULL DEFAULT 0,
-        xp INTEGER NOT NULL DEFAULT 0,
-        last_daily INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL
-      )`,
-    `CREATE TABLE IF NOT EXISTS user_memory (
-        user_jid TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL DEFAULT '',
-        facts TEXT NOT NULL DEFAULT '',
-        updated_at INTEGER NOT NULL
-      )`,
-    `CREATE TABLE IF NOT EXISTS group_settings (
-        group_jid TEXT PRIMARY KEY,
-        only_admin INTEGER NOT NULL DEFAULT 0,
-        chat_mode INTEGER NOT NULL DEFAULT 0,
-        updated_at INTEGER NOT NULL DEFAULT 0
-      )`,
-    `CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
-        group_jid TEXT PRIMARY KEY,
-        last_tag INTEGER NOT NULL DEFAULT 0
-      )`,
-    `CREATE TABLE IF NOT EXISTS chat_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        jid TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )`,
-    `CREATE INDEX IF NOT EXISTS idx_chat_history_jid
-      ON chat_history(jid, id)`,
-    `CREATE TABLE IF NOT EXISTS active_quizzes (
-        group_jid TEXT PRIMARY KEY,
-        question TEXT NOT NULL,
-        answer TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-      )`,
-    `CREATE TABLE IF NOT EXISTS auth_state (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )`,
-    `CREATE TABLE IF NOT EXISTS bot_lock (
-        id TEXT PRIMARY KEY,
-        owner TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
-      )`
-  ];
+let dbInitialized = false;
+let dbInitPromise = null;
 
-  for (const sql of statements) {
-    await db.execute(sql);
+async function executeDbWithRetry(stmt, retries = 5) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await db.execute(stmt);
+    } catch (error) {
+      lastError = error;
+      const msg = String(error?.message || '').toLowerCase();
+      const isTransient =
+        msg.includes('timed out') ||
+        msg.includes('timeout') ||
+        msg.includes('502') ||
+        msg.includes('503') ||
+        msg.includes('504') ||
+        msg.includes('econnreset') ||
+        msg.includes('etimedout') ||
+        msg.includes('fetch failed');
+
+      if (!isTransient || attempt === retries) {
+        throw error;
+      }
+
+      const waitMs = Math.min(800 * attempt * attempt, 5000);
+      logger.warn(
+        { attempt, retries, waitMs, error: error?.message },
+        'Requête base de données temporairement lente/expirée, nouvelle tentative...'
+      );
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
   }
+  throw lastError;
+}
 
-  // Migration douce si la table group_settings existait déjà sans chat_mode
+async function initDatabase(force = false) {
+  if (dbInitialized && !force) return;
+  if (dbInitPromise && !force) return dbInitPromise;
+
+  dbInitPromise = (async () => {
+    const statements = [
+      `CREATE TABLE IF NOT EXISTS users (
+          jid TEXT PRIMARY KEY,
+          coins INTEGER NOT NULL DEFAULT 0,
+          xp INTEGER NOT NULL DEFAULT 0,
+          last_daily INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL
+        )`,
+      `CREATE TABLE IF NOT EXISTS user_memory (
+          user_jid TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL DEFAULT '',
+          facts TEXT NOT NULL DEFAULT '',
+          updated_at INTEGER NOT NULL
+        )`,
+      `CREATE TABLE IF NOT EXISTS group_settings (
+          group_jid TEXT PRIMARY KEY,
+          only_admin INTEGER NOT NULL DEFAULT 0,
+          chat_mode INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL DEFAULT 0
+        )`,
+      `CREATE TABLE IF NOT EXISTS group_tag_cooldowns (
+          group_jid TEXT PRIMARY KEY,
+          last_tag INTEGER NOT NULL DEFAULT 0
+        )`,
+      `CREATE TABLE IF NOT EXISTS chat_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          jid TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )`,
+      `CREATE INDEX IF NOT EXISTS idx_chat_history_jid
+        ON chat_history(jid, id)`,
+      `CREATE TABLE IF NOT EXISTS active_quizzes (
+          group_jid TEXT PRIMARY KEY,
+          question TEXT NOT NULL,
+          answer TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        )`,
+      `CREATE TABLE IF NOT EXISTS auth_state (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )`,
+      `CREATE TABLE IF NOT EXISTS bot_lock (
+          id TEXT PRIMARY KEY,
+          owner TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
+        )`
+    ];
+
+    if (USE_TURSO) {
+      // Exécution par lots pour réduire les allers-retours réseau et éviter le timeout Turso
+      await db.batch(statements, 'write');
+    } else {
+      for (const sql of statements) {
+        await executeDbWithRetry(sql);
+      }
+    }
+
+    // Migration douce si la table group_settings existait déjà sans chat_mode
+    try {
+      await executeDbWithRetry(
+        `ALTER TABLE group_settings ADD COLUMN chat_mode INTEGER NOT NULL DEFAULT 0`
+      );
+    } catch {
+      // La colonne existe déjà.
+    }
+
+    dbInitialized = true;
+    logger.info('Structure de la base de données vérifiée.');
+  })();
+
   try {
-    await db.execute(
-      `ALTER TABLE group_settings ADD COLUMN chat_mode INTEGER NOT NULL DEFAULT 0`
-    );
-  } catch {
-    // La colonne existe déjà.
+    return await dbInitPromise;
+  } catch (error) {
+    dbInitPromise = null;
+    throw error;
   }
-
-  logger.info('Structure de la base de données vérifiée.');
 }
 
 // ------------------------------------------------------------
@@ -4114,7 +4168,7 @@ const LOCK_SQL = `INSERT INTO bot_lock (id, owner, expires_at)
 async function tryTakeLock() {
   const now = Date.now();
 
-  const result = await db.execute({
+  const result = await executeDbWithRetry({
     sql: LOCK_SQL,
     args: [INSTANCE_ID, now + LOCK_TTL_MS, now]
   });

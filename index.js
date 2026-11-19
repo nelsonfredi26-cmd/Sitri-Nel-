@@ -13,6 +13,7 @@ import pino from 'pino';
 import { createClient } from '@libsql/client';
 import axios from 'axios';
 import fs from 'fs';
+import zlib from 'zlib';
 let createCanvasFn = null;
 let loadImageFn = null;
 try {
@@ -769,10 +770,32 @@ function toCodeFont(value = '') {
   }).join('');
 }
 
+function emphasizeLineWithWhatsAppBold(line = '') {
+  const cleanLine = String(line).replace(/\*/g, '');
+  if (!cleanLine.trim()) return cleanLine;
+
+  return cleanLine
+    .split(/(https?:\/\/\S+|@\d+)/g)
+    .map((segment, idx) => {
+      if (idx % 2 === 1) return segment;
+      const styled = toCodeFont(segment);
+      const match = styled.match(/^(\s*)([\s\S]*?)(\s*)$/);
+      if (!match || !match[2]) return styled;
+      return `${match[1]}*${match[2]}*${match[3]}`;
+    })
+    .join('');
+}
+
 function styleText(value = '') {
   return String(value)
-    .split(/(```[\s\S]*?```|https?:\/\/\S+|@\d+)/g)
-    .map((part, index) => (index % 2 === 1 ? part : toCodeFont(part)))
+    .split(/(```[\s\S]*?```)/g)
+    .map((block, index) => {
+      if (index % 2 === 1) return block;
+      return block
+        .split('\n')
+        .map(line => emphasizeLineWithWhatsAppBold(line))
+        .join('\n');
+    })
     .join('');
 }
 
@@ -859,7 +882,8 @@ function getMenu() {
 ╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
 │
 ├ ◈ 𝚇𝚒𝚖𝚐
-├ ◈ 𝚇𝚜 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛 / 𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
+├ ◈ 𝚇𝚜 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛)
+├ ◈ 𝚇𝚟 (𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
 ├ ◈ 𝚇𝚒 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛 ➜ 𝚒𝚖𝚊𝚐𝚎)
 ├ ◈ 𝚇𝚙𝚕𝚊𝚢
 ├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
@@ -2165,6 +2189,119 @@ function drawRoundRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
+function buildFallbackMiniCardPng({ level, xp, currentLevelXp, nextLevelXp, coins, position }) {
+  const width = 620;
+  const height = 210;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+
+  const span = Math.max(Number(nextLevelXp || 100) - Number(currentLevelXp || 0), 1);
+  const progress = Math.min(Math.max((Number(xp || 0) - Number(currentLevelXp || 0)) / span, 0), 1);
+
+  const barX1 = 175;
+  const barX2 = 585;
+  const barY1 = 135;
+  const barY2 = 158;
+  const barFillX = Math.round(barX1 + (barX2 - barX1) * progress);
+
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (width * 4 + 1);
+    raw[rowStart] = 0;
+
+    for (let x = 0; x < width; x++) {
+      const idx = rowStart + 1 + x * 4;
+      let r = Math.round(10 + (x / width) * 18);
+      let g = Math.round(14 + (y / height) * 16);
+      let b = Math.round(36 + (x / width) * 32);
+
+      if (x < 4 || x >= width - 4 || y < 4 || y >= height - 4) {
+        r = 56;
+        g = 189;
+        b = 248;
+      }
+
+      const dx = x - 88;
+      const dy = y - 105;
+      const distSq = dx * dx + dy * dy;
+      if (distSq <= 54 * 54 && distSq >= 48 * 48) {
+        r = 192;
+        g = 132;
+        b = 252;
+      } else if (distSq < 48 * 48) {
+        r = 30;
+        g = 41;
+        b = 59;
+      }
+
+      if (x >= barX1 && x <= barX2 && y >= barY1 && y <= barY2) {
+        if (x <= barFillX) {
+          r = 56;
+          g = 189;
+          b = 248;
+        } else {
+          r = 30;
+          g = 41;
+          b = 59;
+        }
+      }
+
+      if (y >= 42 && y <= 66 && x >= 175 && x <= Math.min(175 + level * 22, 360)) {
+        r = 56;
+        g = 189;
+        b = 248;
+      }
+      if (y >= 82 && y <= 104 && x >= 175 && x <= Math.min(175 + Math.max(1, Math.floor(coins / 50)) * 12, 420)) {
+        r = 251;
+        g = 191;
+        b = 36;
+      }
+      if (position > 0 && y >= 42 && y <= 66 && x >= 500 && x <= 585) {
+        r = 168;
+        g = 85;
+        b = 247;
+      }
+
+      raw[idx] = r;
+      raw[idx + 1] = g;
+      raw[idx + 2] = b;
+      raw[idx + 3] = 255;
+    }
+  }
+
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c;
+  }
+  const crc32 = buf => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const t = Buffer.from(type, 'ascii');
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
+    return Buffer.concat([len, t, data, crc]);
+  };
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+
+  const compressed = zlib.deflateSync(raw);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', compressed),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
+}
+
 async function generateProfileVisualCard({
   username,
   avatarBuffer,
@@ -2179,15 +2316,15 @@ async function generateProfileVisualCard({
   mode = 'profil'
 }) {
   if (!createCanvasFn) {
-    return null;
+    return buildFallbackMiniCardPng({ level, xp, currentLevelXp, nextLevelXp, coins, position });
   }
 
-  const width = 920;
-  const height = 320;
+  // Format mini-carte compacte (640 x 220)
+  const width = 640;
+  const height = 220;
   const canvas = createCanvasFn(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Fond sombre néon adapté à Railway (zéro dépendance système externe)
   const bg = ctx.createLinearGradient(0, 0, width, height);
   bg.addColorStop(0, '#070b14');
   bg.addColorStop(0.55, '#151238');
@@ -2195,37 +2332,23 @@ async function generateProfileVisualCard({
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, width, height);
 
-  // Décorations lumineuses subtiles
   ctx.save();
-  ctx.fillStyle = 'rgba(56, 189, 248, 0.08)';
-  ctx.beginPath();
-  ctx.arc(140, 160, 125, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = 'rgba(168, 85, 247, 0.09)';
-  ctx.beginPath();
-  ctx.arc(780, 75, 110, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // Cadre principal
-  ctx.save();
-  drawRoundRect(ctx, 22, 22, width - 44, height - 44, 24);
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
+  drawRoundRect(ctx, 14, 14, width - 28, height - 28, 18);
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
   ctx.fill();
   ctx.lineWidth = 2;
-  ctx.strokeStyle = 'rgba(129, 140, 248, 0.45)';
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
   ctx.stroke();
   ctx.restore();
 
-  // Avatar circulaire à gauche
-  const cx = 142;
-  const cy = 160;
-  const radius = 82;
+  // Mini avatar circulaire à gauche
+  const cx = 96;
+  const cy = 110;
+  const radius = 56;
 
   ctx.save();
   ctx.beginPath();
-  ctx.arc(cx, cy, radius + 6, 0, Math.PI * 2);
+  ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
   const ringGrad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
   ringGrad.addColorStop(0, '#38bdf8');
   ringGrad.addColorStop(1, '#c084fc');
@@ -2253,96 +2376,80 @@ async function generateProfileVisualCard({
     ctx.fillStyle = '#1e293b';
     ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
     ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 58px monospace';
+    ctx.font = 'bold 42px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(username || 'U').charAt(0).toUpperCase(), cx, cy);
   }
   ctx.restore();
 
-  // Infos à droite de l'avatar
-  const leftX = 256;
-  const rightEdge = width - 48;
+  // Textes compacts
+  const leftX = 176;
+  const rightEdge = width - 30;
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-
-  const cleanName = String(username || 'Utilisateur').slice(0, 20);
-  ctx.font = 'bold 34px monospace';
+  const cleanName = String(username || 'Utilisateur').slice(0, 16);
+  ctx.font = 'bold 24px monospace';
   ctx.fillStyle = '#f8fafc';
-  ctx.fillText(cleanName, leftX, 82);
+  ctx.fillText(cleanName, leftX, 56);
 
-  ctx.font = 'bold 19px monospace';
+  ctx.font = 'bold 14px monospace';
   ctx.fillStyle = '#c084fc';
   const cleanRank = String(rankLabel || 'Novice').replace(/^[^\w\sÀ-ÖØ-öø-ÿ]+\s*/u, '').toUpperCase();
-  ctx.fillText(`${cleanRank}  •  ${mode.toUpperCase()}`, leftX, 114);
+  ctx.fillText(`${cleanRank} • ${mode.toUpperCase()}`, leftX, 78);
 
-  // Badge Niveau et Classement en haut à droite
   ctx.textAlign = 'right';
-  ctx.font = 'bold 36px monospace';
+  ctx.font = 'bold 25px monospace';
   ctx.fillStyle = '#38bdf8';
-  ctx.fillText(`LVL ${level}`, rightEdge, 82);
+  ctx.fillText(`LVL ${level}`, rightEdge, 56);
 
-  ctx.font = 'bold 21px monospace';
+  ctx.font = 'bold 14px monospace';
   ctx.fillStyle = '#94a3b8';
-  const posText = position > 0 ? `#${position} / ${Math.max(totalUsers, 1)}` : 'NON CLASSÉ';
-  ctx.fillText(`RANK ${posText}`, rightEdge, 114);
+  const posText = position > 0 ? `#${position}/${Math.max(totalUsers, 1)}` : 'N/C';
+  ctx.fillText(`RANK ${posText}`, rightEdge, 78);
 
-  // Statistiques numériques (XP & XCoins)
   ctx.textAlign = 'left';
-  ctx.font = 'bold 20px monospace';
+  ctx.font = 'bold 15px monospace';
   ctx.fillStyle = '#e2e8f0';
-  ctx.fillText(`XP TOTAL : ${Number(xp || 0).toLocaleString()} XP`, leftX, 162);
+  ctx.fillText(`XP : ${Number(xp || 0)} / ${Number(nextLevelXp || 100)}`, leftX, 114);
 
   ctx.textAlign = 'right';
   ctx.fillStyle = '#fbbf24';
-  ctx.fillText(`COINS : ${Number(coins || 0).toLocaleString()}`, rightEdge, 162);
+  ctx.fillText(`COINS : ${Number(coins || 0)}`, rightEdge, 114);
 
-  // Progression vers le palier suivant
+  // Barre de progression
   const span = Math.max(Number(nextLevelXp || 100) - Number(currentLevelXp || 0), 1);
   const progressInTier = Math.max(Number(xp || 0) - Number(currentLevelXp || 0), 0);
   const ratio = Math.min(Math.max(progressInTier / span, 0), 1);
-  const pct = Math.floor(ratio * 100);
 
-  ctx.textAlign = 'left';
-  ctx.font = 'bold 18px monospace';
-  ctx.fillStyle = '#cbd5e1';
-  ctx.fillText(`PROGRESSION : ${pct}%`, leftX, 204);
-
-  ctx.textAlign = 'right';
-  ctx.fillStyle = '#94a3b8';
-  ctx.fillText(`${Number(xp || 0)} / ${Number(nextLevelXp || 100)} XP`, rightEdge, 204);
-
-  // Barre de progression
   const barX = leftX;
-  const barY = 218;
+  const barY = 132;
   const barW = rightEdge - leftX;
-  const barH = 28;
+  const barH = 20;
 
   ctx.save();
-  drawRoundRect(ctx, barX, barY, barW, barH, 14);
+  drawRoundRect(ctx, barX, barY, barW, barH, 10);
   ctx.fillStyle = '#1e293b';
   ctx.fill();
   ctx.restore();
 
-  const fillW = Math.max(Math.round(barW * ratio), ratio > 0 ? 28 : 0);
+  const fillW = Math.max(Math.round(barW * ratio), ratio > 0 ? 20 : 0);
   if (fillW > 0) {
     ctx.save();
-    drawRoundRect(ctx, barX, barY, fillW, barH, 14);
+    drawRoundRect(ctx, barX, barY, fillW, barH, 10);
     const barGrad = ctx.createLinearGradient(barX, barY, barX + barW, barY);
     barGrad.addColorStop(0, '#38bdf8');
-    barGrad.addColorStop(0.55, '#818cf8');
     barGrad.addColorStop(1, '#c084fc');
     ctx.fillStyle = barGrad;
     ctx.fill();
     ctx.restore();
   }
 
-  // Pied de carte
   ctx.textAlign = 'left';
-  ctx.font = 'bold 16px monospace';
+  ctx.font = 'bold 13px monospace';
   ctx.fillStyle = '#64748b';
-  ctx.fillText('SITRI-NEL • KAY≈DEN', leftX, 276);
+  ctx.fillText('SITRI-NEL • MINI-CARTE', leftX, 184);
 
   return canvas.toBuffer('image/png');
 }
@@ -3354,22 +3461,59 @@ async function downloadTargetMediaBuffer(message, expectedKind) {
   return { buffer, kind, media };
 }
 
+async function encodeBufferForSticker(inputBuffer) {
+  if (createCanvasFn && loadImageFn) {
+    const img = await loadImageFn(inputBuffer);
+    const size = 512;
+    const canvas = createCanvasFn(size, size);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+
+    const scale = Math.min(size / img.width, size / img.height);
+    const drawW = Math.round(img.width * scale);
+    const drawH = Math.round(img.height * scale);
+    const offsetX = Math.round((size - drawW) / 2);
+    const offsetY = Math.round((size - drawH) / 2);
+
+    ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+    try {
+      return await canvas.encode('webp');
+    } catch {
+      return canvas.toBuffer('image/png');
+    }
+  }
+  return inputBuffer;
+}
+
+async function decodeStickerToPngBuffer(stickerBuffer) {
+  if (createCanvasFn && loadImageFn) {
+    const img = await loadImageFn(stickerBuffer);
+    const canvas = createCanvasFn(img.width || 512, img.height || 512);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    return canvas.toBuffer('image/png');
+  }
+  return stickerBuffer;
+}
+
 async function convertImageToSticker(jid, message) {
   try {
     const mediaResult = await downloadTargetMediaBuffer(message, 'image');
     if (!mediaResult?.buffer) {
       await sendReply(
         jid,
-        '🖼️ Réponds à une photo avec Xs (ou envoie une photo avec la légende Xs) pour la transformer en sticker.',
+        '🖼️ Réponds à une image avec Xs (ou envoie une image avec la légende Xs) pour la transformer en sticker.',
         message
       );
       return true;
     }
 
+    const stickerBuffer = await encodeBufferForSticker(mediaResult.buffer);
+
     await sock.sendMessage(
       jid,
       {
-        sticker: mediaResult.buffer
+        sticker: stickerBuffer
       },
       { quoted: message }
     );
@@ -3378,7 +3522,7 @@ async function convertImageToSticker(jid, message) {
     logger.error({ error: error?.message }, 'Erreur conversion image -> sticker (Xs).');
     await sendReply(
       jid,
-      `⚠️ Impossible de convertir cette photo en sticker (${error?.message || 'erreur média'}).`,
+      `⚠️ Impossible de convertir cette image en sticker (${error?.message || 'erreur média'}).`,
       message
     );
     return true;
@@ -3397,11 +3541,13 @@ async function convertStickerToImage(jid, message) {
       return true;
     }
 
+    const pngBuffer = await decodeStickerToPngBuffer(mediaResult.buffer);
+
     await sock.sendMessage(
       jid,
       {
-        image: mediaResult.buffer,
-        mimetype: 'image/webp',
+        image: pngBuffer,
+        mimetype: 'image/png',
         caption: `🖼️ 𝗦𝗧𝗜𝗖𝗞𝗘𝗥 𝗘𝗡 𝗜𝗠𝗔𝗚𝗘\n\n${SIGNATURE}`
       },
       { quoted: message }
@@ -3473,7 +3619,7 @@ async function revealViewOnceMessage(jid, message) {
   if (!payload) {
     await sendReply(
       jid,
-      '👁️ Réponds à un message en vue unique (photo, vidéo ou audio) avec Xs pour le dévoiler.',
+      '👁️ Réponds à un message en vue unique (photo, vidéo ou audio) avec Xv pour le dévoiler.',
       message
     );
     return false;
@@ -4377,7 +4523,7 @@ const KNOWN_COMMANDS = new Set([
   'chat', 'ai', 'ask', 'anime', 'police', 'syp', 'spy', 'synopsis', 'sypnosis', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
   'quiz', 'reponse',
-  'img', 'play', 'video', 's', 'xi', 'reveal',
+  'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models'
 ]);
@@ -4582,12 +4728,12 @@ async function processCommand(message) {
   }
 
   if (command === 's') {
-    const viewOncePayload = extractViewOncePayload(message);
-    if (viewOncePayload) {
-      await revealViewOnceMessage(jid, message);
-    } else {
-      await convertImageToSticker(jid, message);
-    }
+    await convertImageToSticker(jid, message);
+    return;
+  }
+
+  if (command === 'v') {
+    await revealViewOnceMessage(jid, message);
     return;
   }
 

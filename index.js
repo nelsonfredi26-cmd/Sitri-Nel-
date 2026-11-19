@@ -2803,16 +2803,18 @@ async function searchImage(jid, message, rawQuery) {
   const isExplicitPhoto = /^photo\b/i.test(query);
   const cleanPhotoQuery = query.replace(/^photo\s+/i, '').trim();
 
-  const found = isExplicitPhoto
+  let found = isExplicitPhoto
     ? await collectPhotos(cleanPhotoQuery || query, count)
     : await collectImageCandidates(query, count);
+
+  if (isExplicitPhoto && (!found || !found.length)) {
+    found = await collectEntityOrWorldImages(cleanPhotoQuery || query, count);
+  }
 
   if (!found || !found.length) {
     await sendReply(
       jid,
-      isExplicitPhoto
-        ? 'Aucune photo trouvée sur Pixabay pour cette recherche.'
-        : 'Aucun personnage ou animé trouvé sur AniList pour cette recherche.',
+      `Aucun visuel trouvé pour "${cleanPhotoQuery || query}". Réessaie avec un mot-clé plus précis.`,
       message
     );
     return false;
@@ -3973,7 +3975,12 @@ async function processCommand(message) {
     'Commande reçue'
   );
 
-  const ownerCommand = Boolean(message.key?.fromMe) && isOwnerMessage(message);
+  const ownerCommand =
+    Boolean(message.key?.fromMe) ||
+    isOwnerMessage(message) ||
+    isOwner(message?.key?.participant) ||
+    isOwner(message?.key?.participantPn) ||
+    isOwner(message?.key?.remoteJidAlt);
 
   if (command === 'menu') {
     await sendOfficialImage(jid, message);

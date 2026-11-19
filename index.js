@@ -704,9 +704,9 @@ function boldSerif(value = '') {
   return Array.from(String(value).normalize('NFD'), char => {
     const code = char.codePointAt(0);
 
-    if (code >= 65 && code <= 90) return String.fromCodePoint(0x1d400 + code - 65);
-    if (code >= 97 && code <= 122) return String.fromCodePoint(0x1d41a + code - 97);
-    if (code >= 48 && code <= 57) return String.fromCodePoint(0x1d7ce + code - 48);
+    if (code >= 65 && code <= 90) return String.fromCodePoint(0x1d670 + code - 65);
+    if (code >= 97 && code <= 122) return String.fromCodePoint(0x1d68a + code - 97);
+    if (code >= 48 && code <= 57) return String.fromCodePoint(0x1d7f6 + code - 48);
 
     return char;
   }).join('');
@@ -756,10 +756,23 @@ function formatAIReply(raw) {
   return `⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟\n\n${body.trim()}\n\n𖤍 𝗞𝗔𝗬≈𝗗𝗘𝗡`;
 }
 
+function toCodeFont(value = '') {
+  return Array.from(String(value), char => {
+    const cp = char.codePointAt(0);
+    // Déjà en police spéciale code (Mathematical Monospace)
+    if ((cp >= 0x1d670 && cp <= 0x1d6a3) || (cp >= 0x1d7f6 && cp <= 0x1d7ff)) return char;
+    // Convertir les anciens caractères Bold Serif (0x1D400-0x1D433, 0x1D7CE-0x1D7D7) vers la police spéciale code
+    if (cp >= 0x1d400 && cp <= 0x1d419) return String.fromCodePoint(0x1d670 + (cp - 0x1d400));
+    if (cp >= 0x1d41a && cp <= 0x1d433) return String.fromCodePoint(0x1d68a + (cp - 0x1d41a));
+    if (cp >= 0x1d7ce && cp <= 0x1d7d7) return String.fromCodePoint(0x1d7f6 + (cp - 0x1d7ce));
+    return boldSerif(char);
+  }).join('');
+}
+
 function styleText(value = '') {
   return String(value)
     .split(/(```[\s\S]*?```|https?:\/\/\S+|@\d+)/g)
-    .map((part, index) => (index % 2 === 1 ? part : boldSerif(part)))
+    .map((part, index) => (index % 2 === 1 ? part : toCodeFont(part)))
     .join('');
 }
 
@@ -1103,8 +1116,7 @@ function extractUserFactsFromText(text = '') {
     discovered.push(`Âge : ${ageMatch[1]} ans`);
   }
 
-  const likeMatch = clean.match(/(?:j['’]adore|j['’]aime beaucoup|mon anim[ée] pr[ée]f[ée]r[ée] est)\s+([^.!?
-]{3,60})/i);
+  const likeMatch = clean.match(/(?:j['’]adore|j['’]aime beaucoup|mon anim[ée] pr[ée]f[ée]r[ée] est)\s+([^.!?\n]{3,60})/i);
   if (likeMatch?.[1]) {
     discovered.push(`Centre d'intérêt : ${likeMatch[1].trim()}`);
   }
@@ -2241,7 +2253,7 @@ async function generateProfileVisualCard({
     ctx.fillStyle = '#1e293b';
     ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
     ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 58px sans-serif';
+    ctx.font = 'bold 58px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(username || 'U').charAt(0).toUpperCase(), cx, cy);
@@ -2256,29 +2268,29 @@ async function generateProfileVisualCard({
   ctx.textBaseline = 'alphabetic';
 
   const cleanName = String(username || 'Utilisateur').slice(0, 20);
-  ctx.font = 'bold 34px sans-serif';
+  ctx.font = 'bold 34px monospace';
   ctx.fillStyle = '#f8fafc';
   ctx.fillText(cleanName, leftX, 82);
 
-  ctx.font = 'bold 19px sans-serif';
+  ctx.font = 'bold 19px monospace';
   ctx.fillStyle = '#c084fc';
   const cleanRank = String(rankLabel || 'Novice').replace(/^[^\w\sÀ-ÖØ-öø-ÿ]+\s*/u, '').toUpperCase();
   ctx.fillText(`${cleanRank}  •  ${mode.toUpperCase()}`, leftX, 114);
 
   // Badge Niveau et Classement en haut à droite
   ctx.textAlign = 'right';
-  ctx.font = 'bold 36px sans-serif';
+  ctx.font = 'bold 36px monospace';
   ctx.fillStyle = '#38bdf8';
   ctx.fillText(`LVL ${level}`, rightEdge, 82);
 
-  ctx.font = 'bold 21px sans-serif';
+  ctx.font = 'bold 21px monospace';
   ctx.fillStyle = '#94a3b8';
   const posText = position > 0 ? `#${position} / ${Math.max(totalUsers, 1)}` : 'NON CLASSÉ';
   ctx.fillText(`RANK ${posText}`, rightEdge, 114);
 
   // Statistiques numériques (XP & XCoins)
   ctx.textAlign = 'left';
-  ctx.font = 'bold 20px sans-serif';
+  ctx.font = 'bold 20px monospace';
   ctx.fillStyle = '#e2e8f0';
   ctx.fillText(`XP TOTAL : ${Number(xp || 0).toLocaleString()} XP`, leftX, 162);
 
@@ -2293,7 +2305,7 @@ async function generateProfileVisualCard({
   const pct = Math.floor(ratio * 100);
 
   ctx.textAlign = 'left';
-  ctx.font = 'bold 18px sans-serif';
+  ctx.font = 'bold 18px monospace';
   ctx.fillStyle = '#cbd5e1';
   ctx.fillText(`PROGRESSION : ${pct}%`, leftX, 204);
 
@@ -2328,7 +2340,7 @@ async function generateProfileVisualCard({
 
   // Pied de carte
   ctx.textAlign = 'left';
-  ctx.font = 'bold 16px sans-serif';
+  ctx.font = 'bold 16px monospace';
   ctx.fillStyle = '#64748b';
   ctx.fillText('SITRI-NEL • KAY≈DEN', leftX, 276);
 
@@ -2401,25 +2413,14 @@ async function sendVisualStatCard(jid, message, sender, command) {
 
   const nextRank = getNextRank(xp);
   const caption =
-    `╭━━〔 📊 𝗖𝗔𝗥𝗧𝗘 𝗡𝗨𝗠𝗘́𝗥𝗜𝗤𝗨𝗘 〕━━╮
-
-` +
-    `👤 𝗝𝗼𝘂𝗲𝘂𝗿 : ${displayName}
-` +
-    `⚡ 𝗡𝗶𝘃𝗲𝗮𝘂 : ${level} (${rankLabel})
-` +
-    `⭐ 𝗫𝗣 : ${xp} / ${nextLevelXp}
-` +
-    `💰 𝗖𝗼𝗶𝗻𝘀 : ${coins}
-` +
-    `🏆 𝗥𝗮𝗻𝗴 : ${position > 0 ? `#${position}/${leaderboard.length}` : 'Non classé'}
-` +
-    (nextRank ? `📈 𝗣𝗿𝗼𝗰𝗵𝗮𝗶𝗻 𝗽𝗮𝗹𝗶𝗲𝗿 : ${nextRank.name} (${nextRank.xp - xp} XP)
-` : '') +
-    `
-╰━━━━━━━━━━━━━━━━━━━━━━╯
-
-${SIGNATURE}`;
+    `╭━━〔 📊 𝗖𝗔𝗥𝗧𝗘 𝗡𝗨𝗠𝗘́𝗥𝗜𝗤𝗨𝗘 〕━━╮\n\n` +
+    `👤 𝗝𝗼𝘂𝗲𝘂𝗿 : ${displayName}\n` +
+    `⚡ 𝗡𝗶𝘃𝗲𝗮𝘂 : ${level} (${rankLabel})\n` +
+    `⭐ 𝗫𝗣 : ${xp} / ${nextLevelXp}\n` +
+    `💰 𝗖𝗼𝗶𝗻𝘀 : ${coins}\n` +
+    `🏆 𝗥𝗮𝗻𝗴 : ${position > 0 ? `#${position}/${leaderboard.length}` : 'Non classé'}\n` +
+    (nextRank ? `📈 𝗣𝗿𝗼𝗰𝗵𝗮𝗶𝗻 𝗽𝗮𝗹𝗶𝗲𝗿 : ${nextRank.name} (${nextRank.xp - xp} XP)\n` : '') +
+    `\n╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n${SIGNATURE}`;
 
   if (cardBuffer) {
     await sock.sendMessage(

@@ -761,6 +761,7 @@ function getMenu() {
 ├ ◈ 𝚇𝚊𝚜𝚔
 ├ ◈ 𝚇𝚊𝚒
 ├ ◈ 𝚇𝚊𝚗𝚒𝚖𝚎
+├ ◈ 𝚇𝚜𝚢𝚙 (𝚜𝚢𝚗𝚘𝚙𝚜𝚒𝚜)
 ├ ◈ 𝚇𝚙𝚘𝚕𝚒𝚌𝚎
 ├ ◈ 𝚇𝚒𝚗𝚏𝚘
 │
@@ -847,7 +848,7 @@ vive d'esprit et pleine d'humeurs.
 
 ✦ 𝗖𝗔𝗣𝗔𝗖𝗜𝗧𝗘́𝗦
 • Intelligence conversationnelle (Xchat on/off)
-• Vérification factuelle & animés
+• Vérification factuelle, animés & synopsis (Xsyp)
 • Gestion des groupes & mentions
 • Économie et quiz dynamiques
 • Recherche et création d'images
@@ -2917,18 +2918,7 @@ async function generateImage(jid, message, prompt) {
   }
 }
 
-async function multimediaNotIntegrated(jid, message, command) {
-  const descriptions = {
-    play: 'La recherche et l’envoi audio ne sont pas encore intégrés.',
-    video: 'La recherche et l’envoi vidéo ne sont pas encore intégrés.'
-  };
 
-  await sendReply(
-    jid,
-    `🎧 ${descriptions[command] || 'Cette fonction est en préparation.'}\n\nJe préfère signaler honnêtement qu’une intégration manque plutôt que prétendre qu’elle fonctionne.\n\n${SIGNATURE}`,
-    message
-  );
-}
 
 // ------------------------------------------------------------
 // 23 bis. DÉVOILEMENT VUE UNIQUE (XS) & RECHERCHE AUDIO/VIDÉO (XPLAY / XVIDEO)
@@ -3602,6 +3592,11 @@ async function handleImageCommand(jid, message, args) {
 async function handleMediaCommand(jid, message, command, args) {
   if (command === 'img') return handleImageCommand(jid, message, args);
 
+  if (command === 'syp') {
+    await handleSynopsisCommand(jid, message, sender, args);
+    return;
+  }
+
   if (command === 'play' || command === 'video') {
     await multimediaNotIntegrated(jid, message, command);
     return true;
@@ -3610,12 +3605,238 @@ async function handleMediaCommand(jid, message, command, args) {
   return false;
 }
 
+
+// ------------------------------------------------------------
+// 25 bis. MODULE SYNOPSIS COMPLET D'ANIMÉ / MANGA (XSYP / XSYNOPSIS)
+// ------------------------------------------------------------
+
+function stripHtmlTags(raw = '') {
+  return String(raw || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function fetchAniListMediaDetails(query) {
+  const clean = normalizeAnimeQuery(query);
+  if (!clean) return null;
+
+  try {
+    const data = await anilist(
+      `query ($s: String) {
+        Media(search: $s, type: ANIME, sort: POPULARITY_DESC) {
+          id
+          title { romaji english native }
+          format
+          episodes
+          chapters
+          volumes
+          status
+          season
+          seasonYear
+          averageScore
+          genres
+          studios(isMain: true) { nodes { name } }
+          coverImage { extraLarge large }
+          bannerImage
+          description(asHtml: false)
+          characters(sort: [ROLE, RELEVANCE], perPage: 6) {
+            nodes {
+              name { full }
+            }
+          }
+        }
+      }`,
+      { s: clean }
+    );
+
+    if (data?.Media) return data.Media;
+
+    // Secours sur MANGA si aucun ANIME n'est remonté
+    const mangaData = await anilist(
+      `query ($s: String) {
+        Media(search: $s, type: MANGA, sort: POPULARITY_DESC) {
+          id
+          title { romaji english native }
+          format
+          episodes
+          chapters
+          volumes
+          status
+          season
+          seasonYear
+          averageScore
+          genres
+          coverImage { extraLarge large }
+          bannerImage
+          description(asHtml: false)
+          characters(sort: [ROLE, RELEVANCE], perPage: 6) {
+            nodes {
+              name { full }
+            }
+          }
+        }
+      }`,
+      { s: clean }
+    );
+
+    return mangaData?.Media || null;
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Erreur AniList Media pour Xsyp.');
+    return null;
+  }
+}
+
+async function handleSynopsisCommand(jid, message, sender, args) {
+  const query = String(args || '').trim();
+
+  if (!query) {
+    await sendReply(
+      jid,
+      `📖 𝗨𝗧𝗜𝗟𝗜𝗦𝗔𝗧𝗜𝗢𝗡 𝗗𝗘 𝗫𝗦𝗬𝗣\n\nIndique le nom d'un animé ou manga pour obtenir sa fiche complète et l'image officielle de son verse :\n• Xsyp Hunter x Hunter\n• Xsyp Jujutsu Kaisen\n• Xsyp Bleach\n\n${SIGNATURE}`,
+      message
+    );
+    return true;
+  }
+
+  try {
+    await sock?.sendPresenceUpdate('composing', jid);
+  } catch {
+    // Sans importance
+  }
+
+  await sendReply(jid, `📖 Recherche du synopsis et de l'univers de *${query}*...`, message);
+
+  const media = await fetchAniListMediaDetails(query);
+  const titleRomaji = media?.title?.romaji || query;
+  const titleEnglish = media?.title?.english && media.title.english !== titleRomaji ? ` (${media.title.english})` : '';
+  const fullTitle = `${titleRomaji}${titleEnglish}`;
+
+  const statusMap = {
+    FINISHED: 'Terminé',
+    RELEASING: 'En cours',
+    NOT_YET_RELEASED: 'À venir',
+    CANCELLED: 'Annulé',
+    HIATUS: 'En pause'
+  };
+
+  const format = media?.format || 'Animé / Manga';
+  const episodesInfo = media?.episodes
+    ? `${media.episodes} épisodes`
+    : media?.chapters
+      ? `${media.chapters} chapitres`
+      : 'En cours / N/A';
+  const year = media?.seasonYear || 'N/A';
+  const status = statusMap[media?.status] || media?.status || 'N/A';
+  const score = media?.averageScore ? `${media.averageScore}%` : 'N/A';
+  const studio = media?.studios?.nodes?.[0]?.name || 'N/A';
+  const genres = (media?.genres || []).join(', ') || 'Action, Aventure';
+  const mainChars = (media?.characters?.nodes || []).map(c => c?.name?.full).filter(Boolean).join(', ');
+  const rawDesc = stripHtmlTags(media?.description || '');
+
+  // 1. Téléchargement de l'image officielle du verse (AniList coverImage extraLarge/large -> fallback collectAnimeImages)
+  let imagePayload = null;
+  const candidateUrls = [
+    media?.coverImage?.extraLarge,
+    media?.coverImage?.large,
+    media?.bannerImage
+  ].filter(Boolean);
+
+  for (const imgUrl of candidateUrls) {
+    try {
+      const downloaded = await downloadImageBuffer(imgUrl);
+      imagePayload = downloaded;
+      break;
+    } catch {
+      // Essayer l'URL suivante
+    }
+  }
+
+  if (!imagePayload) {
+    const fallbackImgs = await collectAnimeImages(`${titleRomaji} anime cover`, 1);
+    if (fallbackImgs?.[0]?.url) {
+      try {
+        imagePayload = await downloadImageBuffer(fallbackImgs[0].url);
+      } catch {
+        // Continuer sans image si indisponible
+      }
+    }
+  }
+
+  // 2. Génération d'un synopsis riche, détaillé et structuré en français via Groq + données vérifiées
+  let synopsisBody = '';
+  if (CONFIG.groqKey) {
+    try {
+      const aiPrompt = `Rédige une fiche synopsis ultra-complète, captivante et 100% fidèle en français pour l'œuvre "${fullTitle}".
+Données officielles connues :
+- Format : ${format} (${episodesInfo}, ${year}, Statut : ${status})
+- Genres : ${genres}
+- Studio : ${studio}
+- Personnages clés : ${mainChars || 'Non précisés'}
+- Description officielle : ${rawDesc || 'Utilise tes connaissances vérifiées sur cette œuvre.'}
+
+Structure obligatoire (sans utiliser de markdown ** ni # ni tableaux) :
+1. HISTOIRE & INTRIGUE : Résumé détaillé et prenant du point de départ, des enjeux et de l'évolution de l'histoire (sans spoiler la fin).
+2. UNIVERS & SYSTÈME DE POUVOIRS : Explique clairement le monde, ses règles et son système de combat/pouvoirs (ex: Nen, Chakra, Bankai, Haki, Énergie Occulte, etc.).
+3. PERSONNAGES PRINCIPAUX : Présente brièvement les protagonistes majeurs et leur objectif.
+4. POURQUOI LE REGARDER : 2-3 phrases percutantes sur les points forts de l'œuvre.`;
+
+      synopsisBody = await askAI(aiPrompt, jid, {
+        useHistory: false,
+        senderJid: sender,
+        pushName: message?.pushName || '',
+        factQuery: `${titleRomaji} anime synopsis universe characters`,
+        maxTokens: 1600
+      });
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Groq indisponible pour Xsyp, repli sur la description AniList.');
+    }
+  }
+
+  if (!synopsisBody) {
+    synopsisBody = rawDesc || `Découvre l'univers de ${fullTitle}, une œuvre incontournable mêlant ${genres.toLowerCase()}.`;
+  }
+
+  const headerCard =
+    `╭━━〔 📖 𝗦𝗬𝗡𝗢𝗣𝗦𝗜𝗦 𝗢𝗙𝗙𝗜𝗖𝗜𝗘𝗟 〕━━╮\n\n` +
+    `🎬 𝗧𝗜𝗧𝗥𝗘 : ${fullTitle}\n` +
+    `📺 𝗙𝗢𝗥𝗠𝗔𝗧 : ${format} (${episodesInfo})\n` +
+    `📅 𝗔𝗡𝗡𝗘́𝗘 : ${year} • 𝗦𝗧𝗔𝗧𝗨𝗧 : ${status}\n` +
+    `🏢 𝗦𝗧𝗨𝗗𝗜𝗢 : ${studio} • ⭐ 𝗡𝗢𝗧𝗘 : ${score}\n` +
+    `🏷️ 𝗚𝗘𝗡𝗥𝗘𝗦 : ${genres}\n` +
+    (mainChars ? `👥 𝗣𝗘𝗥𝗦𝗢𝗡𝗡𝗔𝗚𝗘𝗦 : ${mainChars}\n` : '') +
+    `\n╰━━━━━━━━━━━━━━━━━━━━━━╯`;
+
+  const formattedBody = formatAIReply(synopsisBody);
+
+  if (imagePayload) {
+    await sock.sendMessage(
+      jid,
+      {
+        image: imagePayload.buffer,
+        mimetype: imagePayload.contentType,
+        caption: `${headerCard}\n\n🌌 𝗨𝗡𝗜𝗩𝗘𝗥𝗦 : ${titleRomaji}\n${SIGNATURE}`
+      },
+      { quoted: message }
+    );
+    await sendReply(jid, formattedBody, message);
+  } else {
+    await sendReply(jid, `${headerCard}\n\n${formattedBody}`, message);
+  }
+
+  return true;
+}
+
 // ------------------------------------------------------------
 // 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
 const KNOWN_COMMANDS = new Set([
-  'chat', 'ai', 'ask', 'anime', 'police', 'info',
+  'chat', 'ai', 'ask', 'anime', 'police', 'syp', 'synopsis', 'sypnosis', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
   'quiz', 'reponse',
   'img', 'play', 'video', 's', 'reveal',
@@ -3623,7 +3844,7 @@ const KNOWN_COMMANDS = new Set([
   'on', 'off', 'restart', 'upt', 'menu', 'models'
 ]);
 
-const COMMAND_ALIASES = { ban: 'kick' };
+const COMMAND_ALIASES = { ban: 'kick', synopsis: 'syp', sypnosis: 'syp' };
 
 async function processCommand(message) {
   const jid = message?.key?.remoteJid;
@@ -3726,8 +3947,7 @@ async function processCommand(message) {
     isBotSleeping = true;
     await sendReply(
       jid,
-      '💤 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗘𝗡 𝗩𝗘𝗜𝗟𝗟𝗘
-Je me mets en pause. Utilise Xon pour me réveiller.',
+      '💤 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗘𝗡 𝗩𝗘𝗜𝗟𝗟𝗘\nJe me mets en pause. Utilise Xon pour me réveiller.',
       message
     );
     return;
@@ -3742,8 +3962,7 @@ Je me mets en pause. Utilise Xon pour me réveiller.',
     isBotSleeping = false;
     await sendReply(
       jid,
-      '⚡ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗥𝗘́𝗩𝗘𝗜𝗟𝗟𝗘́𝗘
-Je suis de nouveau active et prête !',
+      '⚡ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗥𝗘́𝗩𝗘𝗜𝗟𝗟𝗘́𝗘\nJe suis de nouveau active et prête !',
       message
     );
     return;

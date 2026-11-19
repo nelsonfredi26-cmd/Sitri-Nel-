@@ -19,7 +19,7 @@
     "pino": "^9.3.2",
     "qrcode-terminal": "^0.12.0",
     "groq-sdk": "^0.7.0",
-    "@google/genai": "^0.1.2",
+    "@google/genai": "^1.0.0",
     "yt-search": "^2.12.1",
     "@distube/ytdl-core": "^4.16.4",
     "fluent-ffmpeg": "^2.1.3",

@@ -90,10 +90,12 @@ const CONFIG = {
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
+  tavilyKey: cleanEnv(process.env.TAVILY_API_KEY),
   pixabayKey: cleanEnv(process.env.PIXABAY_API_KEY),
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
   cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
   maxImageBytes: 8 * 1024 * 1024,
+  maxMediaBytes: 25 * 1024 * 1024,
   maxChatHistory: 25,
   tagCooldown: 60,
   maxMessageAge: 2 * 60 * 1000
@@ -124,6 +126,7 @@ let botLid = '';
 let botNumber = '';
 let connectionStatus = 'Non connecté';
 let isShuttingDown = false;
+let isBotSleeping = false;
 
 const PROCESS_STARTED_AT = Date.now();
 const processedMessages = new Set();
@@ -167,11 +170,16 @@ IDENTITÉ & CARACTÈRE :
 - Humeur actuelle : ${mood}. Laisse transparaître naturellement cette humeur dans ta façon de répondre !
 
 COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
-- Tu es une vraie amie brillante, chaleureuse, naturelle et culturelle : tutoie toujours ton interlocuteur, parle comme une humaine cool, passionnée et experte, jamais comme un robot.
-- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais à qui tu parles.
-- Tes réponses sur les animés, mangas, sciences ou l'histoire doivent être **PROFONDES, DOCUMENTÉES ET 100% FIABLES** (appuie-toi strictement sur les faits vérifiés ci-dessous). Zéro hallucination, zéro invention de techniques (ex: Tobirama Senju a inventé l'Edo Tensei, le Kage Bunshin no Jutsu et le Hiraishin no Jutsu, mais en aucun cas le Chidori qui est l'œuvre de Kakashi Hatake !).
-- Va droit au but, sois précise et percutante (4 à 10 lignes riches en détails croustillants).
-- N'utilise pas de markdown (pas de **, de # ni de tableaux).${verifiedContext}
+- Tu es une vraie amie brillante, chaleureuse, naturelle et autonome : tutoie toujours ton interlocuteur, parle comme une humaine cool et proche des gens, jamais comme un robot ou un assistant administratif froid.
+- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais parfaitement à qui tu parles. Si quelqu'un te donne son surnom ou te demande comment il s'appelle, confirme-le avec complicité.
+- Sois expressive, vivante et spontanée : réagis aux blagues, taquine gentiment quand on te pose une question piège, partage ton avis personnel sur les animés ou les sujets de discussion, et relance parfois la conversation.
+- Va droit au but dès la première phrase, sans formules robotiques ("En tant qu'IA...", "Voici la réponse...").
+- Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
+- N'utilise pas de markdown (pas de **, de # ni de tableaux).
+
+EXACTITUDE & CULTURE ANIMÉ / MANGA :
+- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Mashle, Tokyo Revengers, etc.).
+- Ne confonds JAMAIS les techniques ou personnages (ex: Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji, Mash Burnedead a été élevé uniquement par Regro Burnedead son père adoptif, etc.).${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -775,6 +783,7 @@ function getMenu() {
 ╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
 │
 ├ ◈ 𝚇𝚒𝚖𝚐
+├ ◈ 𝚇𝚜 (𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
 ├ ◈ 𝚇𝚙𝚕𝚊𝚢
 ├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
 │
@@ -798,6 +807,7 @@ function getMenu() {
 ├ ◈ 𝚇𝚔𝚒𝚌𝚔
 ├ ◈ 𝚇𝚊𝚍𝚍
 ├ ◈ 𝚇𝚌𝚕𝚎𝚊𝚛
+├ ◈ 𝚇𝚘𝚗
 ├ ◈ 𝚇𝚘𝚏𝚏
 ├ ◈ 𝚇𝚛𝚎𝚜𝚝𝚊𝚛𝚝
 ├ ◈ 𝚇𝚘𝚗𝚕𝚢𝚊𝚍𝚖𝚒𝚗
@@ -868,7 +878,7 @@ async function fetchVerifiedFacts(query = '') {
     axios.get('https://api.duckduckgo.com/', {
       params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
       headers: { 'User-Agent': 'SitriNelBot/1.0' },
-      timeout: 4000
+      timeout: 2500
     }).then(res => {
       const out = [];
       const abstract = String(res.data?.AbstractText || '').trim();
@@ -903,7 +913,7 @@ async function fetchVerifiedFacts(query = '') {
       axios.get(`https://${domain}/api.php`, {
         params: { action: 'query', list: 'search', srsearch: clean, srlimit: 2, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 4000
+        timeout: 2500
       }).then(res => {
         const hits = res.data?.query?.search || [];
         return hits.map(hit => {
@@ -920,13 +930,13 @@ async function fetchVerifiedFacts(query = '') {
       axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
         params: { action: 'query', list: 'search', srsearch: clean, srlimit: 1, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 4000
+        timeout: 2500
       }).then(async res => {
         const hit = res.data?.query?.search?.[0];
         if (!hit?.title) return [];
         const sum = await axios.get(
           `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 4000 }
+          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
         );
         const extract = String(sum.data?.extract || '').trim();
         return extract ? [`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`] : [];
@@ -934,8 +944,47 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
+  // 4. Recherche Tavily (mode keyless officiel via X-Tavily-Access-Mode: keyless sans clé, ou Bearer token si TAVILY_API_KEY est définie)
+  tasks.push(
+    (async () => {
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (CONFIG.tavilyKey) {
+          headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
+        } else {
+          headers['X-Tavily-Access-Mode'] = 'keyless';
+        } else {
+          headers['X-Tavily-Access-Mode'] = 'keyless';
+        }
+        const payload = {
+          query: clean,
+          search_depth: 'basic',
+          max_results: 4,
+          include_answer: true
+        };
+        const res = await axios.post('https://api.tavily.com/search', payload, {
+          headers,
+          timeout: 4500
+        });
+        const out = [];
+        if (res.data?.answer) {
+          out.push(`[Tavily Synthèse] : ${String(res.data.answer).slice(0, 600)}`);
+        }
+        for (const r of (res.data?.results || []).slice(0, 3)) {
+          const snippet = String(r.content || '').trim();
+          if (snippet) {
+            out.push(`[Tavily - ${r.title || 'Source'}] : ${snippet.slice(0, 450)}`);
+          }
+        }
+        return out;
+      } catch {
+        return [];
+      }
+    })()
+  );
+
   const settled = await Promise.all(tasks);
-  return settled.flat().slice(0, 5).join('\n');
+  return settled.flat().slice(0, 8).join('\n');
 }
 
 async function getUserMemory(userJid) {
@@ -2306,65 +2355,340 @@ async function anilist(query, variables) {
   return (await res.json())?.data;
 }
 
-async function collectPhotos(terme, nombre = 1) {
-  const cleanTerme = String(terme).trim();
+const BLOCKED_IMAGE_HOST_OR_PATH = /(?:pixabay\.com\/get\/|commons\.wikimedia\.org\/.*(?:fresco|painting|portrait_of|stamp|pcb)|upload\.wikimedia\.org\/wikipedia\/commons\/thumb\/.*(?:120px|150px|200px)|lookaside|placeholder|avatar|icon|logo_placeholder)/i;
+
+function isValidImageUrl(url = '') {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return false;
+  if (BLOCKED_IMAGE_HOST_OR_PATH.test(clean)) return false;
+  return true;
+}
+
+function classifyImageQuery(raw = '') {
+  const clean = String(raw || '').trim();
+  const n = norm(clean);
+
+  const animeSignals = [
+    'luffy', 'zoro', 'sanji', 'nami', 'kaido', 'shanks', 'gear 5', 'gear5', 'nika',
+    'goku', 'vegeta', 'gohan', 'broly', 'piccolo', 'ultra instinct', 'ui', 'mui', 'super saiyan', 'ssj',
+    'naruto', 'sasuke', 'madara', 'rikudo', 'itachi', 'obito', 'kakashi', 'hashirama', 'uchiha',
+    'ichigo', 'aizen', 'bankai', 'zaraki', 'byakuya', 'rukia', 'soi fon',
+    'gojo', 'sukuna', 'megumi', 'itadori', 'toji', 'yuta',
+    'tanjiro', 'nezuko', 'zenitsu', 'inosuke', 'muzan',
+    'levi', 'eren', 'mikasa', 'gon', 'killua', 'kurapika', 'hisoka',
+    'asta', 'yuno', 'deku', 'bakugo', 'denji', 'makima', 'power',
+    'anime', 'manga', 'bankai', 'shikai', 'domain expansion', 'haki', 'nen', 'chakra', 'saiyan'
+  ];
+
+  const isAnime = animeSignals.some(sig => n.includes(sig));
+
+  const entitySignals = [
+    'drake', 'messi', 'ronaldo', 'neymar', 'mbappe', 'beyonce', 'rihanna', 'eminem', 'weeknd',
+    'stade', 'stadium', 'drapeau', 'flag', 'logo', 'pays', 'country', 'capitale', 'ville', 'city',
+    'tour eiffel', 'louvre', 'real madrid', 'barcelona', 'psg', 'chelsea', 'arsenal', 'manchester'
+  ];
+
+  const isNamedEntity = entitySignals.some(sig => n.includes(sig)) || /[A-Z][a-z]{2,}/.test(clean);
+
+  return {
+    isAnime,
+    isNamedEntity,
+    isGenericPhoto: !isAnime && !isNamedEntity
+  };
+}
+
+function extractMainAnimeCharacter(cleanTerme = '') {
+  const n = norm(cleanTerme);
+  const knownCharacters = [
+    { key: 'luffy', query: 'Monkey D. Luffy' },
+    { key: 'zoro', query: 'Roronoa Zoro' },
+    { key: 'sanji', query: 'Vinsmoke Sanji' },
+    { key: 'shanks', query: 'Shanks' },
+    { key: 'kaido', query: 'Kaido' },
+    { key: 'goku', query: 'Son Goku' },
+    { key: 'vegeta', query: 'Vegeta' },
+    { key: 'gohan', query: 'Son Gohan' },
+    { key: 'broly', query: 'Broly' },
+    { key: 'piccolo', query: 'Piccolo' },
+    { key: 'madara', query: 'Madara Uchiha' },
+    { key: 'sasuke', query: 'Sasuke Uchiha' },
+    { key: 'naruto', query: 'Naruto Uzumaki' },
+    { key: 'itachi', query: 'Itachi Uchiha' },
+    { key: 'obito', query: 'Obito Uchiha' },
+    { key: 'kakashi', query: 'Kakashi Hatake' },
+    { key: 'ichigo', query: 'Ichigo Kurosaki' },
+    { key: 'aizen', query: 'Sosuke Aizen' },
+    { key: 'gojo', query: 'Satoru Gojo' },
+    { key: 'sukuna', query: 'Ryomen Sukuna' },
+    { key: 'levi', query: 'Levi Ackerman' },
+    { key: 'eren', query: 'Eren Yeager' },
+    { key: 'gon', query: 'Gon Freecss' },
+    { key: 'killua', query: 'Killua Zoldyck' },
+    { key: 'tanjiro', query: 'Tanjiro Kamado' },
+    { key: 'nezuko', query: 'Nezuko Kamado' },
+    { key: 'asta', query: 'Asta' },
+    { key: 'deku', query: 'Izuku Midoriya' },
+    { key: 'denji', query: 'Denji' },
+    { key: 'makima', query: 'Makima' }
+  ];
+
+  const found = knownCharacters.find(item => n.includes(item.key));
+  if (found) return found.query;
+
+  return cleanTerme
+    .replace(/(en forme|forme|mode|version|gear\s*\d+|ultra\s*instinct|ui|mui|super\s*saiyan|ssj\d*|bankai|shikai|rikudo)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || cleanTerme;
+}
+
+async function fetchMediaWikiThumbnails(domain, searchQuery, limit = 4, labelSuffix = '') {
+  const items = [];
+  try {
+    const res = await axios.get(`https://${domain}/api.php`, {
+      params: {
+        action: 'query',
+        generator: 'search',
+        gsrsearch: searchQuery,
+        gsrlimit: limit,
+        prop: 'pageimages',
+        piprop: 'thumbnail',
+        pithumbsize: 1000,
+        format: 'json'
+      },
+      headers: {
+        'User-Agent': 'SitriNelBot/2.0 (https://github.com/sitri-nel; contact@sitri-nel.bot)'
+      },
+      timeout: 5500
+    });
+
+    const pages = Object.values(res.data?.query?.pages || {});
+    for (const p of pages) {
+      const imgUrl = p?.thumbnail?.source;
+      if (isValidImageUrl(imgUrl) && !items.some(i => i.url === imgUrl)) {
+        items.push({
+          url: imgUrl,
+          label: `${p.title || searchQuery}${labelSuffix}`,
+          verse: domain.replace('.fandom.com', '').replace('.wikipedia.org', '').toUpperCase()
+        });
+      }
+    }
+  } catch {
+    // Continuer
+  }
+  return items;
+}
+
+async function fetchTavilyVisuals(searchQuery, label, verse, limit = 5) {
+  const items = [];
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (CONFIG.tavilyKey) {
+      headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
+    } else {
+      headers['X-Tavily-Access-Mode'] = 'keyless';
+    }
+
+    const res = await axios.post(
+      'https://api.tavily.com/search',
+      {
+        query: searchQuery,
+        search_depth: 'advanced',
+        include_images: true,
+        max_results: limit
+      },
+      { headers, timeout: 6000 }
+    );
+
+    for (const img of (res.data?.images || [])) {
+      const imgUrl = typeof img === 'string' ? img : img?.url;
+      if (isValidImageUrl(imgUrl) && !items.some(i => i.url === imgUrl)) {
+        items.push({
+          url: imgUrl,
+          label,
+          verse
+        });
+      }
+    }
+  } catch {
+    // Continuer
+  }
+  return items;
+}
+
+async function collectAnimeImages(rawQuery, count = 1) {
+  const cleanTerme = normalizeAnimeQuery(rawQuery);
+  const coreCharacter = extractMainAnimeCharacter(cleanTerme);
   const results = [];
 
-  // 1. Wikipédia PageImages API (retourne une miniature JPEG directe à 800px jamais bloquée ni trop lourde)
-  for (const lang of ['fr', 'en']) {
-    if (results.length >= nombre + 2) break;
+  // 1. Recherche exacte sur AniList (forme complète puis personnage principal)
+  for (const q of [...new Set([cleanTerme, coreCharacter])]) {
+    if (!q || results.length >= count) break;
     try {
-      const pageImgRes = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: {
-          action: 'query',
-          generator: 'search',
-          gsrsearch: cleanTerme,
-          gsrlimit: 4,
-          prop: 'pageimages',
-          piprop: 'thumbnail',
-          pithumbsize: 800,
-          format: 'json'
-        },
-        headers: { 'User-Agent': 'SitriNelBot/1.0 (https://github.com/sitri-nel; contact@sitri-nel.bot)' },
-        timeout: 5000
-      });
-      const pages = Object.values(pageImgRes.data?.query?.pages || {});
-      for (const page of pages) {
-        const imageUrl = page?.thumbnail?.source;
-        if (imageUrl && !results.some(r => r.url === imageUrl)) {
+      const d = await anilist(
+        `query ($s: String, $n: Int) { Page(perPage: $n) { characters(search: $s) {
+          name { full native alternative } image { large }
+          media(perPage: 1) { nodes { title { romaji } } } } } }`,
+        { s: q, n: Math.max(count * 3, 6) }
+      );
+      const chars = d?.Page?.characters || [];
+      for (const c of chars) {
+        if (results.length >= count) break;
+        const imgUrl = c?.image?.large;
+        if (isValidImageUrl(imgUrl) && !results.some(r => r.url === imgUrl)) {
           results.push({
-            url: imageUrl,
-            label: page.title || cleanTerme,
-            verse: `Wikipédia (${lang.toUpperCase()})`
+            url: imgUrl,
+            label: `${c?.name?.full || cleanTerme}${cleanTerme.toLowerCase() !== (c?.name?.full || '').toLowerCase() ? ` — ${cleanTerme}` : ''}`,
+            verse: c?.media?.nodes?.[0]?.title?.romaji || 'AniList'
           });
         }
       }
     } catch (e) {
+      logger.warn({ error: e?.message }, 'AniList character lookup failed');
+    }
+  }
+
+  // 2. Wikis Fandom spécialisés pour les formes / transformations exactes (Gear 5, Ultra Instinct, Rikudo, etc.)
+  const n = norm(cleanTerme);
+  const fandomTargets = [];
+  if (/luffy|gear\s*5|nika|one\s*piece|zoro|sanji|shanks|kaido/.test(n)) {
+    fandomTargets.push('onepiece.fandom.com');
+  }
+  if (/goku|ultra\s*instinct|ui|mui|vegeta|gohan|broly|dragon\s*ball/.test(n)) {
+    fandomTargets.push('dragonball.fandom.com');
+  }
+  if (/madara|rikudo|naruto|sasuke|itachi|obito|kakashi|uchiha/.test(n)) {
+    fandomTargets.push('naruto.fandom.com');
+  }
+  if (/ichigo|aizen|bankai|bleach|zaraki|byakuya/.test(n)) {
+    fandomTargets.push('bleach.fandom.com');
+  }
+  if (/gojo|sukuna|megumi|itadori|jujutsu/.test(n)) {
+    fandomTargets.push('jujutsu-kaisen.fandom.com');
+  }
+
+  for (const domain of fandomTargets.slice(0, 2)) {
+    if (results.length >= count) break;
+    const wikiHits = await fetchMediaWikiThumbnails(domain, cleanTerme, 4, '');
+    for (const hit of wikiHits) {
+      if (results.length >= count) break;
+      if (!results.some(r => r.url === hit.url)) {
+        results.push(hit);
+      }
+    }
+  }
+
+  // 3. Recherche web ciblée anime pour la forme / scène précise (ex: "Luffy Gear 5 anime", "Goku Ultra Instinct anime")
+  if (results.length < count) {
+    const webAnimeHits = await fetchTavilyVisuals(
+      `${cleanTerme} anime official artwork OR character`,
+      cleanTerme,
+      'Anime Visual',
+      6
+    );
+    for (const hit of webAnimeHits) {
+      if (results.length >= count) break;
+      if (!results.some(r => r.url === hit.url)) {
+        results.push(hit);
+      }
+    }
+  }
+
+  return results.slice(0, count);
+}
+
+async function collectEntityOrWorldImages(rawQuery, count = 1) {
+  const cleanTerme = String(rawQuery || '').trim();
+  const n = norm(cleanTerme);
+  const results = [];
+
+  // Cas particulier : Drake (artiste musical / rappeur vs peinture fresque)
+  const searchTerm = n === 'drake' ? 'Drake rapper artist official' : cleanTerme;
+
+  // 1. Wikipédia FR & EN (portraits réels, stades, pays, logos, monuments)
+  for (const lang of ['en', 'fr']) {
+    if (results.length >= count) break;
+    const wikiHits = await fetchMediaWikiThumbnails(`${lang}.wikipedia.org`, searchTerm, 4, '');
+    for (const hit of wikiHits) {
+      if (results.length >= count) break;
+      if (!results.some(r => r.url === hit.url)) {
+        results.push(hit);
+      }
+    }
+  }
+
+  // 2. Recherche web ciblée (pays, logo, stade, personnalité)
+  if (results.length < count) {
+    const queryBoost =
+      /logo|marque|brand/.test(n) ? `${cleanTerme} logo high resolution` :
+      /stade|stadium/.test(n) ? `${cleanTerme} stadium photo` :
+      /pays|drapeau|flag|capitale/.test(n) ? `${cleanTerme} country flag landmark` :
+      n === 'drake' ? 'Drake musician portrait concert' :
+      `${cleanTerme} official photo`;
+
+    const webHits = await fetchTavilyVisuals(queryBoost, cleanTerme, 'Web Search', 6);
+    for (const hit of webHits) {
+      if (results.length >= count) break;
+      if (!results.some(r => r.url === hit.url)) {
+        results.push(hit);
+      }
+    }
+  }
+
+  // 3. Pixabay uniquement si la clé est présente et que ce n'est pas une personnalité/fresque
+  if (results.length < count && CONFIG.pixabayKey && n !== 'drake') {
+    try {
+      const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(cleanTerme)}&image_type=all&safesearch=true&per_page=${Math.max(count * 3, 6)}`;
+      const json = await (await fetch(url)).json();
+      for (const h of (json.hits || [])) {
+        if (results.length >= count) break;
+        const imgUrl = h.largeImageURL || h.webformatURL;
+        if (isValidImageUrl(imgUrl) && !results.some(r => r.url === imgUrl)) {
+          results.push({
+            url: imgUrl,
+            label: cleanTerme,
+            verse: 'Pixabay'
+          });
+        }
+      }
+    } catch {
       // Continuer
     }
   }
 
-  if (results.length >= nombre) return results.slice(0, nombre);
+  return results.slice(0, count);
+}
 
-  // 2. Pixabay (si clé présente)
+async function collectPhotos(terme, nombre = 1) {
+  const cleanTerme = String(terme).trim();
+  const results = [];
+
   if (CONFIG.pixabayKey) {
     try {
-      const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(cleanTerme)}&image_type=all&safesearch=true&per_page=${Math.max(nombre * 2, 5)}`;
+      const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(cleanTerme)}&image_type=photo&safesearch=true&per_page=${Math.max(nombre * 3, 8)}`;
       const json = await (await fetch(url)).json();
-      const hits = json.hits || [];
-      for (const h of hits) {
+      for (const h of (json.hits || [])) {
         if (results.length >= nombre) break;
         const imgUrl = h.largeImageURL || h.webformatURL;
-        if (imgUrl && !results.some(r => r.url === imgUrl)) {
+        if (isValidImageUrl(imgUrl) && !results.some(r => r.url === imgUrl)) {
           results.push({
             url: imgUrl,
             label: cleanTerme,
-            verse: "Pixabay"
+            verse: 'Pixabay'
           });
         }
       }
-    } catch (e) {
+    } catch {
       // Continuer
+    }
+  }
+
+  if (results.length < nombre) {
+    const extra = await collectEntityOrWorldImages(cleanTerme, nombre - results.length);
+    for (const item of extra) {
+      if (results.length >= nombre) break;
+      if (!results.some(r => r.url === item.url)) {
+        results.push(item);
+      }
     }
   }
 
@@ -2374,72 +2698,36 @@ async function collectPhotos(terme, nombre = 1) {
 function normalizeAnimeQuery(raw = '') {
   return String(raw)
     .replace(/^(image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
-    .replace(/\buchiwa\b/gi, 'Uchiha')
-    .replace(/\bkirua\b/gi, 'Killua')
-    .replace(/\blivai\b/gi, 'Levi')
-    .replace(/\bsangoku\b/gi, 'Son Goku')
-    .replace(/\bmikey\s+sano\b/gi, 'Manjiro Sano')
-    .replace(/\bdraken\b/gi, 'Ken Ryuguji')
+    .replace(/uchiwa/gi, 'Uchiha')
+    .replace(/kirua/gi, 'Killua')
+    .replace(/livai/gi, 'Levi')
+    .replace(/sangoku/gi, 'Son Goku')
+    .replace(/mikey\s+sano/gi, 'Manjiro Sano')
+    .replace(/draken/gi, 'Ken Ryuguji')
     .trim();
 }
 
 async function collectImageCandidates(terme, nombre = 1) {
   const cleanTerme = normalizeAnimeQuery(terme);
-  const mots = norm(cleanTerme).split(/\s+/).filter(Boolean);
+  const kind = classifyImageQuery(cleanTerme);
 
-  // 1. Recherche Personnages via AniList GraphQL (gère les surnoms et noms alternatifs comme Mikey, L, etc.)
-  try {
-    const d = await anilist(
-      `query ($s: String, $n: Int) { Page(perPage: $n) { characters(search: $s) {
-        name { full native alternative } image { large }
-        media(perPage: 1) { nodes { title { romaji } } } } } }`,
-      { s: cleanTerme, n: Math.max(nombre * 3, 8) }
-    );
-    const allChars = d?.Page?.characters || [];
-    // Priorité aux correspondances exactes ou contenant tous les mots dans full + alternative
-    const exactPersos = allChars.filter((p) => {
-      const allNames = norm([p.name?.full, ...(p.name?.alternative || [])].filter(Boolean).join(" "));
-      return mots.every((m) => allNames.includes(m));
-    });
-    const chosenPersos = exactPersos.length ? exactPersos : allChars;
-
-    if (chosenPersos.length) {
-      return chosenPersos.slice(0, nombre).map((p) => ({
-        url: p.image?.large,
-        label: p.name?.full || cleanTerme,
-        verse: p.media?.nodes?.[0]?.title?.romaji || ""
-      })).filter(item => item.url);
-    }
-  } catch (e) {
-    logger.warn({ error: e?.message }, "AniList perso error");
+  if (kind.isAnime) {
+    const animeHits = await collectAnimeImages(cleanTerme, nombre);
+    if (animeHits.length) return animeHits;
   }
 
-  // 2. Recherche Animés / Mangas via AniList GraphQL
-  try {
-    const d = await anilist(
-      `query ($s: String, $n: Int) { Page(perPage: $n) { media(search: $s, type: ANIME) {
-        title { romaji english } coverImage { extraLarge large } } } }`,
-      { s: cleanTerme, n: Math.max(nombre, 5) }
-    );
-    const allMedias = d?.Page?.media || [];
-    const exactMedias = allMedias.filter((m) => {
-      const titles = norm([m.title?.romaji, m.title?.english].filter(Boolean).join(" "));
-      return mots.every((m) => titles.includes(m));
-    });
-    const chosenMedias = exactMedias.length ? exactMedias : allMedias;
-
-    if (chosenMedias.length) {
-      return chosenMedias.slice(0, nombre).map((m) => ({
-        url: m.coverImage?.extraLarge || m.coverImage?.large,
-        label: m.title?.romaji || cleanTerme,
-        verse: m.title?.english || ""
-      })).filter(item => item.url);
-    }
-  } catch (e) {
-    logger.warn({ error: e?.message }, "AniList media error");
+  if (kind.isNamedEntity) {
+    const entityHits = await collectEntityOrWorldImages(cleanTerme, nombre);
+    if (entityHits.length) return entityHits;
   }
 
-  // 3. SECOURS UNIVERSEL : Si AniList ne trouve rien (personnalités réelles comme Messi, webtoons, etc.)
+  // Pour les requêtes mixtes ou non classées : essayer d'abord AniList/Wiki anime si applicable, puis entités/web, puis photos
+  const animeFallback = await collectAnimeImages(cleanTerme, nombre);
+  if (animeFallback.length) return animeFallback;
+
+  const entityFallback = await collectEntityOrWorldImages(cleanTerme, nombre);
+  if (entityFallback.length) return entityFallback;
+
   return await collectPhotos(cleanTerme, nombre);
 }
 
@@ -2642,6 +2930,376 @@ async function multimediaNotIntegrated(jid, message, command) {
     `🎧 ${descriptions[command] || 'Cette fonction est en préparation.'}\n\nJe préfère signaler honnêtement qu’une intégration manque plutôt que prétendre qu’elle fonctionne.\n\n${SIGNATURE}`,
     message
   );
+}
+
+// ------------------------------------------------------------
+// 23 bis. DÉVOILEMENT VUE UNIQUE (XS) & RECHERCHE AUDIO/VIDÉO (XPLAY / XVIDEO)
+// ------------------------------------------------------------
+
+function extractViewOncePayload(message) {
+  const quotedCtx = getQuotedMessage(message);
+  let target = quotedCtx?.quotedMessage || unwrapContent(message);
+
+  if (!target) return null;
+
+  for (let i = 0; i < 6; i++) {
+    if (target.viewOnceMessage?.message) {
+      target = target.viewOnceMessage.message;
+    } else if (target.viewOnceMessageV2?.message) {
+      target = target.viewOnceMessageV2.message;
+    } else if (target.viewOnceMessageV2Extension?.message) {
+      target = target.viewOnceMessageV2Extension.message;
+    } else if (target.ephemeralMessage?.message) {
+      target = target.ephemeralMessage.message;
+    } else if (target.documentWithCaptionMessage?.message) {
+      target = target.documentWithCaptionMessage.message;
+    } else {
+      break;
+    }
+  }
+
+  if (target.imageMessage) {
+    return {
+      kind: 'image',
+      media: target.imageMessage,
+      caption: target.imageMessage.caption || ''
+    };
+  }
+
+  if (target.videoMessage) {
+    return {
+      kind: 'video',
+      media: target.videoMessage,
+      caption: target.videoMessage.caption || ''
+    };
+  }
+
+  if (target.audioMessage) {
+    return {
+      kind: 'audio',
+      media: target.audioMessage,
+      caption: ''
+    };
+  }
+
+  return null;
+}
+
+async function revealViewOnceMessage(jid, message) {
+  const payload = extractViewOncePayload(message);
+
+  if (!payload) {
+    await sendReply(
+      jid,
+      '👁️ Réponds à un message en vue unique (photo, vidéo ou audio) avec Xs pour le dévoiler.',
+      message
+    );
+    return false;
+  }
+
+  if (typeof Baileys.downloadMediaMessage !== 'function') {
+    await sendReply(
+      jid,
+      '⚠️ Le téléchargement de média n’est pas disponible dans cette version de Baileys.',
+      message
+    );
+    return false;
+  }
+
+  const quotedCtx = getQuotedMessage(message);
+  const targetMessageObj = quotedCtx?.stanzaId
+    ? {
+        key: {
+          remoteJid: quotedCtx.remoteJid || jid,
+          fromMe: Boolean(quotedCtx.participant && isBotParticipant(quotedCtx.participant)),
+          id: quotedCtx.stanzaId,
+          participant: quotedCtx.participant
+        },
+        message: quotedCtx.quotedMessage
+      }
+    : message;
+
+  try {
+    const buffer = await Baileys.downloadMediaMessage(
+      targetMessageObj,
+      'buffer',
+      {},
+      {
+        logger: baileysLogger,
+        reuploadRequest: sock.updateMediaMessage
+      }
+    );
+
+    if (!buffer || !buffer.length) {
+      await sendReply(jid, '⚠️ Impossible de récupérer le contenu du média à vue unique.', message);
+      return false;
+    }
+
+    const captionText = payload.caption
+      ? `🔓 𝗩𝗨𝗘 𝗨𝗡𝗜𝗤𝗨𝗘 𝗗𝗘́𝗩𝗢𝗜𝗟𝗘́𝗘
+💬 Légende : ${payload.caption}
+
+${SIGNATURE}`
+      : `🔓 𝗩𝗨𝗘 𝗨𝗡𝗜𝗤𝗨𝗘 𝗗𝗘́𝗩𝗢𝗜𝗟𝗘́𝗘
+
+${SIGNATURE}`;
+
+    if (payload.kind === 'image') {
+      await sock.sendMessage(
+        jid,
+        {
+          image: buffer,
+          mimetype: payload.media.mimetype || 'image/jpeg',
+          caption: captionText
+        },
+        { quoted: message }
+      );
+    } else if (payload.kind === 'video') {
+      await sock.sendMessage(
+        jid,
+        {
+          video: buffer,
+          mimetype: payload.media.mimetype || 'video/mp4',
+          caption: captionText
+        },
+        { quoted: message }
+      );
+    } else if (payload.kind === 'audio') {
+      await sock.sendMessage(
+        jid,
+        {
+          audio: buffer,
+          mimetype: payload.media.mimetype || 'audio/ogg; codecs=opus',
+          ptt: Boolean(payload.media.ptt)
+        },
+        { quoted: message }
+      );
+      if (captionText) {
+        await sendReply(jid, captionText, message);
+      }
+    }
+
+    return true;
+  } catch (error) {
+    logger.error({ error: error?.message }, 'Erreur lors du dévoilement de vue unique (Xs).');
+    await sendReply(
+      jid,
+      `⚠️ Impossible de dévoiler ce message à vue unique (${error?.message || 'erreur média'}).`,
+      message
+    );
+    return false;
+  }
+}
+
+async function searchYouTubeCandidates(query) {
+  const clean = String(query || '').trim();
+  if (!clean) return [];
+
+  // 1. Recherche via Tavily si disponible
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (CONFIG.tavilyKey) {
+      headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
+    } else {
+      headers['X-Tavily-Access-Mode'] = 'keyless';
+    }
+    const res = await axios.post(
+      'https://api.tavily.com/search',
+      {
+        query: `${clean} youtube watch`,
+        search_depth: 'basic',
+        max_results: 5
+      },
+      { headers, timeout: 4500 }
+    );
+    const items = [];
+    for (const r of (res.data?.results || [])) {
+      const url = String(r.url || '');
+      if (/youtube\.com\/watch\?v=|youtu\.be\//i.test(url)) {
+        items.push({
+          title: String(r.title || clean).replace(/\s*-\s*YouTube$/i, '').trim(),
+          url
+        });
+      }
+    }
+    if (items.length) return items;
+  } catch {
+    // Fallback DuckDuckGo HTML
+  }
+
+  // 2. Fallback DuckDuckGo HTML search
+  try {
+    const res = await axios.get('https://html.duckduckgo.com/html/', {
+      params: { q: `site:youtube.com/watch ${clean}` },
+      headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) SitriNelBot/1.0' },
+      timeout: 5000
+    });
+    const html = String(res.data || '');
+    const regex = /href="([^"]*youtube\.com\/watch\?v=[^"&]+|[^"]*youtu\.be\/[^"&]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    const items = [];
+    let match;
+    while ((match = regex.exec(html)) !== null && items.length < 5) {
+      const rawUrl = decodeURIComponent(match[1].replace(/^\/\/duckduckgo\.com\/l\/\?uddg=/, '').split('&')[0]);
+      const title = match[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      if (/^https?:\/\//i.test(rawUrl) && !items.some(i => i.url === rawUrl)) {
+        items.push({ title: title || clean, url: rawUrl });
+      }
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+async function resolveStreamUrl(videoUrl, mode = 'audio') {
+  const endpoints = [
+    'https://api.cobalt.tools/api/json',
+    'https://co.wuk.sh/api/json'
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await axios.post(
+        endpoint,
+        {
+          url: videoUrl,
+          downloadMode: mode === 'audio' ? 'audio' : 'auto',
+          audioFormat: 'mp3',
+          videoQuality: '480'
+        },
+        {
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json'
+          },
+          timeout: 12000
+        }
+      );
+      const streamUrl = res.data?.url || res.data?.picker?.[0]?.url;
+      if (streamUrl && /^https?:\/\//i.test(streamUrl)) {
+        return streamUrl;
+      }
+    } catch {
+      // Essayer le suivant
+    }
+  }
+
+  return null;
+}
+
+async function handlePlayOrVideoCommand(jid, message, command, args) {
+  const query = String(args || '').trim();
+  const isAudio = command === 'play';
+
+  if (!query) {
+    await sendReply(
+      jid,
+      isAudio
+        ? '🎵 Utilisation : Xplay titre de la chanson ou artiste'
+        : '🎬 Utilisation : Xvideo titre de la vidéo ou sujet',
+      message
+    );
+    return true;
+  }
+
+  await sendReply(
+    jid,
+    isAudio
+      ? `🎵 Recherche audio en cours pour : "${query}"...`
+      : `🎬 Recherche vidéo en cours pour : "${query}"...`,
+    message
+  );
+
+  const results = await searchYouTubeCandidates(query);
+  const top = results[0];
+
+  if (!top?.url) {
+    await sendReply(
+      jid,
+      `⚠️ Aucun résultat trouvé pour "${query}". Réessaie avec un titre plus précis.`,
+      message
+    );
+    return true;
+  }
+
+  const streamUrl = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');
+
+  if (streamUrl) {
+    try {
+      const dl = await axios.get(streamUrl, {
+        responseType: 'arraybuffer',
+        timeout: 25000,
+        maxContentLength: CONFIG.maxMediaBytes,
+        maxBodyLength: CONFIG.maxMediaBytes,
+        headers: { 'User-Agent': 'SitriNelBot/1.0' }
+      });
+
+      const buf = Buffer.from(dl.data);
+      const mime = String(dl.headers['content-type'] || '').toLowerCase();
+
+      if (buf.length > 0 && buf.length <= CONFIG.maxMediaBytes) {
+        if (isAudio) {
+          await sock.sendMessage(
+            jid,
+            {
+              audio: buf,
+              mimetype: mime.startsWith('audio/') ? mime : 'audio/mpeg',
+              ptt: false
+            },
+            { quoted: message }
+          );
+          await sendReply(
+            jid,
+            `🎵 𝗟𝗘𝗖𝗧𝗨𝗥𝗘 𝗔𝗨𝗗𝗜𝗢
+📌 Titre : ${top.title}
+🔗 Lien : ${top.url}
+
+${SIGNATURE}`,
+            message
+          );
+          return true;
+        }
+
+        await sock.sendMessage(
+          jid,
+          {
+            video: buf,
+            mimetype: mime.startsWith('video/') ? mime : 'video/mp4',
+            caption: `🎬 𝗩𝗜𝗗𝗘́𝗢
+📌 Titre : ${top.title}
+🔗 Lien : ${top.url}
+
+${SIGNATURE}`
+          },
+          { quoted: message }
+        );
+        return true;
+      }
+    } catch {
+      // Repli propre sur le lien trouvé
+    }
+  }
+
+  await sendReply(
+    jid,
+    `${isAudio ? '🎵 𝗔𝗨𝗗𝗜𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́' : '🎬 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́𝗘'}
+
+` +
+      `📌 Titre : ${top.title}
+` +
+      `🔗 Lien : ${top.url}
+
+` +
+      `Le téléchargement direct du fichier n’a pas abouti côté serveur, utilise le lien ci-dessus.
+
+${SIGNATURE}`,
+    message
+  );
+  return true;
+}
+
+async function multimediaNotIntegrated(jid, message, command) {
+  return handlePlayOrVideoCommand(jid, message, command, '');
 }
 
 // ------------------------------------------------------------
@@ -2962,9 +3620,9 @@ const KNOWN_COMMANDS = new Set([
   'chat', 'ai', 'ask', 'anime', 'police', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
   'quiz', 'reponse',
-  'img', 'play', 'video',
+  'img', 'play', 'video', 's', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
-  'off', 'restart', 'upt', 'menu', 'models'
+  'on', 'off', 'restart', 'upt', 'menu', 'models'
 ]);
 
 const COMMAND_ALIASES = { ban: 'kick' };
@@ -3061,7 +3719,39 @@ async function processCommand(message) {
     if (handled) return;
   }
 
-  if (command === 'off' || command === 'restart') {
+  if (command === 'off') {
+    if (!ownerCommand) {
+      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
+      return;
+    }
+
+    isBotSleeping = true;
+    await sendReply(
+      jid,
+      '💤 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗘𝗡 𝗩𝗘𝗜𝗟𝗟𝗘
+Je me mets en pause. Utilise Xon pour me réveiller.',
+      message
+    );
+    return;
+  }
+
+  if (command === 'on') {
+    if (!ownerCommand) {
+      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
+      return;
+    }
+
+    isBotSleeping = false;
+    await sendReply(
+      jid,
+      '⚡ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 𝗥𝗘́𝗩𝗘𝗜𝗟𝗟𝗘́𝗘
+Je suis de nouveau active et prête !',
+      message
+    );
+    return;
+  }
+
+  if (command === 'restart') {
     if (!ownerCommand) {
       await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
       return;
@@ -3069,9 +3759,7 @@ async function processCommand(message) {
 
     await sendReply(
       jid,
-      command === 'off'
-        ? '⌁ Arrêt demandé par KAY≈DEN.'
-        : '⌁ Redémarrage demandé par KAY≈DEN.',
+      '⌁ Redémarrage demandé par KAY≈DEN.',
       message
     );
 
@@ -3079,9 +3767,13 @@ async function processCommand(message) {
 
     setTimeout(async () => {
       await releaseInstanceLock();
-      process.exit(command === 'off' ? 0 : 1);
+      process.exit(1);
     }, 1000);
 
+    return;
+  }
+
+  if (isBotSleeping) {
     return;
   }
 
@@ -3120,6 +3812,16 @@ async function processCommand(message) {
 
   if (command === 'upt') {
     await sendReply(jid, getUptimeText(), message);
+    return;
+  }
+
+  if (command === 's' || command === 'reveal') {
+    await revealViewOnceMessage(jid, message);
+    return;
+  }
+
+  if (command === 'play' || command === 'video') {
+    await handlePlayOrVideoCommand(jid, message, command, args);
     return;
   }
 

@@ -298,7 +298,6 @@ async function initDatabase(force = false) {
     ];
 
     if (USE_TURSO) {
-      // Exécution par lots pour réduire les allers-retours réseau et éviter le timeout Turso
       await db.batch(statements, 'write');
     } else {
       for (const sql of statements) {
@@ -306,7 +305,6 @@ async function initDatabase(force = false) {
       }
     }
 
-    // Migration douce si la table group_settings existait déjà sans chat_mode
     try {
       await executeDbWithRetry(
         `ALTER TABLE group_settings ADD COLUMN chat_mode INTEGER NOT NULL DEFAULT 0`
@@ -737,7 +735,7 @@ function formatAIReply(raw) {
             .replace(/^\s*[-*]\s+/, '◈ ')
             .replace(/\*\*(.+?)\*\*/g, '$1')
             .replace(/__(.+?)__/g, '$1')
-            .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=$|[\s).,;:!?])/g, '$1$2');
+            .replace(/(^|[\s(])\*(?!\s)([^\*\n]+?)\*(?=$|[\s).,;:!?])/g, '$1$2');
         })
         .join('\n');
 
@@ -838,7 +836,8 @@ function getMenu() {
 ╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
 │
 ├ ◈ 𝚇𝚒𝚖𝚐
-├ ◈ 𝚇𝚜 (𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
+├ ◈ 𝚇𝚜 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛 / 𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
+├ ◈ 𝚇𝚒 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛 ➜ 𝚒𝚖𝚊𝚐𝚎)
 ├ ◈ 𝚇𝚙𝚕𝚊𝚢
 ├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
 │
@@ -905,7 +904,7 @@ vive d'esprit et pleine d'humeurs.
 • Vérification factuelle, animés & synopsis (Xsyp)
 • Gestion des groupes & mentions
 • Économie et quiz dynamiques
-• Recherche et création d'images
+• Recherche, création d'images & stickers (Xs / Xi)
 
 ✦ 𝗖𝗥𝗘́𝗔𝗧𝗘𝗨𝗥
 KAY≈DEN
@@ -928,7 +927,6 @@ async function fetchVerifiedFacts(query = '') {
 
   const tasks = [];
 
-  // 1. DuckDuckGo Instant Answer
   tasks.push(
     axios.get('https://api.duckduckgo.com/', {
       params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
@@ -944,7 +942,6 @@ async function fetchVerifiedFacts(query = '') {
     }).catch(() => [])
   );
 
-  // 2. Wikis Fandom spécialisés (en parallèle)
   const fandomMap = [
     { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku/i, domain: 'jujutsu-kaisen.fandom.com' },
     { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo/i, domain: 'dragonball.fandom.com' },
@@ -979,7 +976,6 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
-  // 3. Wikipédia FR & EN (en parallèle)
   for (const lang of ['fr', 'en']) {
     tasks.push(
       axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
@@ -999,7 +995,6 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
-  // 4. Recherche Tavily (mode keyless officiel via X-Tavily-Access-Mode: keyless sans clé, ou Bearer token si TAVILY_API_KEY est définie)
   tasks.push(
     (async () => {
       try {
@@ -1098,7 +1093,8 @@ function extractUserFactsFromText(text = '') {
     discovered.push(`Âge : ${ageMatch[1]} ans`);
   }
 
-  const likeMatch = clean.match(/(?:j['’]adore|j['’]aime beaucoup|mon anim[ée] pr[ée]f[ée]r[ée] est)\s+([^.!?\n]{3,60})/i);
+  const likeMatch = clean.match(/(?:j['’]adore|j['’]aime beaucoup|mon anim[ée] pr[ée]f[ée]r[ée] est)\s+([^.!?
+]{3,60})/i);
   if (likeMatch?.[1]) {
     discovered.push(`Centre d'intérêt : ${likeMatch[1].trim()}`);
   }
@@ -1217,7 +1213,6 @@ async function askGroq(prompt, chatJid, options = {}) {
     'llama-3.1-8b-instant'
   ];
 
-  // Si Groq a renvoyé sa liste officielle de modèles actifs, on filtre pour ne garder que ceux qui existent vraiment !
   const validPreferred = dynamicModels.length
     ? preferredOrder.filter(m => dynamicModels.includes(m))
     : preferredOrder;
@@ -1590,8 +1585,6 @@ async function handleGroupCommand(jid, message, sender, command, args) {
       return true;
     }
 
-    // Sur WhatsApp, pour que la notification de mention fonctionne réellement pour tout le groupe,
-    // il faut passer les JID exacts des participants (item.id) dans `mentions`.
     const mentions = (metadata.participants || [])
       .map(item => item.id)
       .filter(Boolean)
@@ -1614,8 +1607,6 @@ async function handleGroupCommand(jid, message, sender, command, args) {
     }
 
     const bodyMessage = note || quotedText || '';
-    // On place les @numéro en caractères invisibles ou en bas de message pour que WhatsApp
-    // déclenche la vraie notification "@vous a été mentionné" sur chaque téléphone !
     const hiddenTags = mentions
       .map(participant => `@${participant.split('@')[0]}`)
       .join(' ');
@@ -2441,7 +2432,7 @@ function classifyImageQuery(raw = '') {
     'tour eiffel', 'louvre', 'real madrid', 'barcelona', 'psg', 'chelsea', 'arsenal', 'manchester'
   ];
 
-  const isNamedEntity = entitySignals.some(sig => n.includes(sig)) || /[A-Z][a-z]{2,}/.test(clean);
+  const isNamedEntity = entitySignals.some(sig => n.includes(sig)) || / [A-Z][a-z]{2,} /.test(clean);
 
   return {
     isAnime,
@@ -2489,7 +2480,7 @@ function extractMainAnimeCharacter(cleanTerme = '') {
   if (found) return found.query;
 
   return cleanTerme
-    .replace(/(en forme|forme|mode|version|gear\s*\d+|ultra\s*instinct|ui|mui|super\s*saiyan|ssj\d*|bankai|shikai|rikudo)/gi, ' ')
+    .replace(/ (en forme|forme|mode|version|gear\s*\d+|ultra\s*instinct|ui|mui|super\s*saiyan|ssj\d*|bankai|shikai|rikudo) /gi, ' ')
     .replace(/\s+/g, ' ')
     .trim() || cleanTerme;
 }
@@ -2573,7 +2564,6 @@ async function collectAnimeImages(rawQuery, count = 1) {
   const coreCharacter = extractMainAnimeCharacter(cleanTerme);
   const results = [];
 
-  // 1. Recherche exacte sur AniList (forme complète puis personnage principal)
   for (const q of [...new Set([cleanTerme, coreCharacter])]) {
     if (!q || results.length >= count) break;
     try {
@@ -2600,7 +2590,6 @@ async function collectAnimeImages(rawQuery, count = 1) {
     }
   }
 
-  // 2. Wikis Fandom spécialisés pour les formes / transformations exactes (Gear 5, Ultra Instinct, Rikudo, etc.)
   const n = norm(cleanTerme);
   const fandomTargets = [];
   if (/luffy|gear\s*5|nika|one\s*piece|zoro|sanji|shanks|kaido/.test(n)) {
@@ -2630,7 +2619,6 @@ async function collectAnimeImages(rawQuery, count = 1) {
     }
   }
 
-  // 3. Recherche web ciblée anime pour la forme / scène précise (ex: "Luffy Gear 5 anime", "Goku Ultra Instinct anime")
   if (results.length < count) {
     const webAnimeHits = await fetchTavilyVisuals(
       `${cleanTerme} anime official artwork OR character`,
@@ -2654,10 +2642,8 @@ async function collectEntityOrWorldImages(rawQuery, count = 1) {
   const n = norm(cleanTerme);
   const results = [];
 
-  // Cas particulier : Drake (artiste musical / rappeur vs peinture fresque)
   const searchTerm = n === 'drake' ? 'Drake rapper artist official' : cleanTerme;
 
-  // 1. Wikipédia FR & EN (portraits réels, stades, pays, logos, monuments)
   for (const lang of ['en', 'fr']) {
     if (results.length >= count) break;
     const wikiHits = await fetchMediaWikiThumbnails(`${lang}.wikipedia.org`, searchTerm, 4, '');
@@ -2669,7 +2655,6 @@ async function collectEntityOrWorldImages(rawQuery, count = 1) {
     }
   }
 
-  // 2. Recherche web ciblée (pays, logo, stade, personnalité)
   if (results.length < count) {
     const queryBoost =
       /logo|marque|brand/.test(n) ? `${cleanTerme} logo high resolution` :
@@ -2687,7 +2672,6 @@ async function collectEntityOrWorldImages(rawQuery, count = 1) {
     }
   }
 
-  // 3. Pixabay uniquement si la clé est présente et que ce n'est pas une personnalité/fresque
   if (results.length < count && CONFIG.pixabayKey && n !== 'drake') {
     try {
       const url = `https://pixabay.com/api/?key=${CONFIG.pixabayKey}&q=${encodeURIComponent(cleanTerme)}&image_type=all&safesearch=true&per_page=${Math.max(count * 3, 6)}`;
@@ -2751,12 +2735,12 @@ async function collectPhotos(terme, nombre = 1) {
 function normalizeAnimeQuery(raw = '') {
   return String(raw)
     .replace(/^(image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
-    .replace(/uchiwa/gi, 'Uchiha')
-    .replace(/kirua/gi, 'Killua')
-    .replace(/livai/gi, 'Levi')
-    .replace(/sangoku/gi, 'Son Goku')
-    .replace(/mikey\s+sano/gi, 'Manjiro Sano')
-    .replace(/draken/gi, 'Ken Ryuguji')
+    .replace(/ uchiwa /gi, 'Uchiha')
+    .replace(/ kirua /gi, 'Killua')
+    .replace(/ livai /gi, 'Levi')
+    .replace(/ sangoku /gi, 'Son Goku')
+    .replace(/ mikey\s+sano /gi, 'Manjiro Sano')
+    .replace(/ draken /gi, 'Ken Ryuguji')
     .trim();
 }
 
@@ -2774,7 +2758,6 @@ async function collectImageCandidates(terme, nombre = 1) {
     if (entityHits.length) return entityHits;
   }
 
-  // Pour les requêtes mixtes ou non classées : essayer d'abord AniList/Wiki anime si applicable, puis entités/web, puis photos
   const animeFallback = await collectAnimeImages(cleanTerme, nombre);
   if (animeFallback.length) return animeFallback;
 
@@ -2974,11 +2957,152 @@ async function generateImage(jid, message, prompt) {
   }
 }
 
-
-
 // ------------------------------------------------------------
-// 23 bis. DÉVOILEMENT VUE UNIQUE (XS) & RECHERCHE AUDIO/VIDÉO (XPLAY / XVIDEO)
+// 23 bis. STICKER (XS), IMAGE DEPUIS STICKER (XI), VUE UNIQUE & AUDIO/VIDÉO
 // ------------------------------------------------------------
+
+function extractImageOrStickerPayload(message, expectedKind = 'any') {
+  const quotedCtx = getQuotedMessage(message);
+  let target = quotedCtx?.quotedMessage || unwrapContent(message);
+
+  if (!target) return null;
+
+  for (let i = 0; i < 6; i++) {
+    if (target.viewOnceMessage?.message) {
+      target = target.viewOnceMessage.message;
+    } else if (target.viewOnceMessageV2?.message) {
+      target = target.viewOnceMessageV2.message;
+    } else if (target.viewOnceMessageV2Extension?.message) {
+      target = target.viewOnceMessageV2Extension.message;
+    } else if (target.ephemeralMessage?.message) {
+      target = target.ephemeralMessage.message;
+    } else if (target.documentWithCaptionMessage?.message) {
+      target = target.documentWithCaptionMessage.message;
+    } else {
+      break;
+    }
+  }
+
+  if ((expectedKind === 'any' || expectedKind === 'image') && target.imageMessage) {
+    return {
+      kind: 'image',
+      media: target.imageMessage,
+      quotedCtx
+    };
+  }
+
+  if ((expectedKind === 'any' || expectedKind === 'sticker') && target.stickerMessage) {
+    return {
+      kind: 'sticker',
+      media: target.stickerMessage,
+      quotedCtx
+    };
+  }
+
+  return null;
+}
+
+async function downloadTargetMediaBuffer(message, expectedKind) {
+  const payload = extractImageOrStickerPayload(message, expectedKind);
+  if (!payload) return null;
+
+  if (typeof Baileys.downloadMediaMessage !== 'function') {
+    throw new Error('downloadMediaMessage indisponible dans Baileys.');
+  }
+
+  const { quotedCtx, kind, media } = payload;
+  const targetMessageObj = quotedCtx?.stanzaId
+    ? {
+        key: {
+          remoteJid: quotedCtx.remoteJid || message?.key?.remoteJid,
+          fromMe: Boolean(quotedCtx.participant && isBotParticipant(quotedCtx.participant)),
+          id: quotedCtx.stanzaId,
+          participant: quotedCtx.participant
+        },
+        message: quotedCtx.quotedMessage
+      }
+    : message;
+
+  const buffer = await Baileys.downloadMediaMessage(
+    targetMessageObj,
+    'buffer',
+    {},
+    {
+      logger: baileysLogger,
+      reuploadRequest: sock.updateMediaMessage
+    }
+  );
+
+  if (!buffer || !buffer.length) {
+    throw new Error('Buffer média vide.');
+  }
+
+  return { buffer, kind, media };
+}
+
+async function convertImageToSticker(jid, message) {
+  try {
+    const mediaResult = await downloadTargetMediaBuffer(message, 'image');
+    if (!mediaResult?.buffer) {
+      await sendReply(
+        jid,
+        '🖼️ Réponds à une photo avec Xs (ou envoie une photo avec la légende Xs) pour la transformer en sticker.',
+        message
+      );
+      return true;
+    }
+
+    await sock.sendMessage(
+      jid,
+      {
+        sticker: mediaResult.buffer
+      },
+      { quoted: message }
+    );
+    return true;
+  } catch (error) {
+    logger.error({ error: error?.message }, 'Erreur conversion image -> sticker (Xs).');
+    await sendReply(
+      jid,
+      `⚠️ Impossible de convertir cette photo en sticker (${error?.message || 'erreur média'}).`,
+      message
+    );
+    return true;
+  }
+}
+
+async function convertStickerToImage(jid, message) {
+  try {
+    const mediaResult = await downloadTargetMediaBuffer(message, 'sticker');
+    if (!mediaResult?.buffer) {
+      await sendReply(
+        jid,
+        '🧩 Réponds à un sticker avec Xi pour le transformer en image.',
+        message
+      );
+      return true;
+    }
+
+    await sock.sendMessage(
+      jid,
+      {
+        image: mediaResult.buffer,
+        mimetype: 'image/webp',
+        caption: `🖼️ 𝗦𝗧𝗜𝗖𝗞𝗘𝗥 𝗘𝗡 𝗜𝗠𝗔𝗚𝗘\n\n${SIGNATURE}`
+      },
+      { quoted: message }
+    );
+    return true;
+  } catch (error) {
+    logger.error({ error: error?.message }, 'Erreur conversion sticker -> image (Xi).');
+    await sendReply(
+      jid,
+      `⚠️ Impossible de convertir ce sticker en image (${error?.message || 'erreur média'}).`,
+      message
+    );
+    return true;
+  }
+}
 
 function extractViewOncePayload(message) {
   const quotedCtx = getQuotedMessage(message);
@@ -3080,13 +3204,8 @@ async function revealViewOnceMessage(jid, message) {
     }
 
     const captionText = payload.caption
-      ? `🔓 𝗩𝗨𝗘 𝗨𝗡𝗜𝗤𝗨𝗘 𝗗𝗘́𝗩𝗢𝗜𝗟𝗘́𝗘
-💬 Légende : ${payload.caption}
-
-${SIGNATURE}`
-      : `🔓 𝗩𝗨𝗘 𝗨𝗡𝗜𝗤𝗨𝗘 𝗗𝗘́𝗩𝗢𝗜𝗟𝗘́𝗘
-
-${SIGNATURE}`;
+      ? `🔓 𝗩𝗨𝗘 𝗨𝗡𝗜𝗤𝗨𝗘 𝗗𝗘́𝗩𝗢𝗜𝗟𝗘́𝗘\n💬 Légende : ${payload.caption}\n\n${SIGNATURE}`
+      : `🔓 𝗩𝗨𝗘 𝗨𝗡𝗜𝗤𝗨𝗘 𝗗𝗘́𝗩𝗢𝗜𝗟𝗘́𝗘\n\n${SIGNATURE}`;
 
     if (payload.kind === 'image') {
       await sock.sendMessage(
@@ -3139,7 +3258,6 @@ async function searchYouTubeCandidates(query) {
   const clean = String(query || '').trim();
   if (!clean) return [];
 
-  // 1. Recherche via Tavily si disponible
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (CONFIG.tavilyKey) {
@@ -3171,7 +3289,6 @@ async function searchYouTubeCandidates(query) {
     // Fallback DuckDuckGo HTML
   }
 
-  // 2. Fallback DuckDuckGo HTML search
   try {
     const res = await axios.get('https://html.duckduckgo.com/html/', {
       params: { q: `site:youtube.com/watch ${clean}` },
@@ -3195,36 +3312,102 @@ async function searchYouTubeCandidates(query) {
   }
 }
 
+function extractYouTubeId(url = '') {
+  const match = String(url || '').match(
+    /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i
+  );
+  return match ? match[1] : '';
+}
+
 async function resolveStreamUrl(videoUrl, mode = 'audio') {
-  const endpoints = [
-    'https://api.cobalt.tools/api/json',
-    'https://co.wuk.sh/api/json'
+  const videoId = extractYouTubeId(videoUrl);
+
+  const cobaltTargets = [
+    {
+      url: 'https://api.cobalt.tools/',
+      body: {
+        url: videoUrl,
+        downloadMode: mode === 'audio' ? 'audio' : 'auto',
+        audioFormat: 'mp3',
+        videoQuality: '480'
+      }
+    },
+    {
+      url: 'https://api.cobalt.tools/api/json',
+      body: {
+        url: videoUrl,
+        downloadMode: mode === 'audio' ? 'audio' : 'auto',
+        audioFormat: 'mp3',
+        videoQuality: '480'
+      }
+    }
   ];
 
-  for (const endpoint of endpoints) {
+  for (const target of cobaltTargets) {
     try {
-      const res = await axios.post(
-        endpoint,
-        {
-          url: videoUrl,
-          downloadMode: mode === 'audio' ? 'audio' : 'auto',
-          audioFormat: 'mp3',
-          videoQuality: '480'
+      const res = await axios.post(target.url, target.body, {
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json'
         },
-        {
-          headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json'
-          },
-          timeout: 12000
-        }
-      );
+        timeout: 12000
+      });
       const streamUrl = res.data?.url || res.data?.picker?.[0]?.url;
       if (streamUrl && /^https?:\/\//i.test(streamUrl)) {
-        return streamUrl;
+        return { streamUrl, kind: mode };
       }
     } catch {
       // Essayer le suivant
+    }
+  }
+
+  if (videoId) {
+    const pipedInstances = [
+      'https://pipedapi.kavin.rocks',
+      'https://pipedapi.adminforge.de',
+      'https://pipedapi.moomoo.me'
+    ];
+
+    for (const base of pipedInstances) {
+      try {
+        const res = await axios.get(`${base}/streams/${videoId}`, {
+          headers: { 'User-Agent': 'SitriNelBot/1.0' },
+          timeout: 10000
+        });
+
+        const durationSec = Number(res.data?.duration || 0);
+        if (mode === 'video' && durationSec > 180) {
+          return { tooLong: true, durationSec };
+        }
+
+        if (mode === 'audio') {
+          const audioStreams = (res.data?.audioStreams || [])
+            .filter(s => s?.url && /^https?:\/\//i.test(s.url))
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          if (audioStreams[0]?.url) {
+            return {
+              streamUrl: audioStreams[0].url,
+              mime: audioStreams[0].mimeType || 'audio/mp4',
+              kind: 'audio',
+              durationSec
+            };
+          }
+        } else {
+          const videoStreams = (res.data?.videoStreams || [])
+            .filter(s => s?.url && /^https?:\/\//i.test(s.url) && !s.videoOnly)
+            .sort((a, b) => (parseInt(a.height, 10) || 480) - (parseInt(b.height, 10) || 480));
+          if (videoStreams[0]?.url) {
+            return {
+              streamUrl: videoStreams[0].url,
+              mime: videoStreams[0].mimeType || 'video/mp4',
+              kind: 'video',
+              durationSec
+            };
+          }
+        }
+      } catch {
+        // Essayer l'instance suivante
+      }
     }
   }
 
@@ -3240,7 +3423,7 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
       jid,
       isAudio
         ? '🎵 Utilisation : Xplay titre de la chanson ou artiste'
-        : '🎬 Utilisation : Xvideo titre de la vidéo ou sujet',
+        : '🎬 Utilisation : Xvideo titre de la vidéo ou sujet (max 3 min)',
       message
     );
     return true;
@@ -3250,7 +3433,7 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
     jid,
     isAudio
       ? `🎵 Recherche audio en cours pour : "${query}"...`
-      : `🎬 Recherche vidéo en cours pour : "${query}"...`,
+      : `🎬 Recherche vidéo en cours pour : "${query}" (max 3 min)...`,
     message
   );
 
@@ -3266,20 +3449,32 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
     return true;
   }
 
-  const streamUrl = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');
+  const resolved = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');
 
-  if (streamUrl) {
+  if (resolved?.tooLong) {
+    await sendReply(
+      jid,
+      `⏱️ 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗣 𝗟𝗢𝗡𝗚𝗨𝗘 (${formatDuration(resolved.durationSec)})\n` +
+        `La limite pour l'envoi direct est fixée à 3 minutes (180 s).\n` +
+        `🔗 Lien : ${top.url}\n\n${SIGNATURE}`,
+      message
+    );
+    return true;
+  }
+
+  if (resolved?.streamUrl) {
     try {
-      const dl = await axios.get(streamUrl, {
+      const dl = await axios.get(resolved.streamUrl, {
         responseType: 'arraybuffer',
-        timeout: 25000,
+        timeout: 30000,
         maxContentLength: CONFIG.maxMediaBytes,
         maxBodyLength: CONFIG.maxMediaBytes,
-        headers: { 'User-Agent': 'SitriNelBot/1.0' }
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SitriNelBot/1.0' }
       });
 
       const buf = Buffer.from(dl.data);
-      const mime = String(dl.headers['content-type'] || '').toLowerCase();
+      const headerMime = String(dl.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+      const mime = headerMime || resolved.mime || (isAudio ? 'audio/mpeg' : 'video/mp4');
 
       if (buf.length > 0 && buf.length <= CONFIG.maxMediaBytes) {
         if (isAudio) {
@@ -3287,18 +3482,14 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
             jid,
             {
               audio: buf,
-              mimetype: mime.startsWith('audio/') ? mime : 'audio/mpeg',
+              mimetype: mime.startsWith('audio/') ? mime : 'audio/mp4',
               ptt: false
             },
             { quoted: message }
           );
           await sendReply(
             jid,
-            `🎵 𝗟𝗘𝗖𝗧𝗨𝗥𝗘 𝗔𝗨𝗗𝗜𝗢
-📌 Titre : ${top.title}
-🔗 Lien : ${top.url}
-
-${SIGNATURE}`,
+            `🎵 𝗟𝗘𝗖𝗧𝗨𝗥𝗘 𝗔𝗨𝗗𝗜𝗢\n📌 Titre : ${top.title}\n🔗 Lien : ${top.url}\n\n${SIGNATURE}`,
             message
           );
           return true;
@@ -3309,34 +3500,23 @@ ${SIGNATURE}`,
           {
             video: buf,
             mimetype: mime.startsWith('video/') ? mime : 'video/mp4',
-            caption: `🎬 𝗩𝗜𝗗𝗘́𝗢
-📌 Titre : ${top.title}
-🔗 Lien : ${top.url}
-
-${SIGNATURE}`
+            caption: `🎬 𝗩𝗜𝗗𝗘́𝗢\n📌 Titre : ${top.title}\n🔗 Lien : ${top.url}\n\n${SIGNATURE}`
           },
           { quoted: message }
         );
         return true;
       }
-    } catch {
-      // Repli propre sur le lien trouvé
+    } catch (dlErr) {
+      logger.warn({ error: dlErr?.message }, 'Téléchargement direct du flux impossible, repli sur le lien.');
     }
   }
 
   await sendReply(
     jid,
-    `${isAudio ? '🎵 𝗔𝗨𝗗𝗜𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́' : '🎬 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́𝗘'}
-
-` +
-      `📌 Titre : ${top.title}
-` +
-      `🔗 Lien : ${top.url}
-
-` +
-      `Le téléchargement direct du fichier n’a pas abouti côté serveur, utilise le lien ci-dessus.
-
-${SIGNATURE}`,
+    `${isAudio ? '🎵 𝗔𝗨𝗗𝗜𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́' : '🎬 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́𝗘'}\n\n` +
+      `📌 Titre : ${top.title}\n` +
+      `🔗 Lien : ${top.url}\n\n` +
+      `Le téléchargement direct du fichier n’a pas abouti côté serveur, utilise le lien ci-dessus.\n\n${SIGNATURE}`,
     message
   );
   return true;
@@ -3501,7 +3681,6 @@ async function handleAICommand(jid, message, sender, command, args) {
     return false;
   }
 
-  // Commande Xchat on / Xchat off pour activer ou désactiver la réponse directe aux citations
   if (command === 'chat') {
     const toggle = String(args || '').trim().toLowerCase();
     if (toggle === 'on' || toggle === 'off') {
@@ -3546,7 +3725,7 @@ async function handleAICommand(jid, message, sender, command, args) {
     await sendReply(
       jid,
       moduleMessage(
-        '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
+        '⌬ 𝗠𝗢𝗗𝗨𝗟𝗘 𝗘𝗡 𝗣𝗥𝗘́𝗣𝗔𝗥𝗔𝗧𝗜𝗢𝗡',
         'Ajoute GROQ_API_KEY dans les variables Railway pour activer le cerveau du bot.'
       ),
       message
@@ -3649,8 +3828,8 @@ async function handleMediaCommand(jid, message, command, args) {
   if (command === 'img') return handleImageCommand(jid, message, args);
 
   if (command === 'syp') {
-    await handleSynopsisCommand(jid, message, sender, args);
-    return;
+    await handleSynopsisCommand(jid, message, getMessageSender(message), args);
+    return true;
   }
 
   if (command === 'play' || command === 'video') {
@@ -3661,9 +3840,8 @@ async function handleMediaCommand(jid, message, command, args) {
   return false;
 }
 
-
 // ------------------------------------------------------------
-// 25 bis. MODULE SYNOPSIS COMPLET D'ANIMÉ / MANGA (XSYP / XSYNOPSIS)
+// 25 bis. MODULE SYNOPSIS COMPLET D'ANIMÉ / MANGA (XSYP / XSPY)
 // ------------------------------------------------------------
 
 function stripHtmlTags(raw = '') {
@@ -3712,7 +3890,6 @@ async function fetchAniListMediaDetails(query) {
 
     if (data?.Media) return data.Media;
 
-    // Secours sur MANGA si aucun ANIME n'est remonté
     const mangaData = await anilist(
       `query ($s: String) {
         Media(search: $s, type: MANGA, sort: POPULARITY_DESC) {
@@ -3794,7 +3971,6 @@ async function handleSynopsisCommand(jid, message, sender, args) {
   const mainChars = (media?.characters?.nodes || []).map(c => c?.name?.full).filter(Boolean).join(', ');
   const rawDesc = stripHtmlTags(media?.description || '');
 
-  // 1. Téléchargement de l'image officielle du verse (AniList coverImage extraLarge/large -> fallback collectAnimeImages)
   let imagePayload = null;
   const candidateUrls = [
     media?.coverImage?.extraLarge,
@@ -3823,7 +3999,6 @@ async function handleSynopsisCommand(jid, message, sender, args) {
     }
   }
 
-  // 2. Génération d'un synopsis riche, détaillé et structuré en français via Groq + données vérifiées
   let synopsisBody = '';
   if (CONFIG.groqKey) {
     try {
@@ -3892,15 +4067,15 @@ Structure obligatoire (sans utiliser de markdown ** ni # ni tableaux) :
 // ------------------------------------------------------------
 
 const KNOWN_COMMANDS = new Set([
-  'chat', 'ai', 'ask', 'anime', 'police', 'syp', 'synopsis', 'sypnosis', 'info',
+  'chat', 'ai', 'ask', 'anime', 'police', 'syp', 'spy', 'synopsis', 'sypnosis', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
   'quiz', 'reponse',
-  'img', 'play', 'video', 's', 'reveal',
+  'img', 'play', 'video', 's', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models'
 ]);
 
-const COMMAND_ALIASES = { ban: 'kick', synopsis: 'syp', sypnosis: 'syp' };
+const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp' };
 
 async function processCommand(message) {
   const jid = message?.key?.remoteJid;
@@ -3913,18 +4088,13 @@ async function processCommand(message) {
   const sender = getMessageSender(message);
   if (!sender) return;
 
-  // Mémorisation passive de l'identité et des surnoms de chaque membre qui écrit
   if (!message.key?.fromMe) {
     updateMemoryFromMessage(sender, message?.pushName || '', text).catch(() => {});
   }
 
   const parsed = parseCommand(text);
 
-  // Messages sans préfixe "X" :
-  // 1. Appel direct par son nom ("Sitri-Nel ...") -> répond toujours (sauf boucle du bot lui-même)
-  // 2. Réponse directe (citation) à un message de Sitri-Nel -> répond uniquement si Xchat est ON
   if (!parsed) {
-    // Ignorer les propres réponses du bot (qui commencent par ⌬ 𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟 ou contiennent sa signature)
     if (
       message.key?.fromMe &&
       (text.startsWith('⌬') || text.includes('𝗦𝗜𝗧𝗥𝗜-𝗡𝗘𝗟') || text.includes('SITRI-NEL'))
@@ -3944,6 +4114,9 @@ async function processCommand(message) {
       }
 
       if (isDirectNameCall) {
+        if (isBotSleeping) {
+          return;
+        }
         if (CONFIG.groqKey) {
           const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
           await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
@@ -4093,8 +4266,23 @@ async function processCommand(message) {
     return;
   }
 
-  if (command === 's' || command === 'reveal') {
+  if (command === 'reveal') {
     await revealViewOnceMessage(jid, message);
+    return;
+  }
+
+  if (command === 's') {
+    const viewOncePayload = extractViewOncePayload(message);
+    if (viewOncePayload) {
+      await revealViewOnceMessage(jid, message);
+    } else {
+      await convertImageToSticker(jid, message);
+    }
+    return;
+  }
+
+  if (command === 'xi') {
+    await convertStickerToImage(jid, message);
     return;
   }
 

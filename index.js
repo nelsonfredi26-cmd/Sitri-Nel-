@@ -953,8 +953,6 @@ async function fetchVerifiedFacts(query = '') {
           headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
         } else {
           headers['X-Tavily-Access-Mode'] = 'keyless';
-        } else {
-          headers['X-Tavily-Access-Mode'] = 'keyless';
         }
         const payload = {
           query: clean,

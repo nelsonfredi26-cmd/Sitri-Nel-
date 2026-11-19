@@ -13,6 +13,16 @@ import pino from 'pino';
 import { createClient } from '@libsql/client';
 import axios from 'axios';
 import fs from 'fs';
+let createCanvasFn = null;
+let loadImageFn = null;
+try {
+  const canvasPkg = await import('@napi-rs/canvas');
+  createCanvasFn = canvasPkg.createCanvas || null;
+  loadImageFn = canvasPkg.loadImage || null;
+} catch {
+  createCanvasFn = null;
+  loadImageFn = null;
+}
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -2123,6 +2133,309 @@ ${SIGNATURE}
 `;
 }
 
+
+// ------------------------------------------------------------
+// 21 bis. CARTE NUMÉRIQUE PROFIL / XP / XRANK (RAILWAY READY)
+// ------------------------------------------------------------
+
+function drawRoundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+async function generateProfileVisualCard({
+  username,
+  avatarBuffer,
+  level,
+  xp,
+  currentLevelXp,
+  nextLevelXp,
+  coins,
+  rankLabel,
+  position,
+  totalUsers,
+  mode = 'profil'
+}) {
+  if (!createCanvasFn) {
+    return null;
+  }
+
+  const width = 920;
+  const height = 320;
+  const canvas = createCanvasFn(width, height);
+  const ctx = canvas.getContext('2d');
+
+  // Fond sombre néon adapté à Railway (zéro dépendance système externe)
+  const bg = ctx.createLinearGradient(0, 0, width, height);
+  bg.addColorStop(0, '#070b14');
+  bg.addColorStop(0.55, '#151238');
+  bg.addColorStop(1, '#091426');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  // Décorations lumineuses subtiles
+  ctx.save();
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.08)';
+  ctx.beginPath();
+  ctx.arc(140, 160, 125, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(168, 85, 247, 0.09)';
+  ctx.beginPath();
+  ctx.arc(780, 75, 110, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Cadre principal
+  ctx.save();
+  drawRoundRect(ctx, 22, 22, width - 44, height - 44, 24);
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(129, 140, 248, 0.45)';
+  ctx.stroke();
+  ctx.restore();
+
+  // Avatar circulaire à gauche
+  const cx = 142;
+  const cy = 160;
+  const radius = 82;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius + 6, 0, Math.PI * 2);
+  const ringGrad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
+  ringGrad.addColorStop(0, '#38bdf8');
+  ringGrad.addColorStop(1, '#c084fc');
+  ctx.fillStyle = ringGrad;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.clip();
+
+  let drewAvatar = false;
+  if (avatarBuffer && loadImageFn) {
+    try {
+      const img = await loadImageFn(avatarBuffer);
+      ctx.drawImage(img, cx - radius, cy - radius, radius * 2, radius * 2);
+      drewAvatar = true;
+    } catch {
+      drewAvatar = false;
+    }
+  }
+
+  if (!drewAvatar) {
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 58px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(username || 'U').charAt(0).toUpperCase(), cx, cy);
+  }
+  ctx.restore();
+
+  // Infos à droite de l'avatar
+  const leftX = 256;
+  const rightEdge = width - 48;
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  const cleanName = String(username || 'Utilisateur').slice(0, 20);
+  ctx.font = 'bold 34px sans-serif';
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillText(cleanName, leftX, 82);
+
+  ctx.font = 'bold 19px sans-serif';
+  ctx.fillStyle = '#c084fc';
+  const cleanRank = String(rankLabel || 'Novice').replace(/^[^\w\sÀ-ÖØ-öø-ÿ]+\s*/u, '').toUpperCase();
+  ctx.fillText(`${cleanRank}  •  ${mode.toUpperCase()}`, leftX, 114);
+
+  // Badge Niveau et Classement en haut à droite
+  ctx.textAlign = 'right';
+  ctx.font = 'bold 36px sans-serif';
+  ctx.fillStyle = '#38bdf8';
+  ctx.fillText(`LVL ${level}`, rightEdge, 82);
+
+  ctx.font = 'bold 21px sans-serif';
+  ctx.fillStyle = '#94a3b8';
+  const posText = position > 0 ? `#${position} / ${Math.max(totalUsers, 1)}` : 'NON CLASSÉ';
+  ctx.fillText(`RANK ${posText}`, rightEdge, 114);
+
+  // Statistiques numériques (XP & XCoins)
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText(`XP TOTAL : ${Number(xp || 0).toLocaleString()} XP`, leftX, 162);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillText(`COINS : ${Number(coins || 0).toLocaleString()}`, rightEdge, 162);
+
+  // Progression vers le palier suivant
+  const span = Math.max(Number(nextLevelXp || 100) - Number(currentLevelXp || 0), 1);
+  const progressInTier = Math.max(Number(xp || 0) - Number(currentLevelXp || 0), 0);
+  const ratio = Math.min(Math.max(progressInTier / span, 0), 1);
+  const pct = Math.floor(ratio * 100);
+
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillStyle = '#cbd5e1';
+  ctx.fillText(`PROGRESSION : ${pct}%`, leftX, 204);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText(`${Number(xp || 0)} / ${Number(nextLevelXp || 100)} XP`, rightEdge, 204);
+
+  // Barre de progression
+  const barX = leftX;
+  const barY = 218;
+  const barW = rightEdge - leftX;
+  const barH = 28;
+
+  ctx.save();
+  drawRoundRect(ctx, barX, barY, barW, barH, 14);
+  ctx.fillStyle = '#1e293b';
+  ctx.fill();
+  ctx.restore();
+
+  const fillW = Math.max(Math.round(barW * ratio), ratio > 0 ? 28 : 0);
+  if (fillW > 0) {
+    ctx.save();
+    drawRoundRect(ctx, barX, barY, fillW, barH, 14);
+    const barGrad = ctx.createLinearGradient(barX, barY, barX + barW, barY);
+    barGrad.addColorStop(0, '#38bdf8');
+    barGrad.addColorStop(0.55, '#818cf8');
+    barGrad.addColorStop(1, '#c084fc');
+    ctx.fillStyle = barGrad;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Pied de carte
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.fillStyle = '#64748b';
+  ctx.fillText('SITRI-NEL • KAY≈DEN', leftX, 276);
+
+  return canvas.toBuffer('image/png');
+}
+
+function getLevelFromXp(xp = 0) {
+  const safeXp = Math.max(0, Number(xp) || 0);
+  return Math.floor(Math.sqrt(safeXp / 25)) + 1;
+}
+
+function getXpBoundsForLevel(level = 1) {
+  const lvl = Math.max(1, Number(level) || 1);
+  const currentLevelXp = 25 * ((lvl - 1) ** 2);
+  const nextLevelXp = 25 * (lvl ** 2);
+  return { currentLevelXp, nextLevelXp };
+}
+
+async function resolveProfileTarget(message, sender) {
+  const ctx = getContextInfo(message);
+  const mentioned = ctx?.mentionedJid?.[0];
+  const quotedSender = ctx?.stanzaId && ctx?.participant ? ctx.participant : '';
+  const rawTarget = mentioned || quotedSender || sender;
+  const targetJid = normalizeJid(rawTarget) || sender;
+
+  let avatarBuffer = null;
+  try {
+    const picUrl = await sock?.profilePictureUrl(targetJid, 'image');
+    if (picUrl) {
+      const dl = await downloadImageBuffer(picUrl);
+      avatarBuffer = dl?.buffer || null;
+    }
+  } catch {
+    avatarBuffer = null;
+  }
+
+  const mem = await getUserMemory(targetJid);
+  const displayName =
+    mem.name ||
+    (targetJid === sender ? getDisplayName(message, targetJid) : getNumber(targetJid) || 'Utilisateur');
+
+  return { targetJid, displayName, avatarBuffer };
+}
+
+async function sendVisualStatCard(jid, message, sender, command) {
+  const { targetJid, displayName, avatarBuffer } = await resolveProfileTarget(message, sender);
+  const user = await getUser(targetJid);
+  const xp = Number(user?.xp || 0);
+  const coins = Number(user?.coins || 0);
+  const level = getLevelFromXp(xp);
+  const { currentLevelXp, nextLevelXp } = getXpBoundsForLevel(level);
+  const rankLabel = getRank(xp);
+  const leaderboard = await getLeaderboard(50);
+  const idx = leaderboard.findIndex(item => item.jid === targetJid);
+  const position = idx >= 0 ? idx + 1 : 0;
+
+  const cardBuffer = await generateProfileVisualCard({
+    username: displayName,
+    avatarBuffer,
+    level,
+    xp,
+    currentLevelXp,
+    nextLevelXp,
+    coins,
+    rankLabel,
+    position,
+    totalUsers: leaderboard.length,
+    mode: command === 'xp' ? 'xp' : command === 'rank' ? 'rank' : 'profil'
+  });
+
+  const nextRank = getNextRank(xp);
+  const caption =
+    `╭━━〔 📊 𝗖𝗔𝗥𝗧𝗘 𝗡𝗨𝗠𝗘́𝗥𝗜𝗤𝗨𝗘 〕━━╮
+
+` +
+    `👤 𝗝𝗼𝘂𝗲𝘂𝗿 : ${displayName}
+` +
+    `⚡ 𝗡𝗶𝘃𝗲𝗮𝘂 : ${level} (${rankLabel})
+` +
+    `⭐ 𝗫𝗣 : ${xp} / ${nextLevelXp}
+` +
+    `💰 𝗖𝗼𝗶𝗻𝘀 : ${coins}
+` +
+    `🏆 𝗥𝗮𝗻𝗴 : ${position > 0 ? `#${position}/${leaderboard.length}` : 'Non classé'}
+` +
+    (nextRank ? `📈 𝗣𝗿𝗼𝗰𝗵𝗮𝗶𝗻 𝗽𝗮𝗹𝗶𝗲𝗿 : ${nextRank.name} (${nextRank.xp - xp} XP)
+` : '') +
+    `
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+
+${SIGNATURE}`;
+
+  if (cardBuffer) {
+    await sock.sendMessage(
+      jid,
+      {
+        image: cardBuffer,
+        mimetype: 'image/png',
+        caption
+      },
+      { quoted: message }
+    );
+  } else {
+    await sendReply(jid, caption, message);
+  }
+}
+
 // ------------------------------------------------------------
 // 22. QUIZ INTELLIGENT (GÉNÉRATION IA + SECOURS)
 // ------------------------------------------------------------
@@ -3594,31 +3907,8 @@ async function handleEconomyCommand(jid, message, sender, command) {
     return true;
   }
 
-  if (command === 'p' || command === 'xp') {
-    const user = await getUser(sender);
-    const xp = Number(user?.xp || 0);
-    const next = getNextRank(xp);
-
-    await sendReply(
-      jid,
-      `✧ 𝗘𝗫𝗣𝗘́𝗥𝗜𝗘𝗡𝗖𝗘\n\nXP : ${xp}\nRang : ${getRank(xp)}\nProchain rang : ${
-        next ? `${next.name} (${next.xp - xp} XP restants)` : 'rang maximal atteint'
-      }\n\n${SIGNATURE}`,
-      message
-    );
-    return true;
-  }
-
-  if (command === 'rank') {
-    const result = await getRankText(sender);
-    await sendReply(jid, getResultText(result, '🏆 Classement momentanément indisponible.'), message);
-    return true;
-  }
-
-  if (command === 'profil') {
-    const mem = await getUserMemory(sender);
-    const profile = await getProfileText(sender, mem.name || getDisplayName(message, sender));
-    await sendReply(jid, profile, message);
+  if (command === 'p' || command === 'xp' || command === 'rank' || command === 'profil') {
+    await sendVisualStatCard(jid, message, sender, command === 'p' ? 'xp' : command);
     return true;
   }
 
@@ -4063,6 +4353,22 @@ Structure obligatoire (sans utiliser de markdown ** ni # ni tableaux) :
 }
 
 // ------------------------------------------------------------
+
+const lastXpGainAt = new Map();
+
+async function grantPassiveMessageXp(senderJid) {
+  if (!senderJid) return;
+  const now = Date.now();
+  const prev = lastXpGainAt.get(senderJid) || 0;
+  if (now - prev < 30000) return;
+  lastXpGainAt.set(senderJid, now);
+  try {
+    await addRewards(senderJid, 0, 10);
+  } catch {
+    // Ignorer en cas d'indisponibilité DB ponctuelle
+  }
+}
+
 // 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
@@ -4090,6 +4396,9 @@ async function processCommand(message) {
 
   if (!message.key?.fromMe) {
     updateMemoryFromMessage(sender, message?.pushName || '', text).catch(() => {});
+    if (!isBotSleeping) {
+      grantPassiveMessageXp(sender).catch(() => {});
+    }
   }
 
   const parsed = parseCommand(text);

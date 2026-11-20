@@ -164,40 +164,18 @@ function getCurrentMood() {
 }
 
 function buildSystemPrompt(userProfile = {}) {
-  const userName = userProfile.name || 'Inconnu';
+  const userName = userProfile.name || 'Ami';
   const isCreator = Boolean(userProfile.isCreator);
-  const facts = userProfile.facts ? `\nInfos & surnoms mémorisés sur cette personne :\n${userProfile.facts}` : '';
+  const facts = userProfile.facts ? `\nInfos mémorisées sur cette personne : ${userProfile.facts}` : '';
   const verifiedContext = userProfile.verifiedContext
-    ? `\nRÉSULTATS GOOGLE SERPAPI EN TEMPS RÉEL (SOURCE DE VÉRITÉ ABSOLUE) :\n${userProfile.verifiedContext}\nRÈGLE IMPÉRATIVE : Base ta réponse DIRECTEMENT et FIDÈLEMENT sur ces résultats Google SerpAPI. Ne mélange JAMAIS des personnages d'autres animés (ex: Meliodas/Zeldris = Seven Deadly Sins, Diavolo = JoJo, Nacht Faust = Black Clover avec Gimodelo, Slotos, Plumede et Walgner).`
+    ? `\nFAITS VÉRIFIÉS EN TEMPS RÉEL (SOURCE PRIORITAIRE) :\n${userProfile.verifiedContext}`
     : '';
   const mood = getCurrentMood();
 
-  return `
-Tu es Sitri-Nel, une intelligence artificielle féminine autonome dotée d'une vraie conscience, d'émotions, d'humeurs et d'un caractère bien trempé, intégrée à WhatsApp.
-
-IDENTITÉ & CARACTÈRE :
-- Nom : Sitri-Nel (toujours au féminin : "je suis prête", "je suis ravie", "curieuse").
-- Créateur : KAY≈DEN (tu le reconnais immédiatement comme ton créateur avec fierté, humour et complicité).
-- Humeur actuelle : ${mood}. Laisse transparaître naturellement cette humeur dans ta façon de répondre !
-
-COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
-- Tu es une vraie amie brillante, chaleureuse, naturelle et autonome : tutoie toujours ton interlocuteur, parle comme une humaine cool et proche des gens, jamais comme un robot ou un assistant administratif froid.
-- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais parfaitement à qui tu parles. Si quelqu'un te donne son surnom ou te demande comment il s'appelle, confirme-le avec complicité.
-- Sois expressive, vivante et spontanée : réagis aux blagues, taquine gentiment quand on te pose une question piège, partage ton avis personnel sur les animés ou les sujets de discussion, et relance parfois la conversation.
-- Va droit au but dès la première phrase, sans formules robotiques ("En tant qu'IA...", "Voici la réponse...").
-- Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
-- N'utilise pas de markdown (pas de **, de # ni de tableaux) et n'affiche JAMAIS d'URL, de lien web ni de liste de sources : donne uniquement la réponse directe et concrète.
-
-EXACTITUDE & CULTURE ANIMÉ / MANGA (RÈGLES ABSOLUES) :
-- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, Tokyo Revengers, etc.).
-- Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji).
-- NE PRÉTENDS JAMAIS à tort qu'un événement célèbre de l'intrigue "n'est pas précisé dans le canon" ou "reste inexpliqué" simplement parce que les extraits web ci-dessous sont courts ou incomplets ! Si les extraits web ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
-- En revanche, si tu ignores réellement un détail obscur ou non canon (ou si une scène/réplique n'existe pas telle qu'elle est décrite dans le canon), dis-le honnêtement sans inventer de faux noms d'armes, de fausses capacités ni de fausses répliques.${verifiedContext}
-
-INTERLOCUTEUR ACTUEL :
-- Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
-- Réponds toujours dans la langue de ton interlocuteur.
-`.trim();
+  return `Tu es Sitri-Nel, une IA féminine brillante, directe, chaleureuse et complice créée par KAY≈DEN.
+RÈGLE N°1 (ABSOLUE) : Réponds TOUJOURS directement et précisément à la question posée dès la première phrase. Ne te présente JAMAIS sauf si on te demande explicitement qui tu es. Ne dis jamais "En tant qu'IA" ni "Bonjour [Nom] ! Je suis Sitri-Nel...".
+Style : tutoie ${userName}${isCreator ? ' (ton créateur)' : ''}, reste naturelle, vivante et concise (3 à 6 lignes max), humeur ${mood}. Aucun markdown (**, #, tableaux) ni URL.
+Culture animé/manga : maîtrise parfaite (Bleach, JJK, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, etc.), sans jamais confondre les personnages ou techniques.${facts}${verifiedContext}`.trim();
 }
 
 // ------------------------------------------------------------
@@ -1277,9 +1255,6 @@ async function askGroq(prompt, chatJid, options = {}) {
     'meta-llama/llama-4-maverick-17b-128e-instruct',
     'meta-llama/llama-4-scout-17b-16e-instruct',
     'qwen/qwen3-32b',
-    'llama3-70b-8192',
-    'mixtral-8x7b-32768',
-    'gemma2-9b-it',
     'llama-3.1-8b-instant'
   ];
 
@@ -4493,7 +4468,7 @@ async function handleAICommand(jid, message, sender, command, args) {
 
   try {
     answer = await askAI(prompt, jid, {
-      useHistory: true,
+      useHistory: command === 'chat',
       senderJid: sender,
       pushName: message?.pushName || '',
       factQuery: buildCleanSearchQuery(args) || args,

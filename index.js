@@ -950,8 +950,20 @@ ${SIGNATURE}
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
 
 function buildCleanSearchQuery(raw = '') {
-  return String(raw || '')
-    .replace(/^(?:sitri[- ]?nel|hey|salut|coucou|bonjour|yo|bonsoir|dis[- ]?moi|stp|s['’]il te pla[îi]t)[\s,!.:;-]*/gi, '')
+  let q = String(raw || '')
+    .replace(/^(?:x(?:ai|ia|ask|chat|anime|police|syp)|sitri[- ]?nel|hey|salut|coucou|bonjour|yo|bonsoir|dis[- ]?moi|stp|s['’]il te pla[îi]t)[\s,!.:;-]*/gi, '')
+    .trim();
+
+  // Retirer les formules interrogatives courantes pour cibler les mots-clés essentiels
+  q = q
+    .replace(/^(?:quel(?:le|s)?\s+(?:est|sont|était|étaient)\s+(?:le|la|les|l['’]|un|une|des|mon|ma|mes|ton|ta|tes)?\s*)/i, '')
+    .replace(/^(?:qui\s+(?:est|sont|était|étaient)\s+)/i, '')
+    .replace(/^(?:c['’]est\s+quoi\s+(?:le|la|les|l['’]|un|une|des)?\s*|qu['’]est[- ]ce\s+que\s+(?:le|la|les|l['’]|un|une|des)?\s*)/i, '')
+    .replace(/^(?:comment\s+(?:s['’]appelle|fonctionne|marche)\s+)/i, '')
+    .replace(/^(?:o[uù]\s+(?:se\s+trouve|est|sont)\s+)/i, '')
+    .replace(/^(?:quand\s+(?:est|a\s+lieu|sort|est\s+sorti)\s+)/i, '');
+
+  return q
     .replace(/[?!.,;:()\[\]"'’]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -981,7 +993,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         .join(' — ')
         .trim();
       if (abText) {
-        out.push(`[Google Réponse Directe ${lang.toUpperCase()}] : ${abText.slice(0, 800)}`);
+        out.push(`[SerpAPI Réponse Directe ${lang.toUpperCase()}] : ${abText.slice(0, 850)}`);
       }
     }
 
@@ -992,7 +1004,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         .join(' — ')
         .trim();
       if (kgText) {
-        out.push(`[Google Fiche ${lang.toUpperCase()}] : ${kgText.slice(0, 650)}`);
+        out.push(`[SerpAPI Fiche ${lang.toUpperCase()}] : ${kgText.slice(0, 700)}`);
       }
     }
 
@@ -1004,7 +1016,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         : '';
       const combined = [snippet, rich].filter(Boolean).join(' — ');
       if (combined) {
-        out.push(`[Google ${lang.toUpperCase()} - ${title}] : ${combined.slice(0, 550)}`);
+        out.push(`[SerpAPI ${lang.toUpperCase()} - ${title}] : ${combined.slice(0, 600)}`);
       }
     }
 
@@ -1033,72 +1045,6 @@ function decodeHtmlEntities(str = '') {
     .trim();
 }
 
-async function queryGoogleDirect(searchQuery, lang = 'fr') {
-  if (!searchQuery) return [];
-  const domain = lang === 'fr' ? 'www.google.fr' : 'www.google.com';
-  const gl = lang === 'fr' ? 'fr' : 'us';
-
-  try {
-    const res = await axios.get(`https://${domain}/search`, {
-      params: {
-        q: searchQuery,
-        hl: lang,
-        gl,
-        num: 8,
-        ie: 'UTF-8',
-        oe: 'UTF-8',
-        gbv: 1
-      },
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache'
-      },
-      timeout: 6500
-    });
-
-    const html = String(res.data || '');
-    if (!html || /unusual traffic|captcha/i.test(html)) {
-      return [];
-    }
-
-    const out = [];
-
-    // Featured snippet / Answer box blocks
-    const featuredBlocks = [
-      ...html.matchAll(/<div[^>]+class="[^"]*(?:BNeawe s3v9rd AP7Wnd|hgKElc|IZ6rdc|Z0LcW|kno-rdesc)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi)
-    ];
-
-    for (const m of featuredBlocks.slice(0, 6)) {
-      const cleaned = decodeHtmlEntities(m[1]);
-      if (cleaned && cleaned.length >= 25 && !out.some(line => line.includes(cleaned.slice(0, 40)))) {
-        out.push(`[Google Direct ${lang.toUpperCase()}] : ${cleaned.slice(0, 600)}`);
-      }
-    }
-
-    // Standard title + snippet blocks (gbv=1 & modern SERP)
-    const blockMatches = [
-      ...html.matchAll(/<h3[^>]*>([\s\S]*?)<\/h3>[\s\S]{0,1200}?<div[^>]+class="[^"]*(?:BNeawe s3v9rd AP7Wnd|VwiC3b)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi)
-    ];
-
-    for (const m of blockMatches.slice(0, 5)) {
-      const title = decodeHtmlEntities(m[1]);
-      const snippet = decodeHtmlEntities(m[2]);
-      if (snippet && snippet.length >= 25 && !out.some(line => line.includes(snippet.slice(0, 40)))) {
-        out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 550)}`);
-      }
-    }
-
-    logger.info({ lang, searchQuery, hits: out.length }, 'Résultats Google Direct récupérés');
-    return out;
-  } catch (err) {
-    logger.warn({ lang, searchQuery, error: err?.message }, 'Échec Google Direct');
-    return [];
-  }
-}
-
 async function queryDuckDuckGoSearch(searchQuery) {
   if (!searchQuery) return [];
   try {
@@ -1120,7 +1066,7 @@ async function queryDuckDuckGoSearch(searchQuery) {
       const title = decodeHtmlEntities(m[1]);
       const snippet = decodeHtmlEntities(m[2]);
       if (snippet && snippet.length > 25) {
-        out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
+        out.push(`[Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 500)}`);
       }
     }
     return out;
@@ -1158,29 +1104,35 @@ async function fetchVerifiedFacts(query = '') {
   const clean = buildCleanSearchQuery(query);
   if (!clean || clean.length < 2) return '';
 
-  // Lancer Google Direct (FR+EN), SerpAPI (si clé présente), Wikipédia et DuckDuckGo en parallèle
-  const tasks = [
-    queryGoogleDirect(clean, 'fr'),
-    queryGoogleDirect(clean, 'en'),
-    queryWikipediaSearch(clean),
-    queryDuckDuckGoSearch(clean)
-  ];
-
+  // 1. Priorité absolue : SerpAPI moteur Google (FR + EN)
+  let serpResults = [];
   if (CONFIG.serpApiKey) {
-    tasks.unshift(querySerpApiGoogle(clean, 'fr'), querySerpApiGoogle(clean, 'en'));
+    const [frSerp, enSerp] = await Promise.all([
+      querySerpApiGoogle(clean, 'fr'),
+      querySerpApiGoogle(clean, 'en')
+    ]);
+    serpResults = [...frSerp, ...enSerp];
   }
 
-  const settled = await Promise.all(tasks);
+  // 2. Complément Web/Wikipédia uniquement si SerpAPI n'a rien renvoyé ou peu de résultats
+  let extraResults = [];
+  if (serpResults.length < 3) {
+    const [wikiRes, ddgRes] = await Promise.all([
+      queryWikipediaSearch(clean),
+      queryDuckDuckGoSearch(clean)
+    ]);
+    extraResults = [...wikiRes, ...ddgRes];
+  }
+
   const merged = [];
-  for (const list of settled) {
-    for (const item of list) {
-      if (item && !merged.some(existing => existing.slice(0, 60) === item.slice(0, 60))) {
-        merged.push(item);
-      }
+  for (const item of [...serpResults, ...extraResults]) {
+    if (item && !merged.some(existing => existing.slice(0, 60) === item.slice(0, 60))) {
+      merged.push(item);
     }
   }
 
-  return merged.slice(0, 12).join('\n');
+  return merged.slice(0, 12).join('
+');
 }
 
 async function getUserMemory(userJid) {
@@ -1342,10 +1294,17 @@ async function askGroq(prompt, chatJid, options = {}) {
     }));
   }
 
+  const userContent = verifiedContext
+    ? `Question de l'utilisateur : ${String(prompt).trim()}
+
+Résultats trouvés via SerpAPI (Google) à vérifier, trier et synthétiser pour donner une réponse juste, claire et directe :
+${verifiedContext}`
+    : String(prompt).trim();
+
   const messages = [
     { role: 'system', content: systemPrompt },
     ...history,
-    { role: 'user', content: String(prompt).trim() }
+    { role: 'user', content: userContent }
   ];
 
   const dynamicModels = await listGroqModels();

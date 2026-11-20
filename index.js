@@ -100,7 +100,7 @@ const CONFIG = {
   groqModel: cleanEnv(process.env.GROQ_MODEL) || 'llama-3.3-70b-versatile',
   tursoUrl: cleanEnv(process.env.TURSO_DATABASE_URL),
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
-  serpApiKey: cleanEnv(process.env.SERPAPI_KEY),
+  serpApiKey: cleanEnv(process.env.SERPAPI_API_KEY || process.env.SERPAPI_KEY),
   tavilyKey: cleanEnv(process.env.TAVILY_API_KEY),
   pixabayKey: cleanEnv(process.env.PIXABAY_API_KEY),
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
@@ -186,7 +186,7 @@ COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
 - Sois expressive, vivante et spontanée : réagis aux blagues, taquine gentiment quand on te pose une question piège, partage ton avis personnel sur les animés ou les sujets de discussion, et relance parfois la conversation.
 - Va droit au but dès la première phrase, sans formules robotiques ("En tant qu'IA...", "Voici la réponse...").
 - Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
-- N'utilise pas de markdown (pas de **, de # ni de tableaux).
+- N'utilise pas de markdown (pas de **, de # ni de tableaux) et n'affiche JAMAIS d'URL, de lien web ni de liste de sources : donne uniquement la réponse directe et concrète.
 
 EXACTITUDE & CULTURE ANIMÉ / MANGA :
 - Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Mashle, Tokyo Revengers, etc.).
@@ -750,7 +750,8 @@ function formatAIReply(raw) {
         })
         .join('\n');
 
-      return boldSerif(text);
+      const noLinks = text.replace(/https?:\/\/\S+/gi, '').replace(/\n{3,}/g, '\n\n');
+      return boldSerif(noLinks);
     })
     .join('');
 
@@ -973,6 +974,39 @@ async function fetchVerifiedFacts(query = '') {
   if (!clean || clean.length < 2) return '';
 
   const tasks = [];
+
+  if (CONFIG.serpApiKey) {
+    tasks.push(
+      axios.get('https://serpapi.com/search.json', {
+        params: {
+          engine: 'google',
+          q: clean,
+          hl: 'fr',
+          api_key: CONFIG.serpApiKey,
+          num: 5
+        },
+        timeout: 6000
+      }).then(res => {
+        const out = [];
+        const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
+        if (answerBox) {
+          out.push(`[Google Réponse Directe] : ${String(answerBox).slice(0, 600)}`);
+        }
+        const kgDesc = res.data?.knowledge_graph?.description;
+        if (kgDesc) {
+          out.push(`[Google Fiche] : ${String(kgDesc).slice(0, 500)}`);
+        }
+        for (const item of (res.data?.organic_results || []).slice(0, 5)) {
+          const snippet = String(item.snippet || '').trim();
+          const title = String(item.title || '').trim();
+          if (snippet) {
+            out.push(`[Google - ${title}] : ${snippet.slice(0, 450)}`);
+          }
+        }
+        return out;
+      }).catch(() => [])
+    );
+  }
 
   tasks.push(
     axios.get('https://api.duckduckgo.com/', {
@@ -2620,8 +2654,7 @@ async function sendVisualStatCard(jid, message, sender, command) {
       jid,
       {
         image: cardBuffer,
-        mimetype: 'image/png',
-        caption
+        mimetype: 'image/png'
       },
       { quoted: message }
     );
@@ -4231,11 +4264,6 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
             },
             { quoted: message }
           );
-          await sendReply(
-            jid,
-            `🎵 𝗟𝗘𝗖𝗧𝗨𝗥𝗘 𝗔𝗨𝗗𝗜𝗢\n📌 Titre : ${top.title}\n🔗 Lien : ${top.url}\n\n${SIGNATURE}`,
-            message
-          );
           return true;
         }
 
@@ -4243,8 +4271,7 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
           jid,
           {
             video: buf,
-            mimetype: mime.startsWith('video/') ? mime : 'video/mp4',
-            caption: `🎬 𝗩𝗜𝗗𝗘́𝗢\n📌 Titre : ${top.title}\n🔗 Lien : ${top.url}\n\n${SIGNATURE}`
+            mimetype: mime.startsWith('video/') ? mime : 'video/mp4'
           },
           { quoted: message }
         );
@@ -4398,7 +4425,7 @@ function explainAIFailure(error) {
 }
 
 async function handleAICommand(jid, message, sender, command, args) {
-  if (!['chat', 'ai', 'ask', 'anime', 'police'].includes(command)) {
+  if (!['chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police'].includes(command)) {
     return false;
   }
 
@@ -4804,7 +4831,7 @@ async function grantPassiveMessageXp(senderJid) {
 // ------------------------------------------------------------
 
 const KNOWN_COMMANDS = new Set([
-  'chat', 'ai', 'ask', 'anime', 'police', 'syp', 'spy', 'synopsis', 'sypnosis', 'info',
+  'chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police', 'syp', 'spy', 'synopsis', 'sypnosis', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
   'quiz', 'reponse',
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',

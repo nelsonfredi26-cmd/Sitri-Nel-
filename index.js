@@ -970,7 +970,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         api_key: CONFIG.serpApiKey,
         num: 8
       },
-      timeout: 9000
+      timeout: 7000
     });
 
     const out = [];
@@ -981,7 +981,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         .join(' — ')
         .trim();
       if (abText) {
-        out.push(`[SerpAPI Google ${lang.toUpperCase()} Réponse Directe] : ${abText.slice(0, 800)}`);
+        out.push(`[Google Réponse Directe ${lang.toUpperCase()}] : ${abText.slice(0, 800)}`);
       }
     }
 
@@ -992,7 +992,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         .join(' — ')
         .trim();
       if (kgText) {
-        out.push(`[SerpAPI Google ${lang.toUpperCase()} Fiche] : ${kgText.slice(0, 650)}`);
+        out.push(`[Google Fiche ${lang.toUpperCase()}] : ${kgText.slice(0, 650)}`);
       }
     }
 
@@ -1004,7 +1004,7 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
         : '';
       const combined = [snippet, rich].filter(Boolean).join(' — ');
       if (combined) {
-        out.push(`[SerpAPI Google ${lang.toUpperCase()} - ${title}] : ${combined.slice(0, 550)}`);
+        out.push(`[Google ${lang.toUpperCase()} - ${title}] : ${combined.slice(0, 550)}`);
       }
     }
 
@@ -1019,69 +1019,168 @@ async function querySerpApiGoogle(searchQuery, lang = 'fr') {
   }
 }
 
-async function fetchVerifiedFacts(query = '') {
-  const clean = buildCleanSearchQuery(query);
-  if (!clean || clean.length < 2) return '';
+function decodeHtmlEntities(str = '') {
+  return String(str || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-  // 1. PRIORITÉ ABSOLUE : SerpAPI Google (FR + EN en parallèle)
-  if (CONFIG.serpApiKey) {
-    const [serpFr, serpEn] = await Promise.all([
-      querySerpApiGoogle(clean, 'fr'),
-      querySerpApiGoogle(clean, 'en')
-    ]);
-    const serpResults = [...serpFr, ...serpEn];
-    if (serpResults.length > 0) {
-      return serpResults.slice(0, 12).join('\n');
+async function queryGoogleDirect(searchQuery, lang = 'fr') {
+  if (!searchQuery) return [];
+  const domain = lang === 'fr' ? 'www.google.fr' : 'www.google.com';
+  const gl = lang === 'fr' ? 'fr' : 'us';
+
+  try {
+    const res = await axios.get(`https://${domain}/search`, {
+      params: {
+        q: searchQuery,
+        hl: lang,
+        gl,
+        num: 8,
+        ie: 'UTF-8',
+        oe: 'UTF-8',
+        gbv: 1
+      },
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache'
+      },
+      timeout: 6500
+    });
+
+    const html = String(res.data || '');
+    if (!html || /unusual traffic|captcha/i.test(html)) {
+      return [];
     }
+
+    const out = [];
+
+    // Featured snippet / Answer box blocks
+    const featuredBlocks = [
+      ...html.matchAll(/<div[^>]+class="[^"]*(?:BNeawe s3v9rd AP7Wnd|hgKElc|IZ6rdc|Z0LcW|kno-rdesc)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi)
+    ];
+
+    for (const m of featuredBlocks.slice(0, 6)) {
+      const cleaned = decodeHtmlEntities(m[1]);
+      if (cleaned && cleaned.length >= 25 && !out.some(line => line.includes(cleaned.slice(0, 40)))) {
+        out.push(`[Google Direct ${lang.toUpperCase()}] : ${cleaned.slice(0, 600)}`);
+      }
+    }
+
+    // Standard title + snippet blocks (gbv=1 & modern SERP)
+    const blockMatches = [
+      ...html.matchAll(/<h3[^>]*>([\s\S]*?)<\/h3>[\s\S]{0,1200}?<div[^>]+class="[^"]*(?:BNeawe s3v9rd AP7Wnd|VwiC3b)[^"]*"[^>]*>([\s\S]*?)<\/div>/gi)
+    ];
+
+    for (const m of blockMatches.slice(0, 5)) {
+      const title = decodeHtmlEntities(m[1]);
+      const snippet = decodeHtmlEntities(m[2]);
+      if (snippet && snippet.length >= 25 && !out.some(line => line.includes(snippet.slice(0, 40)))) {
+        out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 550)}`);
+      }
+    }
+
+    logger.info({ lang, searchQuery, hits: out.length }, 'Résultats Google Direct récupérés');
+    return out;
+  } catch (err) {
+    logger.warn({ lang, searchQuery, error: err?.message }, 'Échec Google Direct');
+    return [];
   }
+}
 
-  // 2. Repli uniquement si SerpAPI n'est pas configuré ou n'a renvoyé aucun résultat
-  const tasks = [];
+async function queryDuckDuckGoSearch(searchQuery) {
+  if (!searchQuery) return [];
+  try {
+    const res = await axios.get('https://html.duckduckgo.com/html/', {
+      params: { q: searchQuery },
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
+      },
+      timeout: 5500
+    });
+    const html = String(res.data || '');
+    const out = [];
+    const resultMatches = [
+      ...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)
+    ];
+    for (const m of resultMatches.slice(0, 5)) {
+      const title = decodeHtmlEntities(m[1]);
+      const snippet = decodeHtmlEntities(m[2]);
+      if (snippet && snippet.length > 25) {
+        out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
-  for (const lang of ['fr', 'en']) {
-    tasks.push(
-      axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: { action: 'query', list: 'search', srsearch: clean, srlimit: 2, format: 'json' },
+async function queryWikipediaSearch(searchQuery) {
+  const tasks = ['fr', 'en'].map(lang =>
+    axios
+      .get(`https://${lang}.wikipedia.org/w/api.php`, {
+        params: { action: 'query', list: 'search', srsearch: searchQuery, srlimit: 2, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 3000
-      }).then(async res => {
+        timeout: 3500
+      })
+      .then(async res => {
         const hit = res.data?.query?.search?.[0];
         if (!hit?.title) return [];
         const sum = await axios.get(
           `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 3000 }
+          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 3500 }
         );
         const extract = String(sum.data?.extract || '').trim();
         return extract ? [`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`] : [];
-      }).catch(() => [])
-    );
-  }
-
-  tasks.push(
-    axios.get('https://html.duckduckgo.com/html/', {
-      params: { q: clean },
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
-      },
-      timeout: 5500
-    }).then(res => {
-      const html = String(res.data || '');
-      const out = [];
-      const resultMatches = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)];
-      for (const m of resultMatches.slice(0, 4)) {
-        const title = m[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
-        const snippet = m[2].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-        if (snippet && snippet.length > 25) {
-          out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
-        }
-      }
-      return out;
-    }).catch(() => [])
+      })
+      .catch(() => [])
   );
 
   const settled = await Promise.all(tasks);
-  return settled.flat().slice(0, 10).join('\n');
+  return settled.flat();
+}
+
+async function fetchVerifiedFacts(query = '') {
+  const clean = buildCleanSearchQuery(query);
+  if (!clean || clean.length < 2) return '';
+
+  // Lancer Google Direct (FR+EN), SerpAPI (si clé présente), Wikipédia et DuckDuckGo en parallèle
+  const tasks = [
+    queryGoogleDirect(clean, 'fr'),
+    queryGoogleDirect(clean, 'en'),
+    queryWikipediaSearch(clean),
+    queryDuckDuckGoSearch(clean)
+  ];
+
+  if (CONFIG.serpApiKey) {
+    tasks.unshift(querySerpApiGoogle(clean, 'fr'), querySerpApiGoogle(clean, 'en'));
+  }
+
+  const settled = await Promise.all(tasks);
+  const merged = [];
+  for (const list of settled) {
+    for (const item of list) {
+      if (item && !merged.some(existing => existing.slice(0, 60) === item.slice(0, 60))) {
+        merged.push(item);
+      }
+    }
+  }
+
+  return merged.slice(0, 12).join('\n');
 }
 
 async function getUserMemory(userJid) {
@@ -1278,7 +1377,7 @@ async function askGroq(prompt, chatJid, options = {}) {
   let response = null;
   let lastError = null;
 
-  for (const model of candidateModels.slice(0, 6)) {
+  for (const model of candidateModels.slice(0, 5)) {
     try {
       response = await axios.post(
         `${GROQ_BASE}/chat/completions`,
@@ -1286,14 +1385,14 @@ async function askGroq(prompt, chatJid, options = {}) {
           model,
           messages,
           temperature: options.temperature ?? 0.25,
-          max_tokens: options.maxTokens ?? 1200
+          max_tokens: options.maxTokens ?? 900
         },
         {
           headers: {
             Authorization: `Bearer ${CONFIG.groqKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 20000
+          timeout: 10000
         }
       );
       CONFIG.groqModel = model;
@@ -1309,18 +1408,31 @@ async function askGroq(prompt, chatJid, options = {}) {
     }
   }
 
-  if (!response) {
-    throw lastError || new Error('Groq indisponible.');
+  let cleanAnswer = '';
+
+  if (response) {
+    cleanAnswer = String(
+      response.data?.choices?.[0]?.message?.content || ''
+    ).trim();
+
+    cleanAnswer = cleanAnswer.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   }
 
-  let cleanAnswer = String(
-    response.data?.choices?.[0]?.message?.content || ''
-  ).trim();
+  if (!cleanAnswer && verifiedContext) {
+    logger.warn('Groq indisponible, repli direct sur les résultats Google/Web récupérés.');
+    const topLines = verifiedContext
+      .split('\n')
+      .map(line => line.replace(/^\[[^\]]+\]\s*:\s*/, '').trim())
+      .filter(Boolean)
+      .slice(0, 3);
 
-  cleanAnswer = cleanAnswer.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    if (topLines.length) {
+      cleanAnswer = `Voici ce que j'ai trouvé sur Google :\n\n${topLines.join('\n\n')}`;
+    }
+  }
 
   if (!cleanAnswer) {
-    throw new Error('Groq a renvoyé une réponse vide.');
+    throw lastError || new Error('Groq indisponible.');
   }
 
   if (useHistory) {
@@ -4382,10 +4494,11 @@ function explainAIFailure(error) {
     503: `${provider} est surchargé. Réessaie dans un instant.`
   };
 
+  const rawDetail = apiMessage || error?.code || error?.message || '';
   return (
     error?.userMessage ||
     reasons[status] ||
-    `Le service ${provider} ne répond pas pour le moment. Réessaie plus tard.`
+    `Le service ${provider} ne répond pas pour le moment${rawDetail ? ` (${rawDetail})` : ''}. Réessaie plus tard.`
   );
 }
 

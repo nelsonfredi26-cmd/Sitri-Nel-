@@ -188,9 +188,11 @@ COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
 - Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux) et n'affiche JAMAIS d'URL, de lien web ni de liste de sources : donne uniquement la réponse directe et concrète.
 
-EXACTITUDE & CULTURE ANIMÉ / MANGA :
-- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Mashle, Tokyo Revengers, etc.).
-- Ne confonds JAMAIS les techniques ou personnages (ex: Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji, Mash Burnedead a été élevé uniquement par Regro Burnedead son père adoptif, etc.).${verifiedContext}
+EXACTITUDE & CULTURE ANIMÉ / MANGA (RÈGLES ABSOLUES) :
+- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, Tokyo Revengers, etc.).
+- Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji).
+- NE PRÉTENDS JAMAIS à tort qu'un événement célèbre de l'intrigue "n'est pas précisé dans le canon" ou "reste inexpliqué" simplement parce que les extraits web ci-dessous sont courts ou incomplets ! Si les extraits web ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
+- En revanche, si tu ignores réellement un détail obscur ou non canon, dis-le honnêtement sans inventer de faux noms d'armes ni de fausses capacités.${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -1008,6 +1010,44 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
+  // Recherche Google directe (HTML / résultats organiques) sans dépendre d'une clé SerpAPI
+  tasks.push(
+    axios.get('https://www.google.com/search', {
+      params: { q: clean, hl: 'fr', num: 5 },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
+      },
+      timeout: 5500
+    }).then(res => {
+      const html = String(res.data || '');
+      const out = [];
+      const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc)/i).slice(1, 6);
+      for (const blk of blocks) {
+        const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+        const title = titleMatch
+          ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
+          : '';
+        const textClean = blk
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .replace(/&amp;/g, '&')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (textClean && textClean.length > 35) {
+          const snippet = title ? textClean.replace(title, '').trim().slice(0, 420) : textClean.slice(0, 420);
+          if (snippet) {
+            out.push(`[Google Direct${title ? ` - ${title}` : ''}] : ${snippet}`);
+          }
+        }
+      }
+      return out.slice(0, 4);
+    }).catch(() => [])
+  );
+
   tasks.push(
     axios.get('https://api.duckduckgo.com/', {
       params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
@@ -1053,36 +1093,67 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
+  // Extraction de mots-clés propres pour les wikis anglophones/francophones
+  const keywordQuery = clean
+    .replace(/\b(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise)\b/gi, ' ')
+    .replace(/[?!.,;:()\[\]"'’]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || clean;
+
   const fandomMap = [
+    { regex: /akame|teigu|murasame|incursio|night\s*raid|esdeath|tatsumi|bulat|mine|leone/i, domain: 'akamegakill.fandom.com' },
+    { regex: /edens\s*zero|shiki|granbell|rebecca|happy|weisz|homura|ziggy|ether\s*gear/i, domain: 'edenszero.fandom.com' },
+    { regex: /fairy\s*tail|natsu|lucy|erza|gray|zeref|acnologia|ignir|igneel|guilde/i, domain: 'fairytail.fandom.com' },
     { regex: /kaiju|kafka\s*hibino|reno\s*ichikawa|mina\s*ashiro|kikoru/i, domain: 'kaiju-no-8.fandom.com' },
-    { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku/i, domain: 'jujutsu-kaisen.fandom.com' },
-    { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo/i, domain: 'dragonball.fandom.com' },
-    { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku/i, domain: 'naruto.fandom.com' },
-    { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko/i, domain: 'onepiece.fandom.com' },
-    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada|komamura|soi\s*fon|senjumaru/i, domain: 'bleach.fandom.com' },
-    { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzan|pilier|hashira/i, domain: 'kimetsu-no-yaiba.fandom.com' },
-    { regex: /hunter\s*x\s*hunter|hxh|gon|killua|kirua|kurapika|hisoka|nen/i, domain: 'hunterxhunter.fandom.com' },
-    { regex: /attack\s*on\s*titan|snk|shingeki|eren|levi|livai|mikasa|titan/i, domain: 'attackontitan.fandom.com' },
-    { regex: /my\s*hero\s*academia|mha|boku\s*no\s*hero|deku|midoriya|bakugo|all\s*might/i, domain: 'myheroacademia.fandom.com' },
-    { regex: /black\s*clover|asta|yuno|grimoire/i, domain: 'blackclover.fandom.com' },
-    { regex: /tokyo\s*revengers|mikey|manjiro|sano|takemichi|draken|toman/i, domain: 'tokyorevengers.fandom.com' },
-    { regex: /mashle|mash\s*burnedead|regro/i, domain: 'mashle.fandom.com' },
-    { regex: /chainsaw\s*man|denji|makima|power|aki|pochita/i, domain: 'chainsaw-man.fandom.com' },
-    { regex: /solo\s*leveling|sung\s*jin[- ]?woo|monarque/i, domain: 'solo-leveling.fandom.com' }
+    { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku|yuta|toji|mahoraga/i, domain: 'jujutsu-kaisen.fandom.com' },
+    { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo|broly|beerus/i, domain: 'dragonball.fandom.com' },
+    { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku|itachi|madara|obito/i, domain: 'naruto.fandom.com' },
+    { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko|devil\s*fruit|fruit\s*du\s*d[ée]mon/i, domain: 'onepiece.fandom.com' },
+    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada|komamura|soi\s*fon|senjumaru|zaraki|byakuya|yhwach/i, domain: 'bleach.fandom.com' },
+    { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzan|pilier|hashira|rengoku|akaza|kokushibo/i, domain: 'kimetsu-no-yaiba.fandom.com' },
+    { regex: /hunter\s*x\s*hunter|hxh|gon|killua|kirua|kurapika|hisoka|nen|meruem|chrollo/i, domain: 'hunterxhunter.fandom.com' },
+    { regex: /attack\s*on\s*titan|snk|shingeki|eren|levi|livai|mikasa|titan|reiner|zeke/i, domain: 'attackontitan.fandom.com' },
+    { regex: /my\s*hero\s*academia|mha|boku\s*no\s*hero|deku|midoriya|bakugo|all\s*might|shigaraki|one\s*for\s*all/i, domain: 'myheroacademia.fandom.com' },
+    { regex: /black\s*clover|asta|yuno|grimoire|yami|julius|lucius/i, domain: 'blackclover.fandom.com' },
+    { regex: /tokyo\s*revengers|mikey|manjiro|sano|takemichi|draken|toman|kisaki/i, domain: 'tokyorevengers.fandom.com' },
+    { regex: /mashle|mash\s*burnedead|regro|innocent\s*zero/i, domain: 'mashle.fandom.com' },
+    { regex: /chainsaw\s*man|denji|makima|power|aki|pochita|reze/i, domain: 'chainsaw-man.fandom.com' },
+    { regex: /solo\s*leveling|sung\s*jin[- ]?woo|monarque|igris|beru/i, domain: 'solo-leveling.fandom.com' },
+    { regex: /seven\s*deadly\s*sins|nanatsu|meliodas|ban|escanor|king|merlin|gowther/i, domain: 'nanatsu-no-taizai.fandom.com' },
+    { regex: /fullmetal\s*alchemist|fmab|edward\s*elric|alphonse|mustang|homunculus/i, domain: 'fma.fandom.com' },
+    { regex: /code\s*geass|lelouch|suzaku|geass|britannia/i, domain: 'codegeass.fandom.com' },
+    { regex: /death\s*note|light\s*yagami|ryuk|shinigami|misa/i, domain: 'deathnote.fandom.com' },
+    { regex: /sword\s*art\s*online|sao|kirito|asuna|aincrad/i, domain: 'swordartonline.fandom.com' },
+    { regex: /overlord|ainz|momonga|albedo|demiurge|nazarick/i, domain: 'overlordmaruyama.fandom.com' },
+    { regex: /re:?zero|subaru|emilia|rem|satella|echidna/i, domain: 'rezero.fandom.com' },
+    { regex: /fire\s*force|shinra|sho|benimaru|adolla/i, domain: 'fire-force.fandom.com' },
+    { regex: /blue\s*lock|isagi|bachira|rin\s*itoshi|nagi|barou/i, domain: 'bluelock.fandom.com' },
+    { regex: /bungo\s*stray\s*dogs|dazai|chuuya|atsushi|akutagawa/i, domain: 'bungostraydogs.fandom.com' },
+    { regex: /fate|gilgamesh|saber|artoria|shirou|archer|noble\s*phantasm/i, domain: 'typemoon.fandom.com' }
   ];
 
   const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain).slice(0, 2);
   for (const domain of matchedFandoms) {
     tasks.push(
       axios.get(`https://${domain}/api.php`, {
-        params: { action: 'query', list: 'search', srsearch: clean, srlimit: 2, format: 'json' },
+        params: {
+          action: 'query',
+          generator: 'search',
+          gsrsearch: keywordQuery,
+          gsrlimit: 3,
+          prop: 'extracts',
+          exintro: 1,
+          explaintext: 1,
+          exchars: 550,
+          format: 'json'
+        },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 2500
+        timeout: 3500
       }).then(res => {
-        const hits = res.data?.query?.search || [];
-        return hits.map(hit => {
-          const txt = String(hit.snippet || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#039;/g, "'").trim();
-          return txt ? `[Wiki Fandom (${domain}) - ${hit.title}] : ${txt}` : '';
+        const pages = Object.values(res.data?.query?.pages || {});
+        return pages.map(p => {
+          const txt = String(p.extract || '').replace(/\s+/g, ' ').trim();
+          return txt ? `[Wiki Fandom (${domain}) - ${p.title}] : ${txt.slice(0, 550)}` : '';
         }).filter(Boolean);
       }).catch(() => [])
     );
@@ -1117,9 +1188,9 @@ async function fetchVerifiedFacts(query = '') {
           headers['X-Tavily-Access-Mode'] = 'keyless';
         }
         const payload = {
-          query: clean,
-          search_depth: 'basic',
-          max_results: 4,
+          query: keywordQuery !== clean ? `${clean} (${keywordQuery})` : clean,
+          search_depth: 'advanced',
+          max_results: 5,
           include_answer: true
         };
         const res = await axios.post('https://api.tavily.com/search', payload, {

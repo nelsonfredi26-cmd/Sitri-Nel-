@@ -1023,7 +1023,38 @@ async function fetchVerifiedFacts(query = '') {
     }).catch(() => [])
   );
 
+  // Recherche Google globale en temps réel sur la question exacte (sans aucun mapping codé en dur)
+  if (CONFIG.serpApiKey) {
+    tasks.push(
+      axios.get('https://serpapi.com/search.json', {
+        params: {
+          engine: 'google',
+          q: clean,
+          hl: 'en',
+          api_key: CONFIG.serpApiKey,
+          num: 5
+        },
+        timeout: 6000
+      }).then(res => {
+        const out = [];
+        const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
+        if (answerBox) {
+          out.push(`[Google Global Réponse] : ${String(answerBox).slice(0, 600)}`);
+        }
+        for (const item of (res.data?.organic_results || []).slice(0, 4)) {
+          const snippet = String(item.snippet || '').trim();
+          const title = String(item.title || '').trim();
+          if (snippet) {
+            out.push(`[Google Global - ${title}] : ${snippet.slice(0, 450)}`);
+          }
+        }
+        return out;
+      }).catch(() => [])
+    );
+  }
+
   const fandomMap = [
+    { regex: /kaiju|kafka\s*hibino|reno\s*ichikawa|mina\s*ashiro|kikoru/i, domain: 'kaiju-no-8.fandom.com' },
     { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku/i, domain: 'jujutsu-kaisen.fandom.com' },
     { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo/i, domain: 'dragonball.fandom.com' },
     { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku/i, domain: 'naruto.fandom.com' },

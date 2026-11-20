@@ -192,7 +192,7 @@ EXACTITUDE & CULTURE ANIMÉ / MANGA (RÈGLES ABSOLUES) :
 - Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, Tokyo Revengers, etc.).
 - Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji).
 - NE PRÉTENDS JAMAIS à tort qu'un événement célèbre de l'intrigue "n'est pas précisé dans le canon" ou "reste inexpliqué" simplement parce que les extraits web ci-dessous sont courts ou incomplets ! Si les extraits web ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
-- En revanche, si tu ignores réellement un détail obscur ou non canon, dis-le honnêtement sans inventer de faux noms d'armes ni de fausses capacités.${verifiedContext}
+- En revanche, si tu ignores réellement un détail obscur ou non canon (ou si une scène/réplique n'existe pas telle qu'elle est décrite dans le canon), dis-le honnêtement sans inventer de faux noms d'armes, de fausses capacités ni de fausses répliques.${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -977,77 +977,90 @@ async function fetchVerifiedFacts(query = '') {
 
   const tasks = [];
 
+  // 1. Priorité absolue à SerpAPI (FR + EN) lorsqu'une clé est configurée
   if (CONFIG.serpApiKey) {
+    for (const lang of ['fr', 'en']) {
+      tasks.push(
+        axios.get('https://serpapi.com/search.json', {
+          params: {
+            engine: 'google',
+            q: clean,
+            hl: lang,
+            api_key: CONFIG.serpApiKey,
+            num: 6
+          },
+          timeout: 7000
+        }).then(res => {
+          const out = [];
+          const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
+          if (answerBox) {
+            out.push(`[SerpAPI ${lang.toUpperCase()} Réponse Directe] : ${String(answerBox).slice(0, 650)}`);
+          }
+          const kgDesc = res.data?.knowledge_graph?.description;
+          if (kgDesc) {
+            out.push(`[SerpAPI ${lang.toUpperCase()} Fiche] : ${String(kgDesc).slice(0, 550)}`);
+          }
+          for (const item of (res.data?.organic_results || []).slice(0, 5)) {
+            const snippet = String(item.snippet || '').trim();
+            const title = String(item.title || '').trim();
+            if (snippet) {
+              out.push(`[SerpAPI ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 480)}`);
+            }
+          }
+          return out;
+        }).catch(err => {
+          logger.warn({ lang, error: err?.response?.data?.error || err?.message }, 'Erreur appel SerpAPI');
+          return [];
+        })
+      );
+    }
+  }
+
+  // 2. Recherche Google directe (FR + EN) en complément / repli
+  for (const lang of ['fr', 'en']) {
     tasks.push(
-      axios.get('https://serpapi.com/search.json', {
-        params: {
-          engine: 'google',
-          q: clean,
-          hl: 'fr',
-          api_key: CONFIG.serpApiKey,
-          num: 5
+      axios.get('https://www.google.com/search', {
+        params: { q: clean, hl: lang, num: 6 },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9,fr;q=0.8'
         },
         timeout: 6000
       }).then(res => {
+        const html = String(res.data || '');
+        if (/sorry\/index|consent\.google\.com|unusual traffic/i.test(html)) {
+          return [];
+        }
         const out = [];
-        const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
-        if (answerBox) {
-          out.push(`[Google Réponse Directe] : ${String(answerBox).slice(0, 600)}`);
-        }
-        const kgDesc = res.data?.knowledge_graph?.description;
-        if (kgDesc) {
-          out.push(`[Google Fiche] : ${String(kgDesc).slice(0, 500)}`);
-        }
-        for (const item of (res.data?.organic_results || []).slice(0, 5)) {
-          const snippet = String(item.snippet || '').trim();
-          const title = String(item.title || '').trim();
-          if (snippet) {
-            out.push(`[Google - ${title}] : ${snippet.slice(0, 450)}`);
+        const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc|Gx5Zad)/i).slice(1, 7);
+        for (const blk of blocks) {
+          const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+          const title = titleMatch
+            ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
+            : '';
+          const textClean = blk
+            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&amp;/g, '&')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (textClean && textClean.length > 35) {
+            const snippet = title ? textClean.replace(title, '').trim().slice(0, 450) : textClean.slice(0, 450);
+            if (snippet) {
+              out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet}`);
+            }
           }
         }
-        return out;
+        return out.slice(0, 4);
       }).catch(() => [])
     );
   }
 
-  // Recherche Google directe (HTML / résultats organiques) sans dépendre d'une clé SerpAPI
-  tasks.push(
-    axios.get('https://www.google.com/search', {
-      params: { q: clean, hl: 'fr', num: 5 },
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
-      },
-      timeout: 5500
-    }).then(res => {
-      const html = String(res.data || '');
-      const out = [];
-      const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc)/i).slice(1, 6);
-      for (const blk of blocks) {
-        const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-        const title = titleMatch
-          ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
-          : '';
-        const textClean = blk
-          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-          .replace(/<[^>]+>/g, ' ')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .replace(/&amp;/g, '&')
-          .replace(/\s+/g, ' ')
-          .trim();
-        if (textClean && textClean.length > 35) {
-          const snippet = title ? textClean.replace(title, '').trim().slice(0, 420) : textClean.slice(0, 420);
-          if (snippet) {
-            out.push(`[Google Direct${title ? ` - ${title}` : ''}] : ${snippet}`);
-          }
-        }
-      }
-      return out.slice(0, 4);
-    }).catch(() => [])
-  );
-
+  // 3. DuckDuckGo Instant + DuckDuckGo HTML
   tasks.push(
     axios.get('https://api.duckduckgo.com/', {
       params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
@@ -1063,39 +1076,32 @@ async function fetchVerifiedFacts(query = '') {
     }).catch(() => [])
   );
 
-  // Recherche Google globale en temps réel sur la question exacte (sans aucun mapping codé en dur)
-  if (CONFIG.serpApiKey) {
-    tasks.push(
-      axios.get('https://serpapi.com/search.json', {
-        params: {
-          engine: 'google',
-          q: clean,
-          hl: 'en',
-          api_key: CONFIG.serpApiKey,
-          num: 5
-        },
-        timeout: 6000
-      }).then(res => {
-        const out = [];
-        const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
-        if (answerBox) {
-          out.push(`[Google Global Réponse] : ${String(answerBox).slice(0, 600)}`);
+  tasks.push(
+    axios.get('https://html.duckduckgo.com/html/', {
+      params: { q: clean },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
+      },
+      timeout: 5500
+    }).then(res => {
+      const html = String(res.data || '');
+      const out = [];
+      const resultMatches = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)];
+      for (const m of resultMatches.slice(0, 4)) {
+        const title = m[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
+        const snippet = m[2].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+        if (snippet && snippet.length > 25) {
+          out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
         }
-        for (const item of (res.data?.organic_results || []).slice(0, 4)) {
-          const snippet = String(item.snippet || '').trim();
-          const title = String(item.title || '').trim();
-          if (snippet) {
-            out.push(`[Google Global - ${title}] : ${snippet.slice(0, 450)}`);
-          }
-        }
-        return out;
-      }).catch(() => [])
-    );
-  }
+      }
+      return out;
+    }).catch(() => [])
+  );
 
-  // Extraction de mots-clés propres pour les wikis anglophones/francophones
+  // 4. Extraction de mots-clés propres pour les wikis anglophones/francophones
   const keywordQuery = clean
-    .replace(/\b(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise)\b/gi, ' ')
+    .replace(/(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise|monologue|dit|avant|de|mourir)/gi, ' ')
     .replace(/[?!.,;:()\[\]"'’]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim() || clean;
@@ -1105,7 +1111,7 @@ async function fetchVerifiedFacts(query = '') {
     { regex: /edens\s*zero|shiki|granbell|rebecca|happy|weisz|homura|ziggy|ether\s*gear/i, domain: 'edenszero.fandom.com' },
     { regex: /fairy\s*tail|natsu|lucy|erza|gray|zeref|acnologia|ignir|igneel|guilde/i, domain: 'fairytail.fandom.com' },
     { regex: /kaiju|kafka\s*hibino|reno\s*ichikawa|mina\s*ashiro|kikoru/i, domain: 'kaiju-no-8.fandom.com' },
-    { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku|yuta|toji|mahoraga/i, domain: 'jujutsu-kaisen.fandom.com' },
+    { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku|yuta|toji|mahoraga|geto|suguru/i, domain: 'jujutsu-kaisen.fandom.com' },
     { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo|broly|beerus/i, domain: 'dragonball.fandom.com' },
     { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku|itachi|madara|obito/i, domain: 'naruto.fandom.com' },
     { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko|devil\s*fruit|fruit\s*du\s*d[ée]mon/i, domain: 'onepiece.fandom.com' },
@@ -1140,20 +1146,20 @@ async function fetchVerifiedFacts(query = '') {
           action: 'query',
           generator: 'search',
           gsrsearch: keywordQuery,
-          gsrlimit: 3,
+          gsrlimit: 4,
           prop: 'extracts',
           exintro: 1,
           explaintext: 1,
-          exchars: 550,
+          exchars: 650,
           format: 'json'
         },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 3500
+        timeout: 4000
       }).then(res => {
         const pages = Object.values(res.data?.query?.pages || {});
         return pages.map(p => {
           const txt = String(p.extract || '').replace(/\s+/g, ' ').trim();
-          return txt ? `[Wiki Fandom (${domain}) - ${p.title}] : ${txt.slice(0, 550)}` : '';
+          return txt ? `[Wiki Fandom (${domain}) - ${p.title}] : ${txt.slice(0, 650)}` : '';
         }).filter(Boolean);
       }).catch(() => [])
     );
@@ -1162,7 +1168,7 @@ async function fetchVerifiedFacts(query = '') {
   for (const lang of ['fr', 'en']) {
     tasks.push(
       axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: { action: 'query', list: 'search', srsearch: clean, srlimit: 1, format: 'json' },
+        params: { action: 'query', list: 'search', srsearch: keywordQuery || clean, srlimit: 1, format: 'json' },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
         timeout: 2500
       }).then(async res => {
@@ -1215,7 +1221,15 @@ async function fetchVerifiedFacts(query = '') {
   );
 
   const settled = await Promise.all(tasks);
-  return settled.flat().slice(0, 8).join('\n');
+  // Prioriser en tête les résultats SerpAPI quand disponibles pour qu'ils ne soient jamais tronqués
+  const serpLines = [];
+  const otherLines = [];
+  for (const line of settled.flat()) {
+    if (line.startsWith('[SerpAPI')) serpLines.push(line);
+    else otherLines.push(line);
+  }
+  return [...serpLines, ...otherLines].slice(0, 12).join('
+');
 }
 
 async function getUserMemory(userJid) {
@@ -1422,7 +1436,7 @@ async function askGroq(prompt, chatJid, options = {}) {
         {
           model,
           messages,
-          temperature: options.temperature ?? 0.55,
+          temperature: options.temperature ?? 0.25,
           max_tokens: options.maxTokens ?? 1200
         },
         {
@@ -3377,7 +3391,7 @@ async function collectPhotos(terme, nombre = 1) {
 function normalizeAnimeQuery(raw = '') {
   return String(raw)
     .replace(/^(image|affiche|cover|poster|wallpaper|fond d['’]ecran)\s+(de\s+|d['’]|du\s+|des\s+)?(anime\s+|manga\s+)?/i, '')
-    .replace(/ uchiwa /gi, 'Uchiha')
+    .replace(/\buchiwa\b/gi, 'Uchiha')
     .replace(/ kirua /gi, 'Killua')
     .replace(/ livai /gi, 'Levi')
     .replace(/ sangoku /gi, 'Son Goku')

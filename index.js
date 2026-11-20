@@ -1228,8 +1228,7 @@ async function fetchVerifiedFacts(query = '') {
     if (line.startsWith('[SerpAPI')) serpLines.push(line);
     else otherLines.push(line);
   }
-  return [...serpLines, ...otherLines].slice(0, 12).join('
-');
+  return [...serpLines, ...otherLines].slice(0, 12).join('\n');
 }
 
 async function getUserMemory(userJid) {

@@ -188,12 +188,11 @@ COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
 - Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux) et n'affiche JAMAIS d'URL, de lien web ni de liste de sources : donne uniquement la réponse directe et concrète.
 
-EXACTITUDE & CULTURE ANIMÉ / MANGA (PRIORITÉ GOOGLE & VÉRIFICATION CANONIQUE) :
-- Pour toute question liée aux animés ou mangas (Bankai, Shikai, personnages, pouvoirs, arcs, saisons, lore), appuie-toi EN PRIORITÉ absolue sur les résultats Google (SerpAPI Google / Google Direct) et Wikis présents dans DONNÉES VÉRIFIÉES EN TEMPS RÉEL ci-dessous.
-- Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru Shutara possède bien un Bankai dans Bleach TYBW : Shatatsu Karagara Shigarami no Tsuji).
-- Ne contredis JAMAIS un fait clairement confirmé par les résultats Google ou les wikis ci-dessous (par exemple, n'affirme jamais qu'un Bankai ou une forme n'existe pas si les résultats de recherche mentionnent son activation ou son nom canonique).
-- Si les extraits web ci-dessous ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
-- En revanche, si ni les résultats Google ni tes connaissances sûres ne confirment un détail obscur ou non canon, dis-le honnêtement sans inventer de faux faits ni nier un élément canonique connu.${verifiedContext}
+EXACTITUDE & CULTURE ANIMÉ / MANGA (PRIORITÉ ABSOLUE AUX DONNÉES VÉRIFIÉES) :
+- Tu DOIS lire et utiliser en priorité les extraits de DONNÉES VÉRIFIÉES EN TEMPS RÉEL ci-dessous lorsqu'ils sont présents.
+- Respecte scrupuleusement le genre et le rôle de chaque personnage (ex: Senjumaru Shutara est une femme, membre de la Division Zéro dans Bleach, et son Bankai dans l'arc Thousand-Year Blood War est Shatatsu Karagara Shigarami no Tsuji).
+- Ne contredis JAMAIS un fait clairement mentionné dans DONNÉES VÉRIFIÉES EN TEMPS RÉEL ou dans tes connaissances canoniques solides.
+- Si les extraits web sont incomplets mais que tu connais la réponse canonique exacte (par exemple Flugel dans Re:Zero ou un Bankai/pouvoir), réponds directement et précisément sans dire qu'il n'existe pas quand il est canon.${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -1041,11 +1040,7 @@ function buildPrioritizedSearchQueries(rawQuery = '') {
     .trim() || clean;
 
   const isAnime = isAnimeQuestionQuery(clean);
-  const queries = [clean];
-
-  if (keywordQuery && keywordQuery.toLowerCase() !== clean.toLowerCase()) {
-    queries.push(keywordQuery);
-  }
+  const queries = [keywordQuery || clean];
 
   if (isAnime) {
     const base = keywordQuery || clean;
@@ -1053,24 +1048,24 @@ function buildPrioritizedSearchQueries(rawQuery = '') {
       queries.push(`${base} anime`);
     }
     if (/\bbankai\b/i.test(clean) && !/\bbankai\b/i.test(base)) {
-      queries.push(`${base} bankai bleach`);
+      queries.push(`${base} bankai`);
     }
   }
 
   return {
     clean,
-    keywordQuery,
+    keywordQuery: keywordQuery || clean,
     isAnime,
-    queries: [...new Set(queries.map(q => q.trim()).filter(Boolean))].slice(0, isAnime ? 3 : 2)
+    queries: [...new Set(queries.map(q => q.trim()).filter(Boolean))].slice(0, 2)
   };
 }
 
-async function fetchGoogleSerpQueries(searchQueries, langs = ['fr', 'en']) {
+async function fetchGoogleSerpQueries(searchQueries, langs = ['en', 'fr']) {
   if (!CONFIG.serpApiKey) return [];
 
   const calls = [];
-  for (const q of searchQueries) {
-    for (const lang of langs) {
+  for (const q of searchQueries.slice(0, 2)) {
+    for (const lang of langs.slice(0, 1)) {
       calls.push(
         axios.get('https://serpapi.com/search.json', {
           params: {
@@ -1078,82 +1073,27 @@ async function fetchGoogleSerpQueries(searchQueries, langs = ['fr', 'en']) {
             q,
             hl: lang,
             api_key: CONFIG.serpApiKey,
-            num: 6
+            num: 5
           },
-          timeout: 7500
+          timeout: 4500
         }).then(res => {
           const out = [];
           const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
           if (answerBox) {
-            out.push(`[Google SerpAPI ${lang.toUpperCase()} Réponse Directe] : ${String(answerBox).slice(0, 650)}`);
+            out.push(`[Google ${lang.toUpperCase()} Direct] : ${String(answerBox).slice(0, 600)}`);
           }
-          const kgTitle = res.data?.knowledge_graph?.title;
           const kgDesc = res.data?.knowledge_graph?.description;
           if (kgDesc) {
-            out.push(`[Google SerpAPI ${lang.toUpperCase()} Fiche${kgTitle ? ` - ${kgTitle}` : ''}] : ${String(kgDesc).slice(0, 550)}`);
+            out.push(`[Google ${lang.toUpperCase()} Fiche] : ${String(kgDesc).slice(0, 500)}`);
           }
-          for (const item of (res.data?.organic_results || []).slice(0, 5)) {
+          for (const item of (res.data?.organic_results || []).slice(0, 4)) {
             const snippet = String(item.snippet || '').trim();
             const title = String(item.title || '').trim();
             if (snippet) {
-              out.push(`[Google SerpAPI ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 480)}`);
+              out.push(`[Google ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 450)}`);
             }
           }
           return out;
-        }).catch(err => {
-          logger.warn({ lang, q, error: err?.response?.data?.error || err?.message }, 'Erreur appel Google SerpAPI');
-          return [];
-        })
-      );
-    }
-  }
-
-  const settled = await Promise.all(calls);
-  return settled.flat();
-}
-
-async function fetchGoogleDirectQueries(searchQueries, langs = ['fr', 'en']) {
-  const calls = [];
-  for (const q of searchQueries) {
-    for (const lang of langs) {
-      calls.push(
-        axios.get('https://www.google.com/search', {
-          params: { q, hl: lang, num: 6 },
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9,fr;q=0.8'
-          },
-          timeout: 6500
-        }).then(res => {
-          const html = String(res.data || '');
-          if (/sorry\/index|consent\.google\.com|unusual traffic/i.test(html)) {
-            return [];
-          }
-          const out = [];
-          const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc|Gx5Zad)/i).slice(1, 7);
-          for (const blk of blocks) {
-            const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-            const title = titleMatch
-              ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
-              : '';
-            const textClean = blk
-              .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-              .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-              .replace(/<[^>]+>/g, ' ')
-              .replace(/&quot;/g, '"')
-              .replace(/&#39;/g, "'")
-              .replace(/&amp;/g, '&')
-              .replace(/\s+/g, ' ')
-              .trim();
-            if (textClean && textClean.length > 35) {
-              const snippet = title ? textClean.replace(title, '').trim().slice(0, 450) : textClean.slice(0, 450);
-              if (snippet) {
-                out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet}`);
-              }
-            }
-          }
-          return out.slice(0, 4);
         }).catch(() => [])
       );
     }
@@ -1167,18 +1107,6 @@ async function fetchVerifiedFacts(query = '') {
   const { clean, keywordQuery, isAnime, queries: searchQueries } = buildPrioritizedSearchQueries(query);
   if (!clean || clean.length < 2) return '';
 
-  // 1. Recherche Google en priorité (SerpAPI Google puis Google Direct)
-  const googlePrimary = await fetchGoogleSerpQueries(searchQueries, ['fr', 'en']);
-  const googleDirect = googlePrimary.length >= 4
-    ? await fetchGoogleDirectQueries(searchQueries.slice(0, 2), ['fr', 'en'])
-    : await fetchGoogleDirectQueries(searchQueries, ['fr', 'en']);
-
-  const googleLines = [...new Set([...googlePrimary, ...googleDirect])];
-
-  // Si c'est une question animé et que Google a déjà retourné des résultats riches, on peut garder Google en tête et enrichir avec Wiki/Tavily
-  const tasks = [];
-
-  // 2. Wikis Fandom spécialisés animés/mangas + Wikipédia
   const fandomMap = [
     { regex: /akame|teigu|murasame|incursio|night\s*raid|esdeath|tatsumi|bulat|mine|leone/i, domain: 'akamegakill.fandom.com' },
     { regex: /edens\s*zero|shiki|granbell|rebecca|happy|weisz|homura|ziggy|ether\s*gear/i, domain: 'edenszero.fandom.com' },
@@ -1198,20 +1126,16 @@ async function fetchVerifiedFacts(query = '') {
     { regex: /mashle|mash\s*burnedead|regro|innocent\s*zero/i, domain: 'mashle.fandom.com' },
     { regex: /chainsaw\s*man|denji|makima|power|aki|pochita|reze/i, domain: 'chainsaw-man.fandom.com' },
     { regex: /solo\s*leveling|sung\s*jin[- ]?woo|monarque|igris|beru/i, domain: 'solo-leveling.fandom.com' },
-    { regex: /seven\s*deadly\s*sins|nanatsu|meliodas|ban|escanor|king|merlin|gowther/i, domain: 'nanatsu-no-taizai.fandom.com' },
-    { regex: /fullmetal\s*alchemist|fmab|edward\s*elric|alphonse|mustang|homunculus/i, domain: 'fma.fandom.com' },
-    { regex: /code\s*geass|lelouch|suzaku|geass|britannia/i, domain: 'codegeass.fandom.com' },
-    { regex: /death\s*note|light\s*yagami|ryuk|shinigami|misa/i, domain: 'deathnote.fandom.com' },
-    { regex: /sword\s*art\s*online|sao|kirito|asuna|aincrad/i, domain: 'swordartonline.fandom.com' },
-    { regex: /overlord|ainz|momonga|albedo|demiurge|nazarick/i, domain: 'overlordmaruyama.fandom.com' },
-    { regex: /re:?zero|subaru|emilia|rem|satella|echidna/i, domain: 'rezero.fandom.com' },
-    { regex: /fire\s*force|shinra|sho|benimaru|adolla/i, domain: 'fire-force.fandom.com' },
-    { regex: /blue\s*lock|isagi|bachira|rin\s*itoshi|nagi|barou/i, domain: 'bluelock.fandom.com' },
-    { regex: /bungo\s*stray\s*dogs|dazai|chuuya|atsushi|akutagawa/i, domain: 'bungostraydogs.fandom.com' },
-    { regex: /fate|gilgamesh|saber|artoria|shirou|archer|noble\s*phantasm/i, domain: 'typemoon.fandom.com' }
+    { regex: /re:?zero|flugel|subaru|emilia|rem|satella|echidna/i, domain: 'rezero.fandom.com' }
   ];
 
-  const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain).slice(0, 2);
+  const tasks = [];
+
+  if (CONFIG.serpApiKey) {
+    tasks.push(fetchGoogleSerpQueries(searchQueries, ['en']));
+  }
+
+  const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain).slice(0, 1);
   for (const domain of matchedFandoms) {
     tasks.push(
       axios.get(`https://${domain}/api.php`, {
@@ -1219,7 +1143,7 @@ async function fetchVerifiedFacts(query = '') {
           action: 'query',
           generator: 'search',
           gsrsearch: keywordQuery,
-          gsrlimit: 4,
+          gsrlimit: 3,
           prop: 'extracts',
           exintro: 1,
           explaintext: 1,
@@ -1227,7 +1151,7 @@ async function fetchVerifiedFacts(query = '') {
           format: 'json'
         },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 4000
+        timeout: 3500
       }).then(res => {
         const pages = Object.values(res.data?.query?.pages || {});
         return pages.map(p => {
@@ -1238,111 +1162,26 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
-  for (const lang of ['fr', 'en']) {
-    tasks.push(
-      axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: { action: 'query', list: 'search', srsearch: keywordQuery || clean, srlimit: 1, format: 'json' },
-        headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 2500
-      }).then(async res => {
-        const hit = res.data?.query?.search?.[0];
-        if (!hit?.title) return [];
-        const sum = await axios.get(
-          `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
-        );
-        const extract = String(sum.data?.extract || '').trim();
-        return extract ? [`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`] : [];
-      }).catch(() => [])
-    );
-  }
-
-  // 3. Complément DuckDuckGo + Tavily si Google a peu de résultats ou en appui secondaire
   tasks.push(
-    axios.get('https://api.duckduckgo.com/', {
-      params: { q: isAnime ? `${keywordQuery} anime` : clean, format: 'json', no_html: 1, skip_disambig: 1 },
+    axios.get('https://en.wikipedia.org/w/api.php', {
+      params: { action: 'query', list: 'search', srsearch: keywordQuery, srlimit: 1, format: 'json' },
       headers: { 'User-Agent': 'SitriNelBot/1.0' },
       timeout: 2500
-    }).then(res => {
-      const out = [];
-      const abstract = String(res.data?.AbstractText || '').trim();
-      if (abstract) out.push(`[DuckDuckGo - ${res.data?.Heading || clean}] : ${abstract.slice(0, 600)}`);
-      const rel = res.data?.RelatedTopics?.[0]?.Text || res.data?.RelatedTopics?.[0]?.Topics?.[0]?.Text;
-      if (rel) out.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 300)}`);
-      return out;
+    }).then(async res => {
+      const hit = res.data?.query?.search?.[0];
+      if (!hit?.title) return [];
+      const sum = await axios.get(
+        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
+        { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
+      );
+      const extract = String(sum.data?.extract || '').trim();
+      return extract ? [`[Wikipedia EN - ${hit.title}] : ${extract.slice(0, 600)}`] : [];
     }).catch(() => [])
   );
 
-  if (googleLines.length < 3) {
-    tasks.push(
-      axios.get('https://html.duckduckgo.com/html/', {
-        params: { q: isAnime ? `${keywordQuery} anime` : clean },
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
-        },
-        timeout: 5500
-      }).then(res => {
-        const html = String(res.data || '');
-        const out = [];
-        const resultMatches = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)];
-        for (const m of resultMatches.slice(0, 4)) {
-          const title = m[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
-          const snippet = m[2].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-          if (snippet && snippet.length > 25) {
-            out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
-          }
-        }
-        return out;
-      }).catch(() => [])
-    );
-
-    tasks.push(
-      (async () => {
-        try {
-          const headers = { 'Content-Type': 'application/json' };
-          if (CONFIG.tavilyKey) {
-            headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
-          } else {
-            headers['X-Tavily-Access-Mode'] = 'keyless';
-          }
-          const payload = {
-            query: isAnime ? `${keywordQuery} anime` : (keywordQuery !== clean ? `${clean} (${keywordQuery})` : clean),
-            search_depth: 'advanced',
-            max_results: 4,
-            include_answer: true
-          };
-          const res = await axios.post('https://api.tavily.com/search', payload, {
-            headers,
-            timeout: 4500
-          });
-          const out = [];
-          if (res.data?.answer) {
-            out.push(`[Tavily Synthèse] : ${String(res.data.answer).slice(0, 600)}`);
-          }
-          for (const r of (res.data?.results || []).slice(0, 3)) {
-            const snippet = String(r.content || '').trim();
-            if (snippet) {
-              out.push(`[Tavily - ${r.title || 'Source'}] : ${snippet.slice(0, 450)}`);
-            }
-          }
-          return out;
-        } catch {
-          return [];
-        }
-      })()
-    );
-  }
-
   const settled = await Promise.all(tasks);
-  const secondaryLines = settled.flat();
-
-  // Google toujours prioritaire en tête, suivi des Wikis Fandom / Wikipédia et autres sources
-  const ordered = isAnime
-    ? [...googleLines, ...secondaryLines.filter(l => l.startsWith('[Wiki Fandom') || l.startsWith('[Wikipédia')), ...secondaryLines.filter(l => !l.startsWith('[Wiki Fandom') && !l.startsWith('[Wikipédia'))]
-    : [...googleLines, ...secondaryLines];
-
-  return [...new Set(ordered)].slice(0, 12).join('\n');
+  const lines = settled.flat();
+  return [...new Set(lines)].slice(0, 8).join('\n');
 }
 
 async function getUserMemory(userJid) {
@@ -1542,7 +1381,7 @@ async function askGroq(prompt, chatJid, options = {}) {
   let response = null;
   let lastError = null;
 
-  for (const model of candidateModels.slice(0, 6)) {
+  for (const model of candidateModels.slice(0, 5)) {
     try {
       response = await axios.post(
         `${GROQ_BASE}/chat/completions`,
@@ -1557,7 +1396,7 @@ async function askGroq(prompt, chatJid, options = {}) {
             Authorization: `Bearer ${CONFIG.groqKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 20000
+          timeout: 25000
         }
       );
       CONFIG.groqModel = model;
@@ -1568,6 +1407,32 @@ async function askGroq(prompt, chatJid, options = {}) {
       const apiMsg = error?.response?.data?.error?.message || error?.message;
 
       if (status === 401) throw error;
+
+      if (status === 429) {
+        await sleep(1200);
+        try {
+          response = await axios.post(
+            `${GROQ_BASE}/chat/completions`,
+            {
+              model,
+              messages,
+              temperature: options.temperature ?? 0.25,
+              max_tokens: options.maxTokens ?? 1200
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${CONFIG.groqKey}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 25000
+            }
+          );
+          CONFIG.groqModel = model;
+          break;
+        } catch (retryErr) {
+          lastError = retryErr;
+        }
+      }
 
       logger.warn({ model, status, error: apiMsg }, 'Modèle Groq indisponible, essai du suivant.');
     }

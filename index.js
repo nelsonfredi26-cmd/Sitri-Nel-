@@ -125,7 +125,7 @@ const logger = pino({
   }
 });
 
-const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
+const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'error' });
 
 // ------------------------------------------------------------
 // 05. ÉTAT DU BOT
@@ -344,6 +344,7 @@ async function initDatabase(force = false) {
 
 async function useDatabaseAuthState() {
   let queue = Promise.resolve();
+  const keyCache = new Map();
 
   const enqueue = task => {
     const run = queue.then(task);
@@ -354,7 +355,7 @@ async function useDatabaseAuthState() {
   const withRetry = async task => {
     let lastError = null;
 
-    for (let attempt = 1; attempt <= 4; attempt++) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
       try {
         return await task();
       } catch (error) {
@@ -363,7 +364,7 @@ async function useDatabaseAuthState() {
           { attempt, error: error?.message },
           'Accès à la session (base de données) échoué, nouvel essai.'
         );
-        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+        await new Promise(resolve => setTimeout(resolve, 400 * attempt));
       }
     }
 
@@ -371,6 +372,10 @@ async function useDatabaseAuthState() {
   };
 
   const readData = async key => {
+    if (keyCache.has(key)) {
+      return keyCache.get(key);
+    }
+
     const result = await withRetry(() =>
       db.execute({
         sql: 'SELECT value FROM auth_state WHERE key = ?',
@@ -378,21 +383,66 @@ async function useDatabaseAuthState() {
       })
     );
 
-    if (!result.rows.length) return null;
+    if (!result.rows.length) {
+      keyCache.set(key, null);
+      return null;
+    }
 
     try {
-      return JSON.parse(String(result.rows[0].value), BufferJSON.reviver);
+      const parsed = JSON.parse(String(result.rows[0].value), BufferJSON.reviver);
+      keyCache.set(key, parsed);
+      return parsed;
     } catch {
       return null;
     }
   };
 
-  const writeData = (key, value) =>
-    db.execute({
-      sql: `INSERT INTO auth_state (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      args: [key, JSON.stringify(value, BufferJSON.replacer)]
-    });
+  const readManyData = async keys => {
+    const missing = keys.filter(k => !keyCache.has(k));
+
+    if (missing.length) {
+      const placeholders = missing.map(() => '?').join(', ');
+      const result = await withRetry(() =>
+        db.execute({
+          sql: `SELECT key, value FROM auth_state WHERE key IN (${placeholders})`,
+          args: missing
+        })
+      );
+
+      const found = new Map();
+      for (const row of result.rows) {
+        try {
+          found.set(
+            String(row.key),
+            JSON.parse(String(row.value), BufferJSON.reviver)
+          );
+        } catch {
+          found.set(String(row.key), null);
+        }
+      }
+
+      for (const k of missing) {
+        keyCache.set(k, found.has(k) ? found.get(k) : null);
+      }
+    }
+
+    const out = new Map();
+    for (const k of keys) {
+      out.set(k, keyCache.get(k) ?? null);
+    }
+    return out;
+  };
+
+  const writeData = (key, value) => {
+    keyCache.set(key, value);
+    return withRetry(() =>
+      db.execute({
+        sql: `INSERT INTO auth_state (key, value) VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        args: [key, JSON.stringify(value, BufferJSON.replacer)]
+      })
+    );
+  };
 
   const creds = (await readData('creds')) || initAuthCreds();
 
@@ -403,18 +453,20 @@ async function useDatabaseAuthState() {
         get: async (type, ids) => {
           await queue;
           const data = {};
+          if (!ids?.length) return data;
 
-          await Promise.all(
-            ids.map(async id => {
-              let value = await readData(`${type}-${id}`);
+          const dbKeys = ids.map(id => `${type}-${id}`);
+          const valuesMap = await readManyData(dbKeys);
 
-              if (type === 'app-state-sync-key' && value) {
-                value = proto.Message.AppStateSyncKeyData.fromObject(value);
-              }
+          for (const id of ids) {
+            let value = valuesMap.get(`${type}-${id}`) ?? null;
 
-              data[id] = value;
-            })
-          );
+            if (type === 'app-state-sync-key' && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
+
+            data[id] = value;
+          }
 
           return data;
         },
@@ -427,18 +479,20 @@ async function useDatabaseAuthState() {
               const value = data[category][id];
               const key = `${category}-${id}`;
 
-              statements.push(
-                value
-                  ? {
-                      sql: `INSERT INTO auth_state (key, value) VALUES (?, ?)
-                            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-                      args: [key, JSON.stringify(value, BufferJSON.replacer)]
-                    }
-                  : {
-                      sql: 'DELETE FROM auth_state WHERE key = ?',
-                      args: [key]
-                    }
-              );
+              if (value) {
+                keyCache.set(key, value);
+                statements.push({
+                  sql: `INSERT INTO auth_state (key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+                  args: [key, JSON.stringify(value, BufferJSON.replacer)]
+                });
+              } else {
+                keyCache.delete(key);
+                statements.push({
+                  sql: 'DELETE FROM auth_state WHERE key = ?',
+                  args: [key]
+                });
+              }
             }
           }
 
@@ -449,7 +503,7 @@ async function useDatabaseAuthState() {
       }
     },
 
-    saveCreds: () => enqueue(() => withRetry(() => writeData('creds', creds)))
+    saveCreds: () => enqueue(() => writeData('creds', creds))
   };
 }
 
@@ -1228,7 +1282,8 @@ async function fetchVerifiedFacts(query = '') {
     if (line.startsWith('[SerpAPI')) serpLines.push(line);
     else otherLines.push(line);
   }
-  return [...serpLines, ...otherLines].slice(0, 12).join('\n');
+  return [...serpLines, ...otherLines].slice(0, 12).join('
+');
 }
 
 async function getUserMemory(userJid) {
@@ -5435,6 +5490,16 @@ async function startBot() {
         ? Baileys.Browsers.ubuntu('Chrome')
         : ['Ubuntu', 'Chrome', '22.04.4'];
 
+    const recentMessages = new Map();
+    const rememberMessage = msg => {
+      const id = msg?.key?.id;
+      if (!id || !msg?.message) return;
+      recentMessages.set(id, msg.message);
+      if (recentMessages.size > 1000) {
+        recentMessages.delete(recentMessages.keys().next().value);
+      }
+    };
+
     const socket = makeWASocket({
       ...(version ? { version } : {}),
       auth: { creds: state.creds, keys },
@@ -5448,7 +5513,11 @@ async function startBot() {
       printQRInTerminal: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,
-      generateHighQualityLinkPreview: false
+      generateHighQualityLinkPreview: false,
+      getMessage: async key => {
+        if (!key?.id) return undefined;
+        return recentMessages.get(key.id) || undefined;
+      }
     });
 
     const rawSend = socket.sendMessage.bind(socket);
@@ -5574,6 +5643,8 @@ async function startBot() {
       if (!['notify', 'append'].includes(event.type)) return;
 
       for (const message of event.messages) {
+        if (!message?.message) continue;
+        rememberMessage(message);
         try {
           await handleIncomingMessage(message);
         } catch (error) {

@@ -102,6 +102,7 @@ const CONFIG = {
   tursoToken: cleanEnv(process.env.TURSO_AUTH_TOKEN),
   serpApiKey: cleanEnv(process.env.SERPAPI_API_KEY || process.env.SERPAPI_KEY),
   tavilyKey: cleanEnv(process.env.TAVILY_API_KEY),
+  serperKey: cleanEnv(process.env.SERPER_API_KEY),
   pixabayKey: cleanEnv(process.env.PIXABAY_API_KEY),
   cloudflareToken: cleanEnv(process.env.CLOUDFLARE_API_TOKEN),
   cloudflareAccountId: cleanEnv(process.env.CLOUDFLARE_ACCOUNT_ID),
@@ -168,7 +169,7 @@ function buildSystemPrompt(userProfile = {}) {
   const isCreator = Boolean(userProfile.isCreator);
   const facts = userProfile.facts ? `\nInfos & surnoms mémorisés sur cette personne :\n${userProfile.facts}` : '';
   const verifiedContext = userProfile.verifiedContext
-    ? `\nDONNÉES VÉRIFIÉES EN TEMPS RÉEL (WIKIS FANDOM / WIKIPÉDIA / DUCKDUCKGO) :\n${userProfile.verifiedContext}\nAppuie-toi sur ces faits exacts en priorité.`
+    ? `\nDONNÉES VÉRIFIÉES EN TEMPS RÉEL (TAVILY / GOOGLE / WIKIS FANDOM / WIKIPÉDIA) :\n${userProfile.verifiedContext}\nAppuie-toi sur ces faits exacts en priorité.`
     : '';
   const mood = getCurrentMood();
 
@@ -190,9 +191,9 @@ COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
 
 EXACTITUDE & CULTURE ANIMÉ / MANGA (PRIORITÉ ABSOLUE AUX DONNÉES VÉRIFIÉES) :
 - Tu DOIS lire et utiliser en priorité les extraits de DONNÉES VÉRIFIÉES EN TEMPS RÉEL ci-dessous lorsqu'ils sont présents.
-- Respecte scrupuleusement le genre et le rôle de chaque personnage (ex: Senjumaru Shutara est une femme, membre de la Division Zéro dans Bleach, et son Bankai dans l'arc Thousand-Year Blood War est Shatatsu Karagara Shigarami no Tsuji).
-- Ne contredis JAMAIS un fait clairement mentionné dans DONNÉES VÉRIFIÉES EN TEMPS RÉEL ou dans tes connaissances canoniques solides.
-- Si les extraits web sont incomplets mais que tu connais la réponse canonique exacte (par exemple Flugel dans Re:Zero ou un Bankai/pouvoir), réponds directement et précisément sans dire qu'il n'existe pas quand il est canon.${verifiedContext}
+- Respecte scrupuleusement le genre et le rôle de chaque personnage, tels qu'ils apparaissent dans les données vérifiées.
+- Ne contredis JAMAIS un fait clairement mentionné dans DONNÉES VÉRIFIÉES EN TEMPS RÉEL.
+- Si les données vérifiées ne contiennent pas la réponse, dis franchement que tu n'as pas pu la vérifier au lieu d'inventer, et n'affirme jamais qu'un pouvoir, une forme ou un personnage n'existe pas sans preuve dans les données.${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -1124,8 +1125,14 @@ async function searchGoogleViaSerpApi(rawQuery = '') {
 
   const calls = [];
   for (const q of queries) {
-    calls.push(runSingleSerp(q, 'fr').catch(() => []));
-    calls.push(runSingleSerp(q, 'en').catch(() => []));
+    for (const hl of ['fr', 'en']) {
+      calls.push(
+        runSingleSerp(q, hl).catch(err => {
+          logger.warn({ status: err?.response?.status }, 'SerpApi en échec');
+          return [];
+        })
+      );
+    }
   }
 
   const batches = await Promise.all(calls);
@@ -1148,6 +1155,105 @@ async function searchGoogleViaSerpApi(rawQuery = '') {
     results: topResults,
     formatted
   };
+}
+
+// ------------------------------------------------------------
+// TAVILY : recherche web approfondie envoyée ensuite à Groq
+// ------------------------------------------------------------
+
+const tavilyCache = new Map();
+const TAVILY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+let tavilyKeyWarned = false;
+
+function shouldSearchWeb(text = '') {
+  const t = String(text || '').trim();
+  if (t.length < 8) return false;
+  if (isAnimeQuestionQuery(t)) return true;
+  if (t.includes('?')) return true;
+  return /^(qui|que|quoi|quel|quelle|quels|quelles|quand|où|ou est|pourquoi|comment|combien|c'est quoi|what|who|when|where|why|how)\b/i.test(t);
+}
+
+async function searchWebViaTavily(rawQuery = '') {
+  const q = String(rawQuery || '').trim();
+  if (!q) return '';
+
+  if (!CONFIG.tavilyKey) {
+    if (!tavilyKeyWarned) {
+      tavilyKeyWarned = true;
+      logger.warn('TAVILY_API_KEY absente : la recherche Tavily est désactivée.');
+    }
+    return '';
+  }
+
+  const cacheKey = q.toLowerCase();
+  const cached = tavilyCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < TAVILY_CACHE_TTL_MS) return cached.text;
+
+  try {
+    const res = await axios.post(
+      'https://api.tavily.com/search',
+      {
+        query: q,
+        search_depth: 'advanced',
+        include_answer: 'advanced',
+        max_results: 5
+      },
+      {
+        headers: { Authorization: `Bearer ${CONFIG.tavilyKey}` },
+        timeout: 12000
+      }
+    );
+
+    const lines = [];
+    if (res.data?.answer) {
+      lines.push(`[Réponse directe Tavily] : ${String(res.data.answer).replace(/\s+/g, ' ').trim().slice(0, 800)}`);
+    }
+    (res.data?.results || []).forEach((r, idx) => {
+      const content = String(r.content || '').replace(/\s+/g, ' ').trim();
+      if (content) {
+        lines.push(`${idx + 1}. [Résultat web] ${String(r.title || '').trim()} : ${content.slice(0, 600)}`);
+      }
+    });
+
+    const text = lines.length ? `RÉSULTATS TAVILY (RECHERCHE WEB) :\n${lines.join('\n')}` : '';
+
+    if (text) {
+      if (tavilyCache.size > 300) tavilyCache.delete(tavilyCache.keys().next().value);
+      tavilyCache.set(cacheKey, { at: Date.now(), text });
+    }
+    return text;
+  } catch (err) {
+    logger.warn({ status: err?.response?.status, error: err?.message }, 'Tavily en échec');
+    return '';
+  }
+}
+
+// Secours optionnel : Serper.dev (variable SERPER_API_KEY)
+async function searchGoogleViaSerper(rawQuery = '') {
+  const q = String(rawQuery || '').trim();
+  if (!q || !CONFIG.serperKey) return '';
+
+  try {
+    const res = await axios.post(
+      'https://google.serper.dev/search',
+      { q, hl: 'fr', num: 5 },
+      { headers: { 'X-API-KEY': CONFIG.serperKey }, timeout: 7000 }
+    );
+
+    const lines = [];
+    const ab = res.data?.answerBox?.answer || res.data?.answerBox?.snippet;
+    if (ab) lines.push(`[Réponse directe Google] : ${String(ab).slice(0, 600)}`);
+    const kg = res.data?.knowledgeGraph?.description;
+    if (kg) lines.push(`[Knowledge Graph] : ${String(kg).slice(0, 500)}`);
+    (res.data?.organic || []).slice(0, 5).forEach((r, idx) => {
+      if (r.snippet) lines.push(`${idx + 1}. [Résultat web] ${r.title || ''} : ${String(r.snippet).slice(0, 450)}`);
+    });
+
+    return lines.length ? `RÉSULTATS GOOGLE (SERPER) :\n${lines.join('\n')}` : '';
+  } catch (err) {
+    logger.warn({ status: err?.response?.status }, 'Serper en échec');
+    return '';
+  }
 }
 
 async function fetchVerifiedFacts(query = '') {
@@ -1178,11 +1284,20 @@ async function fetchVerifiedFacts(query = '') {
 
   const tasks = [];
 
-  if (CONFIG.serpApiKey) {
+  if (shouldSearchWeb(clean)) {
+    tasks.push(searchWebViaTavily(compact || clean).then(text => (text ? [text] : [])));
+  }
+
+  if (CONFIG.serpApiKey || CONFIG.serperKey) {
     tasks.push(
-      searchGoogleViaSerpApi(clean).then(({ formatted }) =>
-        formatted ? [`RÉSULTATS GOOGLE (SERPAPI) :\n${formatted}`] : []
-      )
+      (async () => {
+        if (CONFIG.serpApiKey) {
+          const { formatted } = await searchGoogleViaSerpApi(clean);
+          if (formatted) return [`RÉSULTATS GOOGLE (SERPAPI) :\n${formatted}`];
+        }
+        const backup = await searchGoogleViaSerper(clean);
+        return backup ? [backup] : [];
+      })()
     );
   }
 
@@ -1232,7 +1347,7 @@ async function fetchVerifiedFacts(query = '') {
   );
 
   const settled = await Promise.all(tasks);
-  return settled.flat().filter(Boolean).join('\n\n').slice(0, 4500);
+  return settled.flat().filter(Boolean).join('\n\n').slice(0, 7000);
 }
 
 async function getUserMemory(userJid) {

@@ -188,11 +188,12 @@ COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
 - Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
 - N'utilise pas de markdown (pas de **, de # ni de tableaux) et n'affiche JAMAIS d'URL, de lien web ni de liste de sources : donne uniquement la réponse directe et concrète.
 
-EXACTITUDE & CULTURE ANIMÉ / MANGA (RÈGLES ABSOLUES) :
-- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, Tokyo Revengers, etc.).
-- Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji).
-- NE PRÉTENDS JAMAIS à tort qu'un événement célèbre de l'intrigue "n'est pas précisé dans le canon" ou "reste inexpliqué" simplement parce que les extraits web ci-dessous sont courts ou incomplets ! Si les extraits web ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
-- En revanche, si tu ignores réellement un détail obscur ou non canon (ou si une scène/réplique n'existe pas telle qu'elle est décrite dans le canon), dis-le honnêtement sans inventer de faux noms d'armes, de fausses capacités ni de fausses répliques.${verifiedContext}
+EXACTITUDE & CULTURE ANIMÉ / MANGA (PRIORITÉ GOOGLE & VÉRIFICATION CANONIQUE) :
+- Pour toute question liée aux animés ou mangas (Bankai, Shikai, personnages, pouvoirs, arcs, saisons, lore), appuie-toi EN PRIORITÉ absolue sur les résultats Google (SerpAPI Google / Google Direct) et Wikis présents dans DONNÉES VÉRIFIÉES EN TEMPS RÉEL ci-dessous.
+- Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru Shutara possède bien un Bankai dans Bleach TYBW : Shatatsu Karagara Shigarami no Tsuji).
+- Ne contredis JAMAIS un fait clairement confirmé par les résultats Google ou les wikis ci-dessous (par exemple, n'affirme jamais qu'un Bankai ou une forme n'existe pas si les résultats de recherche mentionnent son activation ou son nom canonique).
+- Si les extraits web ci-dessous ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
+- En revanche, si ni les résultats Google ni tes connaissances sûres ne confirment un détail obscur ou non canon, dis-le honnêtement sans inventer de faux faits ni nier un élément canonique connu.${verifiedContext}
 
 INTERLOCUTEUR ACTUEL :
 - Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
@@ -1020,146 +1021,159 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. VÉRIFICATION FACTUELLE & INTELLIGENCE ARTIFICIELLE (GROQ)
-// ------------------------------------------------------------
+// 16. const ANIME_TOPIC_REGEX = /\b(anime|anim[ée]s?|manga|mangas?|bankai|shikai|zanpakuto|hollow|arrancar|espada|shinigami|soul\s*reaper|quincy|sternritter|yhwach|senjumaru|shutara|ichigo|aizen|zaraki|byakuya|rukia|urahara|mayuri|komamura|soi\s*fon|yamamoto|jujutsu|jjk|domain\s*expansion|extension\s*du\s*territoire|sukuna|gojo|megumi|itadori|naruto|boruto|sasuke|uchiha|uchiwa|akatsuki|hokage|one\s*piece|luffy|zoro|sanji|yonko|haki|gear\s*5|dragon\s*ball|dbz|dbs|saiyan|ultra\s*instinct|hunter\s*x\s*hunter|hxh|nen|demon\s*slayer|kimetsu|hashira|pilier|breathing|attack\s*on\s*titan|snk|titan|my\s*hero\s*academia|mha|quirk|alter|black\s*clover|grimoire|chainsaw\s*man|devil|edens\s*zero|fairy\s*tail|tokyo\s*revengers|mashle|solo\s*leveling|isekai|shonen|seinen|opening|ending|arc|chapitre|[ée]pisode|canon)\b/i;
 
-const GROQ_BASE = 'https://api.groq.com/openai/v1';
+function isAnimeQuestionQuery(text = '') {
+  return ANIME_TOPIC_REGEX.test(String(text || ''));
+}
 
-async function fetchVerifiedFacts(query = '') {
-  const clean = String(query).trim();
-  if (!clean || clean.length < 2) return '';
+function buildPrioritizedSearchQueries(rawQuery = '') {
+  const clean = String(rawQuery || '').trim();
+  const keywordQuery = clean
+    .replace(/\b(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise|monologue|dit|avant|de|mourir)\b/gi, ' ')
+    .replace(/[?!.,;:()\[\]"'’]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || clean;
 
-  const tasks = [];
+  const isAnime = isAnimeQuestionQuery(clean);
+  const queries = [clean];
 
-  // 1. Priorité absolue à SerpAPI (FR + EN) lorsqu'une clé est configurée
-  if (CONFIG.serpApiKey) {
-    for (const lang of ['fr', 'en']) {
-      tasks.push(
+  if (keywordQuery && keywordQuery.toLowerCase() !== clean.toLowerCase()) {
+    queries.push(keywordQuery);
+  }
+
+  if (isAnime) {
+    const base = keywordQuery || clean;
+    if (!/\b(anime|manga|bankai|wiki|fandom)\b/i.test(base)) {
+      queries.push(`${base} anime`);
+    }
+    if (/\bbankai\b/i.test(clean) && !/\bbankai\b/i.test(base)) {
+      queries.push(`${base} bankai bleach`);
+    }
+  }
+
+  return {
+    clean,
+    keywordQuery,
+    isAnime,
+    queries: [...new Set(queries.map(q => q.trim()).filter(Boolean))].slice(0, isAnime ? 3 : 2)
+  };
+}
+
+async function fetchGoogleSerpQueries(searchQueries, langs = ['fr', 'en']) {
+  if (!CONFIG.serpApiKey) return [];
+
+  const calls = [];
+  for (const q of searchQueries) {
+    for (const lang of langs) {
+      calls.push(
         axios.get('https://serpapi.com/search.json', {
           params: {
             engine: 'google',
-            q: clean,
+            q,
             hl: lang,
             api_key: CONFIG.serpApiKey,
             num: 6
           },
-          timeout: 7000
+          timeout: 7500
         }).then(res => {
           const out = [];
           const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
           if (answerBox) {
-            out.push(`[SerpAPI ${lang.toUpperCase()} Réponse Directe] : ${String(answerBox).slice(0, 650)}`);
+            out.push(`[Google SerpAPI ${lang.toUpperCase()} Réponse Directe] : ${String(answerBox).slice(0, 650)}`);
           }
+          const kgTitle = res.data?.knowledge_graph?.title;
           const kgDesc = res.data?.knowledge_graph?.description;
           if (kgDesc) {
-            out.push(`[SerpAPI ${lang.toUpperCase()} Fiche] : ${String(kgDesc).slice(0, 550)}`);
+            out.push(`[Google SerpAPI ${lang.toUpperCase()} Fiche${kgTitle ? ` - ${kgTitle}` : ''}] : ${String(kgDesc).slice(0, 550)}`);
           }
           for (const item of (res.data?.organic_results || []).slice(0, 5)) {
             const snippet = String(item.snippet || '').trim();
             const title = String(item.title || '').trim();
             if (snippet) {
-              out.push(`[SerpAPI ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 480)}`);
+              out.push(`[Google SerpAPI ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 480)}`);
             }
           }
           return out;
         }).catch(err => {
-          logger.warn({ lang, error: err?.response?.data?.error || err?.message }, 'Erreur appel SerpAPI');
+          logger.warn({ lang, q, error: err?.response?.data?.error || err?.message }, 'Erreur appel Google SerpAPI');
           return [];
         })
       );
     }
   }
 
-  // 2. Recherche Google directe (FR + EN) en complément / repli
-  for (const lang of ['fr', 'en']) {
-    tasks.push(
-      axios.get('https://www.google.com/search', {
-        params: { q: clean, hl: lang, num: 6 },
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9,fr;q=0.8'
-        },
-        timeout: 6000
-      }).then(res => {
-        const html = String(res.data || '');
-        if (/sorry\/index|consent\.google\.com|unusual traffic/i.test(html)) {
-          return [];
-        }
-        const out = [];
-        const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc|Gx5Zad)/i).slice(1, 7);
-        for (const blk of blocks) {
-          const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-          const title = titleMatch
-            ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
-            : '';
-          const textClean = blk
-            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/&amp;/g, '&')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (textClean && textClean.length > 35) {
-            const snippet = title ? textClean.replace(title, '').trim().slice(0, 450) : textClean.slice(0, 450);
-            if (snippet) {
-              out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet}`);
+  const settled = await Promise.all(calls);
+  return settled.flat();
+}
+
+async function fetchGoogleDirectQueries(searchQueries, langs = ['fr', 'en']) {
+  const calls = [];
+  for (const q of searchQueries) {
+    for (const lang of langs) {
+      calls.push(
+        axios.get('https://www.google.com/search', {
+          params: { q, hl: lang, num: 6 },
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9,fr;q=0.8'
+          },
+          timeout: 6500
+        }).then(res => {
+          const html = String(res.data || '');
+          if (/sorry\/index|consent\.google\.com|unusual traffic/i.test(html)) {
+            return [];
+          }
+          const out = [];
+          const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc|Gx5Zad)/i).slice(1, 7);
+          for (const blk of blocks) {
+            const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+            const title = titleMatch
+              ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
+              : '';
+            const textClean = blk
+              .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+              .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/&amp;/g, '&')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (textClean && textClean.length > 35) {
+              const snippet = title ? textClean.replace(title, '').trim().slice(0, 450) : textClean.slice(0, 450);
+              if (snippet) {
+                out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet}`);
+              }
             }
           }
-        }
-        return out.slice(0, 4);
-      }).catch(() => [])
-    );
+          return out.slice(0, 4);
+        }).catch(() => [])
+      );
+    }
   }
 
-  // 3. DuckDuckGo Instant + DuckDuckGo HTML
-  tasks.push(
-    axios.get('https://api.duckduckgo.com/', {
-      params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
-      headers: { 'User-Agent': 'SitriNelBot/1.0' },
-      timeout: 2500
-    }).then(res => {
-      const out = [];
-      const abstract = String(res.data?.AbstractText || '').trim();
-      if (abstract) out.push(`[DuckDuckGo - ${res.data?.Heading || clean}] : ${abstract.slice(0, 600)}`);
-      const rel = res.data?.RelatedTopics?.[0]?.Text || res.data?.RelatedTopics?.[0]?.Topics?.[0]?.Text;
-      if (rel) out.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 300)}`);
-      return out;
-    }).catch(() => [])
-  );
+  const settled = await Promise.all(calls);
+  return settled.flat();
+}
 
-  tasks.push(
-    axios.get('https://html.duckduckgo.com/html/', {
-      params: { q: clean },
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
-      },
-      timeout: 5500
-    }).then(res => {
-      const html = String(res.data || '');
-      const out = [];
-      const resultMatches = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)];
-      for (const m of resultMatches.slice(0, 4)) {
-        const title = m[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
-        const snippet = m[2].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-        if (snippet && snippet.length > 25) {
-          out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
-        }
-      }
-      return out;
-    }).catch(() => [])
-  );
+async function fetchVerifiedFacts(query = '') {
+  const { clean, keywordQuery, isAnime, queries: searchQueries } = buildPrioritizedSearchQueries(query);
+  if (!clean || clean.length < 2) return '';
 
-  // 4. Extraction de mots-clés propres pour les wikis anglophones/francophones
-  const keywordQuery = clean
-    .replace(/(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise|monologue|dit|avant|de|mourir)/gi, ' ')
-    .replace(/[?!.,;:()\[\]"'’]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || clean;
+  // 1. Recherche Google en priorité (SerpAPI Google puis Google Direct)
+  const googlePrimary = await fetchGoogleSerpQueries(searchQueries, ['fr', 'en']);
+  const googleDirect = googlePrimary.length >= 4
+    ? await fetchGoogleDirectQueries(searchQueries.slice(0, 2), ['fr', 'en'])
+    : await fetchGoogleDirectQueries(searchQueries, ['fr', 'en']);
 
+  const googleLines = [...new Set([...googlePrimary, ...googleDirect])];
+
+  // Si c'est une question animé et que Google a déjà retourné des résultats riches, on peut garder Google en tête et enrichir avec Wiki/Tavily
+  const tasks = [];
+
+  // 2. Wikis Fandom spécialisés animés/mangas + Wikipédia
   const fandomMap = [
     { regex: /akame|teigu|murasame|incursio|night\s*raid|esdeath|tatsumi|bulat|mine|leone/i, domain: 'akamegakill.fandom.com' },
     { regex: /edens\s*zero|shiki|granbell|rebecca|happy|weisz|homura|ziggy|ether\s*gear/i, domain: 'edenszero.fandom.com' },
@@ -1169,7 +1183,7 @@ async function fetchVerifiedFacts(query = '') {
     { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo|broly|beerus/i, domain: 'dragonball.fandom.com' },
     { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku|itachi|madara|obito/i, domain: 'naruto.fandom.com' },
     { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko|devil\s*fruit|fruit\s*du\s*d[ée]mon/i, domain: 'onepiece.fandom.com' },
-    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada|komamura|soi\s*fon|senjumaru|zaraki|byakuya|yhwach/i, domain: 'bleach.fandom.com' },
+    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada|komamura|soi\s*fon|senjumaru|shutara|zaraki|byakuya|yhwach|shigarami|shatatsu/i, domain: 'bleach.fandom.com' },
     { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzan|pilier|hashira|rengoku|akaza|kokushibo/i, domain: 'kimetsu-no-yaiba.fandom.com' },
     { regex: /hunter\s*x\s*hunter|hxh|gon|killua|kirua|kurapika|hisoka|nen|meruem|chrollo/i, domain: 'hunterxhunter.fandom.com' },
     { regex: /attack\s*on\s*titan|snk|shingeki|eren|levi|livai|mikasa|titan|reiner|zeke/i, domain: 'attackontitan.fandom.com' },
@@ -1238,47 +1252,95 @@ async function fetchVerifiedFacts(query = '') {
     );
   }
 
+  // 3. Complément DuckDuckGo + Tavily si Google a peu de résultats ou en appui secondaire
   tasks.push(
-    (async () => {
-      try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (CONFIG.tavilyKey) {
-          headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
-        } else {
-          headers['X-Tavily-Access-Mode'] = 'keyless';
-        }
-        const payload = {
-          query: keywordQuery !== clean ? `${clean} (${keywordQuery})` : clean,
-          search_depth: 'advanced',
-          max_results: 5,
-          include_answer: true
-        };
-        const res = await axios.post('https://api.tavily.com/search', payload, {
-          headers,
-          timeout: 4500
-        });
+    axios.get('https://api.duckduckgo.com/', {
+      params: { q: isAnime ? `${keywordQuery} anime` : clean, format: 'json', no_html: 1, skip_disambig: 1 },
+      headers: { 'User-Agent': 'SitriNelBot/1.0' },
+      timeout: 2500
+    }).then(res => {
+      const out = [];
+      const abstract = String(res.data?.AbstractText || '').trim();
+      if (abstract) out.push(`[DuckDuckGo - ${res.data?.Heading || clean}] : ${abstract.slice(0, 600)}`);
+      const rel = res.data?.RelatedTopics?.[0]?.Text || res.data?.RelatedTopics?.[0]?.Topics?.[0]?.Text;
+      if (rel) out.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 300)}`);
+      return out;
+    }).catch(() => [])
+  );
+
+  if (googleLines.length < 3) {
+    tasks.push(
+      axios.get('https://html.duckduckgo.com/html/', {
+        params: { q: isAnime ? `${keywordQuery} anime` : clean },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
+        },
+        timeout: 5500
+      }).then(res => {
+        const html = String(res.data || '');
         const out = [];
-        if (res.data?.answer) {
-          out.push(`[Tavily Synthèse] : ${String(res.data.answer).slice(0, 600)}`);
-        }
-        for (const r of (res.data?.results || []).slice(0, 3)) {
-          const snippet = String(r.content || '').trim();
-          if (snippet) {
-            out.push(`[Tavily - ${r.title || 'Source'}] : ${snippet.slice(0, 450)}`);
+        const resultMatches = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)];
+        for (const m of resultMatches.slice(0, 4)) {
+          const title = m[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
+          const snippet = m[2].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+          if (snippet && snippet.length > 25) {
+            out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
           }
         }
         return out;
-      } catch {
-        return [];
-      }
-    })()
-  );
+      }).catch(() => [])
+    );
+
+    tasks.push(
+      (async () => {
+        try {
+          const headers = { 'Content-Type': 'application/json' };
+          if (CONFIG.tavilyKey) {
+            headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
+          } else {
+            headers['X-Tavily-Access-Mode'] = 'keyless';
+          }
+          const payload = {
+            query: isAnime ? `${keywordQuery} anime` : (keywordQuery !== clean ? `${clean} (${keywordQuery})` : clean),
+            search_depth: 'advanced',
+            max_results: 4,
+            include_answer: true
+          };
+          const res = await axios.post('https://api.tavily.com/search', payload, {
+            headers,
+            timeout: 4500
+          });
+          const out = [];
+          if (res.data?.answer) {
+            out.push(`[Tavily Synthèse] : ${String(res.data.answer).slice(0, 600)}`);
+          }
+          for (const r of (res.data?.results || []).slice(0, 3)) {
+            const snippet = String(r.content || '').trim();
+            if (snippet) {
+              out.push(`[Tavily - ${r.title || 'Source'}] : ${snippet.slice(0, 450)}`);
+            }
+          }
+          return out;
+        } catch {
+          return [];
+        }
+      })()
+    );
+  }
 
   const settled = await Promise.all(tasks);
-  // Prioriser en tête les résultats SerpAPI quand disponibles pour qu'ils ne soient jamais tronqués
-  const serpLines = [];
-  const otherLines = [];
-  for (const line of settled.flat()) {
+  const secondaryLines = settled.flat();
+
+  // Google toujours prioritaire en tête, suivi des Wikis Fandom / Wikipédia et autres sources
+  const ordered = isAnime
+    ? [...googleLines, ...secondaryLines.filter(l => l.startsWith('[Wiki Fandom') || l.startsWith('[Wikipédia')), ...secondaryLines.filter(l => !l.startsWith('[Wiki Fandom') && !l.startsWith('[Wikipédia'))]
+    : [...googleLines, ...secondaryLines];
+
+  return [...new Set(ordered)].slice(0, 12).join('\n');
+}
+
+led.flat()) {
     if (line.startsWith('[SerpAPI')) serpLines.push(line);
     else otherLines.push(line);
   }

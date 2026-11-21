@@ -1031,80 +1031,127 @@ function isAnimeQuestionQuery(text = '') {
   return ANIME_TOPIC_REGEX.test(String(text || ''));
 }
 
-function buildPrioritizedSearchQueries(rawQuery = '') {
-  const clean = String(rawQuery || '').trim();
-  const keywordQuery = clean
-    .replace(/\b(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise|monologue|dit|avant|de|mourir)\b/gi, ' ')
-    .replace(/[?!.,;:()\[\]"'’]/g, ' ')
+function extractGoogleSearchTerms(rawQuery = '') {
+  const clean = String(rawQuery || '').replace(/\s+/g, ' ').trim();
+  const compact = clean
+    .replace(/\b(s['’]il te pla[îi]t|stp|dis[- ]moi|explique[- ]moi|donne[- ]moi|peux[- ]tu|tu peux)\b/gi, ' ')
+    .replace(/[?!.,;:"'’()\[\]]+/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim() || clean;
+    .trim();
 
-  const isAnime = isAnimeQuestionQuery(clean);
-  const queries = [keywordQuery || clean];
+  const queries = [clean];
+  if (compact && compact.toLowerCase() !== clean.toLowerCase()) {
+    queries.push(compact);
+  }
 
-  if (isAnime) {
-    const base = keywordQuery || clean;
-    if (!/\b(anime|manga|bankai|wiki|fandom)\b/i.test(base)) {
-      queries.push(`${base} anime`);
-    }
-    if (/\bbankai\b/i.test(clean) && !/\bbankai\b/i.test(base)) {
-      queries.push(`${base} bankai`);
-    }
+  if (isAnimeQuestionQuery(clean) && !/\b(anime|manga|wiki|fandom)\b/i.test(clean)) {
+    queries.push(`${compact || clean} anime`);
   }
 
   return {
     clean,
-    keywordQuery: keywordQuery || clean,
-    isAnime,
+    compact: compact || clean,
     queries: [...new Set(queries.map(q => q.trim()).filter(Boolean))].slice(0, 2)
   };
 }
 
-async function fetchGoogleSerpQueries(searchQueries, langs = ['en', 'fr']) {
-  if (!CONFIG.serpApiKey) return [];
+async function searchGoogleViaSerpApi(rawQuery = '') {
+  const clean = String(rawQuery || '').trim();
+  if (!clean || !CONFIG.serpApiKey) {
+    return { results: [], formatted: '' };
+  }
+
+  const { queries } = extractGoogleSearchTerms(clean);
+  const collected = [];
+  const seenKeys = new Set();
+
+  const runSingleSerp = async (q, hl = 'fr') => {
+    const res = await axios.get('https://serpapi.com/search.json', {
+      params: {
+        engine: 'google',
+        q,
+        hl,
+        api_key: CONFIG.serpApiKey,
+        num: 6
+      },
+      timeout: 7000
+    });
+
+    const data = res.data || {};
+    const entries = [];
+
+    const directAnswer =
+      data.answer_box?.answer ||
+      data.answer_box?.snippet ||
+      data.answer_box?.result;
+
+    if (directAnswer) {
+      entries.push({
+        type: 'Réponse directe Google',
+        title: data.answer_box?.title || q,
+        snippet: String(directAnswer).replace(/\s+/g, ' ').trim().slice(0, 600)
+      });
+    }
+
+    if (data.knowledge_graph?.title || data.knowledge_graph?.description) {
+      const kgParts = [
+        data.knowledge_graph?.title,
+        data.knowledge_graph?.type,
+        data.knowledge_graph?.description
+      ].filter(Boolean);
+      entries.push({
+        type: 'Knowledge Graph',
+        title: data.knowledge_graph?.title || q,
+        snippet: kgParts.join(' — ').replace(/\s+/g, ' ').trim().slice(0, 600)
+      });
+    }
+
+    for (const item of (data.organic_results || []).slice(0, 5)) {
+      const title = String(item.title || '').trim();
+      const snippet = String(item.snippet || '').trim();
+      const date = item.date ? ` (${item.date})` : '';
+      if (snippet || title) {
+        entries.push({
+          type: 'Résultat web',
+          title: `${title}${date}`.trim(),
+          snippet: snippet.replace(/\s+/g, ' ').trim().slice(0, 500)
+        });
+      }
+    }
+
+    return entries;
+  };
 
   const calls = [];
-  for (const q of searchQueries.slice(0, 2)) {
-    for (const lang of langs.slice(0, 1)) {
-      calls.push(
-        axios.get('https://serpapi.com/search.json', {
-          params: {
-            engine: 'google',
-            q,
-            hl: lang,
-            api_key: CONFIG.serpApiKey,
-            num: 5
-          },
-          timeout: 4500
-        }).then(res => {
-          const out = [];
-          const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
-          if (answerBox) {
-            out.push(`[Google ${lang.toUpperCase()} Direct] : ${String(answerBox).slice(0, 600)}`);
-          }
-          const kgDesc = res.data?.knowledge_graph?.description;
-          if (kgDesc) {
-            out.push(`[Google ${lang.toUpperCase()} Fiche] : ${String(kgDesc).slice(0, 500)}`);
-          }
-          for (const item of (res.data?.organic_results || []).slice(0, 4)) {
-            const snippet = String(item.snippet || '').trim();
-            const title = String(item.title || '').trim();
-            if (snippet) {
-              out.push(`[Google ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 450)}`);
-            }
-          }
-          return out;
-        }).catch(() => [])
-      );
+  for (const q of queries) {
+    calls.push(runSingleSerp(q, 'fr').catch(() => []));
+    calls.push(runSingleSerp(q, 'en').catch(() => []));
+  }
+
+  const batches = await Promise.all(calls);
+  for (const group of batches) {
+    for (const entry of group) {
+      const dedupKey = `${entry.title.toLowerCase()}|${entry.snippet.toLowerCase().slice(0, 120)}`;
+      if (!seenKeys.has(dedupKey)) {
+        seenKeys.add(dedupKey);
+        collected.push(entry);
+      }
     }
   }
 
-  const settled = await Promise.all(calls);
-  return settled.flat();
+  const topResults = collected.slice(0, 8);
+  const formatted = topResults
+    .map((r, idx) => `${idx + 1}. [${r.type}] ${r.title} : ${r.snippet}`)
+    .join('\n');
+
+  return {
+    results: topResults,
+    formatted
+  };
 }
 
 async function fetchVerifiedFacts(query = '') {
-  const { clean, keywordQuery, isAnime, queries: searchQueries } = buildPrioritizedSearchQueries(query);
+  const { clean, compact } = extractGoogleSearchTerms(query);
   if (!clean || clean.length < 2) return '';
 
   const fandomMap = [
@@ -1132,9 +1179,14 @@ async function fetchVerifiedFacts(query = '') {
   const tasks = [];
 
   if (CONFIG.serpApiKey) {
-    tasks.push(fetchGoogleSerpQueries(searchQueries, ['en']));
+    tasks.push(
+      searchGoogleViaSerpApi(clean).then(({ formatted }) =>
+        formatted ? [`RÉSULTATS GOOGLE (SERPAPI) :\n${formatted}`] : []
+      )
+    );
   }
 
+  const keywordQuery = compact || clean;
   const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain).slice(0, 1);
   for (const domain of matchedFandoms) {
     tasks.push(
@@ -1163,25 +1215,24 @@ async function fetchVerifiedFacts(query = '') {
   }
 
   tasks.push(
-    axios.get('https://en.wikipedia.org/w/api.php', {
+    axios.get('https://fr.wikipedia.org/w/api.php', {
       params: { action: 'query', list: 'search', srsearch: keywordQuery, srlimit: 1, format: 'json' },
       headers: { 'User-Agent': 'SitriNelBot/1.0' },
-      timeout: 2500
+      timeout: 3000
     }).then(async res => {
       const hit = res.data?.query?.search?.[0];
       if (!hit?.title) return [];
       const sum = await axios.get(
-        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-        { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
+        `https://fr.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
+        { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 3000 }
       );
       const extract = String(sum.data?.extract || '').trim();
-      return extract ? [`[Wikipedia EN - ${hit.title}] : ${extract.slice(0, 600)}`] : [];
+      return extract ? [`[Wikipedia FR - ${hit.title}] : ${extract.slice(0, 500)}`] : [];
     }).catch(() => [])
   );
 
   const settled = await Promise.all(tasks);
-  const lines = settled.flat();
-  return [...new Set(lines)].slice(0, 8).join('\n');
+  return settled.flat().filter(Boolean).join('\n\n').slice(0, 4500);
 }
 
 async function getUserMemory(userJid) {
@@ -1479,6 +1530,42 @@ async function askGroq(prompt, chatJid, options = {}) {
   }
 
   return cleanAnswer;
+}
+
+async function askXaiWithSerpApi(prompt, chatJid, options = {}) {
+  const queryText = String(options.factQuery || prompt || '').trim();
+  let serpSummary = '';
+
+  if (CONFIG.serpApiKey && queryText) {
+    try {
+      const serpData = await searchGoogleViaSerpApi(queryText);
+      serpSummary = serpData.formatted;
+      logger.info(
+        { query: queryText, resultsCount: serpData.results.length },
+        'Résultats Google SerpApi récupérés pour Xai'
+      );
+    } catch (err) {
+      logger.warn({ error: err?.message }, 'SerpApi indisponible pour Xai, poursuite avec Groq.');
+    }
+  } else if (!CONFIG.serpApiKey) {
+    logger.warn('SERPAPI_API_KEY absent : Xai fonctionne sans recherche Google SerpApi.');
+  }
+
+  const enrichedPrompt = serpSummary
+    ? [
+        `Question de l'utilisateur : ${String(prompt).trim()}`,
+        '',
+        'Résultats de recherche Google récupérés via SerpApi :',
+        serpSummary,
+        '',
+        'Consigne : Analyse ces résultats Google avec rigueur, croise les informations pertinentes, écarte ce qui est hors sujet ou contradictoire, et rédige une réponse fiable, claire et directe.'
+      ].join('\n')
+    : String(prompt).trim();
+
+  return askGroq(enrichedPrompt, chatJid, {
+    ...options,
+    skipFactCheck: Boolean(serpSummary)
+  });
 }
 
 async function askAI(prompt, chatJid, options = {}) {
@@ -4596,13 +4683,23 @@ async function handleAICommand(jid, message, sender, command, args) {
   let answer;
 
   try {
-    answer = await askAI(prompt, jid, {
-      useHistory: true,
-      senderJid: sender,
-      pushName: message?.pushName || '',
-      factQuery: args,
-      maxTokens
-    });
+    if (command === 'ai' || command === 'ia') {
+      answer = await askXaiWithSerpApi(prompt, jid, {
+        useHistory: true,
+        senderJid: sender,
+        pushName: message?.pushName || '',
+        factQuery: args,
+        maxTokens
+      });
+    } else {
+      answer = await askAI(prompt, jid, {
+        useHistory: true,
+        senderJid: sender,
+        pushName: message?.pushName || '',
+        factQuery: args,
+        maxTokens
+      });
+    }
   } catch (error) {
     const failures = error?.failures?.length ? error.failures : [error];
 

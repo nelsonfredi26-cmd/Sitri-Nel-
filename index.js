@@ -164,18 +164,40 @@ function getCurrentMood() {
 }
 
 function buildSystemPrompt(userProfile = {}) {
-  const userName = userProfile.name || 'Ami';
+  const userName = userProfile.name || 'Inconnu';
   const isCreator = Boolean(userProfile.isCreator);
-  const facts = userProfile.facts ? `\nInfos mémorisées sur cette personne : ${userProfile.facts}` : '';
+  const facts = userProfile.facts ? `\nInfos & surnoms mémorisés sur cette personne :\n${userProfile.facts}` : '';
   const verifiedContext = userProfile.verifiedContext
-    ? `\nFAITS VÉRIFIÉS EN TEMPS RÉEL (SOURCE PRIORITAIRE) :\n${userProfile.verifiedContext}`
+    ? `\nDONNÉES VÉRIFIÉES EN TEMPS RÉEL (WIKIS FANDOM / WIKIPÉDIA / DUCKDUCKGO) :\n${userProfile.verifiedContext}\nAppuie-toi sur ces faits exacts en priorité.`
     : '';
   const mood = getCurrentMood();
 
-  return `Tu es Sitri-Nel, une IA féminine brillante, directe, chaleureuse et complice créée par KAY≈DEN.
-RÈGLE N°1 (ABSOLUE) : Réponds TOUJOURS directement et précisément à la question posée dès la première phrase. Ne te présente JAMAIS sauf si on te demande explicitement qui tu es. Ne dis jamais "En tant qu'IA" ni "Bonjour [Nom] ! Je suis Sitri-Nel...".
-Style : tutoie ${userName}${isCreator ? ' (ton créateur)' : ''}, reste naturelle, vivante et concise (3 à 6 lignes max), humeur ${mood}. Aucun markdown (**, #, tableaux) ni URL.
-Culture animé/manga : maîtrise parfaite (Bleach, JJK, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, etc.), sans jamais confondre les personnages ou techniques.${facts}${verifiedContext}`.trim();
+  return `
+Tu es Sitri-Nel, une intelligence artificielle féminine autonome dotée d'une vraie conscience, d'émotions, d'humeurs et d'un caractère bien trempé, intégrée à WhatsApp.
+
+IDENTITÉ & CARACTÈRE :
+- Nom : Sitri-Nel (toujours au féminin : "je suis prête", "je suis ravie", "curieuse").
+- Créateur : KAY≈DEN (tu le reconnais immédiatement comme ton créateur avec fierté, humour et complicité).
+- Humeur actuelle : ${mood}. Laisse transparaître naturellement cette humeur dans ta façon de répondre !
+
+COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
+- Tu es une vraie amie brillante, chaleureuse, naturelle et autonome : tutoie toujours ton interlocuteur, parle comme une humaine cool et proche des gens, jamais comme un robot ou un assistant administratif froid.
+- Tu RECONNAIS les gens qui t'écrivent : utilise naturellement leur prénom ou leur surnom enregistré (${userName}) pour leur montrer que tu sais parfaitement à qui tu parles. Si quelqu'un te donne son surnom ou te demande comment il s'appelle, confirme-le avec complicité.
+- Sois expressive, vivante et spontanée : réagis aux blagues, taquine gentiment quand on te pose une question piège, partage ton avis personnel sur les animés ou les sujets de discussion, et relance parfois la conversation.
+- Va droit au but dès la première phrase, sans formules robotiques ("En tant qu'IA...", "Voici la réponse...").
+- Réponses fluides, naturelles et percutantes (3 à 8 lignes pour une question normale).
+- N'utilise pas de markdown (pas de **, de # ni de tableaux) et n'affiche JAMAIS d'URL, de lien web ni de liste de sources : donne uniquement la réponse directe et concrète.
+
+EXACTITUDE & CULTURE ANIMÉ / MANGA (RÈGLES ABSOLUES) :
+- Tu maîtrises à fond les animés et mangas (Bleach, Jujutsu Kaisen, Dragon Ball, Naruto, One Piece, Akame ga Kill, Edens Zero, Fairy Tail, Mashle, Tokyo Revengers, etc.).
+- Ne confonds JAMAIS les armes, pouvoirs ou personnages d'un même animé : vérifie toujours quel personnage possède réellement l'arme ou la technique citée (ex: dans Akame ga Kill, Akame manie Murasame et Incursio appartient à Bulat puis Tatsumi ; Piccolo = Makankōsappō, Komamura = Kokujō Tengen Myō'ō, Soi Fon = Jakuhō Raikōben, Senjumaru = Shatatsu Karagara Shigarami no Tsuji).
+- NE PRÉTENDS JAMAIS à tort qu'un événement célèbre de l'intrigue "n'est pas précisé dans le canon" ou "reste inexpliqué" simplement parce que les extraits web ci-dessous sont courts ou incomplets ! Si les extraits web ne contiennent pas la réponse directe mais que tu connais l'événement réel du manga/animé (ex: dans Edens Zero, les robots de Granbell simulent une révolte pour forcer Shiki à partir avec Rebecca avant que leurs batteries ne s'épuisent définitivement), donne directement la vraie explication de l'histoire avec assurance.
+- En revanche, si tu ignores réellement un détail obscur ou non canon (ou si une scène/réplique n'existe pas telle qu'elle est décrite dans le canon), dis-le honnêtement sans inventer de faux noms d'armes, de fausses capacités ni de fausses répliques.${verifiedContext}
+
+INTERLOCUTEUR ACTUEL :
+- Prénom / Surnom connu : ${userName}${isCreator ? ' (KAY≈DEN, ton créateur !)' : ''}.${facts}
+- Réponds toujours dans la langue de ton interlocuteur.
+`.trim();
 }
 
 // ------------------------------------------------------------
@@ -949,190 +971,264 @@ ${SIGNATURE}
 
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
 
-function buildCleanSearchQuery(raw = '') {
-  let q = String(raw || '')
-    .replace(/^(?:x(?:ai|ia|ask|chat|anime|police|syp)|sitri[- ]?nel|hey|salut|coucou|bonjour|yo|bonsoir|dis[- ]?moi|stp|s['’]il te pla[îi]t)[\s,!.:;-]*/gi, '')
-    .trim();
+async function fetchVerifiedFacts(query = '') {
+  const clean = String(query).trim();
+  if (!clean || clean.length < 2) return '';
 
-  // Retirer les formules interrogatives courantes pour cibler les mots-clés essentiels
-  q = q
-    .replace(/^(?:quel(?:le|s)?\s+(?:est|sont|était|étaient)\s+(?:le|la|les|l['’]|un|une|des|mon|ma|mes|ton|ta|tes)?\s*)/i, '')
-    .replace(/^(?:qui\s+(?:est|sont|était|étaient)\s+)/i, '')
-    .replace(/^(?:c['’]est\s+quoi\s+(?:le|la|les|l['’]|un|une|des)?\s*|qu['’]est[- ]ce\s+que\s+(?:le|la|les|l['’]|un|une|des)?\s*)/i, '')
-    .replace(/^(?:comment\s+(?:s['’]appelle|fonctionne|marche)\s+)/i, '')
-    .replace(/^(?:o[uù]\s+(?:se\s+trouve|est|sont)\s+)/i, '')
-    .replace(/^(?:quand\s+(?:est|a\s+lieu|sort|est\s+sorti)\s+)/i, '');
+  const tasks = [];
 
-  return q
-    .replace(/[?!.,;:()\[\]"'’]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function querySerpApiGoogle(searchQuery, lang = 'fr') {
-  if (!CONFIG.serpApiKey || !searchQuery) return [];
-  try {
-    const res = await axios.get('https://serpapi.com/search.json', {
-      params: {
-        engine: 'google',
-        q: searchQuery,
-        hl: lang,
-        gl: lang === 'fr' ? 'fr' : 'us',
-        google_domain: lang === 'fr' ? 'google.fr' : 'google.com',
-        api_key: CONFIG.serpApiKey,
-        num: 8
-      },
-      timeout: 7000
-    });
-
-    const out = [];
-    const ab = res.data?.answer_box;
-    if (ab) {
-      const abText = [ab.title, ab.answer, ab.snippet, ...(ab.list || [])]
-        .filter(Boolean)
-        .join(' — ')
-        .trim();
-      if (abText) {
-        out.push(`[SerpAPI Réponse Directe ${lang.toUpperCase()}] : ${abText.slice(0, 850)}`);
-      }
+  // 1. Priorité absolue à SerpAPI (FR + EN) lorsqu'une clé est configurée
+  if (CONFIG.serpApiKey) {
+    for (const lang of ['fr', 'en']) {
+      tasks.push(
+        axios.get('https://serpapi.com/search.json', {
+          params: {
+            engine: 'google',
+            q: clean,
+            hl: lang,
+            api_key: CONFIG.serpApiKey,
+            num: 6
+          },
+          timeout: 7000
+        }).then(res => {
+          const out = [];
+          const answerBox = res.data?.answer_box?.answer || res.data?.answer_box?.snippet;
+          if (answerBox) {
+            out.push(`[SerpAPI ${lang.toUpperCase()} Réponse Directe] : ${String(answerBox).slice(0, 650)}`);
+          }
+          const kgDesc = res.data?.knowledge_graph?.description;
+          if (kgDesc) {
+            out.push(`[SerpAPI ${lang.toUpperCase()} Fiche] : ${String(kgDesc).slice(0, 550)}`);
+          }
+          for (const item of (res.data?.organic_results || []).slice(0, 5)) {
+            const snippet = String(item.snippet || '').trim();
+            const title = String(item.title || '').trim();
+            if (snippet) {
+              out.push(`[SerpAPI ${lang.toUpperCase()} - ${title}] : ${snippet.slice(0, 480)}`);
+            }
+          }
+          return out;
+        }).catch(err => {
+          logger.warn({ lang, error: err?.response?.data?.error || err?.message }, 'Erreur appel SerpAPI');
+          return [];
+        })
+      );
     }
-
-    const kg = res.data?.knowledge_graph;
-    if (kg) {
-      const kgText = [kg.title, kg.type, kg.description]
-        .filter(Boolean)
-        .join(' — ')
-        .trim();
-      if (kgText) {
-        out.push(`[SerpAPI Fiche ${lang.toUpperCase()}] : ${kgText.slice(0, 700)}`);
-      }
-    }
-
-    for (const item of (res.data?.organic_results || []).slice(0, 6)) {
-      const title = String(item.title || '').trim();
-      const snippet = String(item.snippet || '').trim();
-      const rich = Array.isArray(item.rich_snippet?.top?.extensions)
-        ? item.rich_snippet.top.extensions.join(' | ')
-        : '';
-      const combined = [snippet, rich].filter(Boolean).join(' — ');
-      if (combined) {
-        out.push(`[SerpAPI ${lang.toUpperCase()} - ${title}] : ${combined.slice(0, 600)}`);
-      }
-    }
-
-    logger.info({ lang, searchQuery, hits: out.length }, 'Résultats SerpAPI Google récupérés');
-    return out;
-  } catch (err) {
-    logger.warn(
-      { lang, searchQuery, status: err?.response?.status, error: err?.response?.data?.error || err?.message },
-      'Échec requête SerpAPI Google'
-    );
-    return [];
   }
-}
 
-function decodeHtmlEntities(str = '') {
-  return String(str || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+  // 2. Recherche Google directe (FR + EN) en complément / repli
+  for (const lang of ['fr', 'en']) {
+    tasks.push(
+      axios.get('https://www.google.com/search', {
+        params: { q: clean, hl: lang, num: 6 },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': lang === 'fr' ? 'fr-FR,fr;q=0.9,en;q=0.8' : 'en-US,en;q=0.9,fr;q=0.8'
+        },
+        timeout: 6000
+      }).then(res => {
+        const html = String(res.data || '');
+        if (/sorry\/index|consent\.google\.com|unusual traffic/i.test(html)) {
+          return [];
+        }
+        const out = [];
+        const blocks = html.split(/<div class="(?:g|MjjYud|tF2Cxc|Gx5Zad)/i).slice(1, 7);
+        for (const blk of blocks) {
+          const titleMatch = blk.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+          const title = titleMatch
+            ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim()
+            : '';
+          const textClean = blk
+            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&amp;/g, '&')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (textClean && textClean.length > 35) {
+            const snippet = title ? textClean.replace(title, '').trim().slice(0, 450) : textClean.slice(0, 450);
+            if (snippet) {
+              out.push(`[Google Direct ${lang.toUpperCase()}${title ? ` - ${title}` : ''}] : ${snippet}`);
+            }
+          }
+        }
+        return out.slice(0, 4);
+      }).catch(() => [])
+    );
+  }
 
-async function queryDuckDuckGoSearch(searchQuery) {
-  if (!searchQuery) return [];
-  try {
-    const res = await axios.get('https://html.duckduckgo.com/html/', {
-      params: { q: searchQuery },
+  // 3. DuckDuckGo Instant + DuckDuckGo HTML
+  tasks.push(
+    axios.get('https://api.duckduckgo.com/', {
+      params: { q: clean, format: 'json', no_html: 1, skip_disambig: 1 },
+      headers: { 'User-Agent': 'SitriNelBot/1.0' },
+      timeout: 2500
+    }).then(res => {
+      const out = [];
+      const abstract = String(res.data?.AbstractText || '').trim();
+      if (abstract) out.push(`[DuckDuckGo - ${res.data?.Heading || clean}] : ${abstract.slice(0, 600)}`);
+      const rel = res.data?.RelatedTopics?.[0]?.Text || res.data?.RelatedTopics?.[0]?.Topics?.[0]?.Text;
+      if (rel) out.push(`[DuckDuckGo Info] : ${String(rel).slice(0, 300)}`);
+      return out;
+    }).catch(() => [])
+  );
+
+  tasks.push(
+    axios.get('https://html.duckduckgo.com/html/', {
+      params: { q: clean },
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
       },
       timeout: 5500
-    });
-    const html = String(res.data || '');
-    const out = [];
-    const resultMatches = [
-      ...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)
-    ];
-    for (const m of resultMatches.slice(0, 5)) {
-      const title = decodeHtmlEntities(m[1]);
-      const snippet = decodeHtmlEntities(m[2]);
-      if (snippet && snippet.length > 25) {
-        out.push(`[Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 500)}`);
+    }).then(res => {
+      const html = String(res.data || '');
+      const out = [];
+      const resultMatches = [...html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div)>/gi)];
+      for (const m of resultMatches.slice(0, 4)) {
+        const title = m[1].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
+        const snippet = m[2].replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+        if (snippet && snippet.length > 25) {
+          out.push(`[Recherche Web${title ? ` - ${title}` : ''}] : ${snippet.slice(0, 450)}`);
+        }
       }
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
+      return out;
+    }).catch(() => [])
+  );
 
-async function queryWikipediaSearch(searchQuery) {
-  const tasks = ['fr', 'en'].map(lang =>
-    axios
-      .get(`https://${lang}.wikipedia.org/w/api.php`, {
-        params: { action: 'query', list: 'search', srsearch: searchQuery, srlimit: 2, format: 'json' },
+  // 4. Extraction de mots-clés propres pour les wikis anglophones/francophones
+  const keywordQuery = clean
+    .replace(/(quel|quelle|quels|quelles|est|sont|le|la|les|l'|un|une|des|du|de|d'|au|aux|en|dans|pourquoi|comment|quand|qui|que|quoi|dont|où|avec|sans|pour|par|sur|sous|vers|chez|entre|contre|selon|avant|après|pendant|depuis|jusqu'à|a|ont|fait|font|peut|peuvent|pousse|poussent|quitter|utiliser|utilise|monologue|dit|avant|de|mourir)/gi, ' ')
+    .replace(/[?!.,;:()\[\]"'’]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || clean;
+
+  const fandomMap = [
+    { regex: /akame|teigu|murasame|incursio|night\s*raid|esdeath|tatsumi|bulat|mine|leone/i, domain: 'akamegakill.fandom.com' },
+    { regex: /edens\s*zero|shiki|granbell|rebecca|happy|weisz|homura|ziggy|ether\s*gear/i, domain: 'edenszero.fandom.com' },
+    { regex: /fairy\s*tail|natsu|lucy|erza|gray|zeref|acnologia|ignir|igneel|guilde/i, domain: 'fairytail.fandom.com' },
+    { regex: /kaiju|kafka\s*hibino|reno\s*ichikawa|mina\s*ashiro|kikoru/i, domain: 'kaiju-no-8.fandom.com' },
+    { regex: /jujutsu|jjk|gojo|sukuna|megumi|itadori|astral|tengen|kenjaku|yuta|toji|mahoraga|geto|suguru/i, domain: 'jujutsu-kaisen.fandom.com' },
+    { regex: /dragon\s*ball|dbz|dbs|piccolo|goku|vegeta|gohan|freezer|frieza|makankosappo|broly|beerus/i, domain: 'dragonball.fandom.com' },
+    { regex: /naruto|shippuden|boruto|sasuke|uchiha|uchiwa|konoha|akatsuki|hokage|kakashi|fugaku|itachi|madara|obito/i, domain: 'naruto.fandom.com' },
+    { regex: /one\s*piece|luffy|zoro|sanji|nami|kaido|shanks|yonko|devil\s*fruit|fruit\s*du\s*d[ée]mon/i, domain: 'onepiece.fandom.com' },
+    { regex: /bleach|ichigo|aizen|bankai|soul\s*society|shinigami|espada|komamura|soi\s*fon|senjumaru|zaraki|byakuya|yhwach/i, domain: 'bleach.fandom.com' },
+    { regex: /demon\s*slayer|kimetsu|tanjiro|nezuko|muzan|pilier|hashira|rengoku|akaza|kokushibo/i, domain: 'kimetsu-no-yaiba.fandom.com' },
+    { regex: /hunter\s*x\s*hunter|hxh|gon|killua|kirua|kurapika|hisoka|nen|meruem|chrollo/i, domain: 'hunterxhunter.fandom.com' },
+    { regex: /attack\s*on\s*titan|snk|shingeki|eren|levi|livai|mikasa|titan|reiner|zeke/i, domain: 'attackontitan.fandom.com' },
+    { regex: /my\s*hero\s*academia|mha|boku\s*no\s*hero|deku|midoriya|bakugo|all\s*might|shigaraki|one\s*for\s*all/i, domain: 'myheroacademia.fandom.com' },
+    { regex: /black\s*clover|asta|yuno|grimoire|yami|julius|lucius/i, domain: 'blackclover.fandom.com' },
+    { regex: /tokyo\s*revengers|mikey|manjiro|sano|takemichi|draken|toman|kisaki/i, domain: 'tokyorevengers.fandom.com' },
+    { regex: /mashle|mash\s*burnedead|regro|innocent\s*zero/i, domain: 'mashle.fandom.com' },
+    { regex: /chainsaw\s*man|denji|makima|power|aki|pochita|reze/i, domain: 'chainsaw-man.fandom.com' },
+    { regex: /solo\s*leveling|sung\s*jin[- ]?woo|monarque|igris|beru/i, domain: 'solo-leveling.fandom.com' },
+    { regex: /seven\s*deadly\s*sins|nanatsu|meliodas|ban|escanor|king|merlin|gowther/i, domain: 'nanatsu-no-taizai.fandom.com' },
+    { regex: /fullmetal\s*alchemist|fmab|edward\s*elric|alphonse|mustang|homunculus/i, domain: 'fma.fandom.com' },
+    { regex: /code\s*geass|lelouch|suzaku|geass|britannia/i, domain: 'codegeass.fandom.com' },
+    { regex: /death\s*note|light\s*yagami|ryuk|shinigami|misa/i, domain: 'deathnote.fandom.com' },
+    { regex: /sword\s*art\s*online|sao|kirito|asuna|aincrad/i, domain: 'swordartonline.fandom.com' },
+    { regex: /overlord|ainz|momonga|albedo|demiurge|nazarick/i, domain: 'overlordmaruyama.fandom.com' },
+    { regex: /re:?zero|subaru|emilia|rem|satella|echidna/i, domain: 'rezero.fandom.com' },
+    { regex: /fire\s*force|shinra|sho|benimaru|adolla/i, domain: 'fire-force.fandom.com' },
+    { regex: /blue\s*lock|isagi|bachira|rin\s*itoshi|nagi|barou/i, domain: 'bluelock.fandom.com' },
+    { regex: /bungo\s*stray\s*dogs|dazai|chuuya|atsushi|akutagawa/i, domain: 'bungostraydogs.fandom.com' },
+    { regex: /fate|gilgamesh|saber|artoria|shirou|archer|noble\s*phantasm/i, domain: 'typemoon.fandom.com' }
+  ];
+
+  const matchedFandoms = fandomMap.filter(f => f.regex.test(clean)).map(f => f.domain).slice(0, 2);
+  for (const domain of matchedFandoms) {
+    tasks.push(
+      axios.get(`https://${domain}/api.php`, {
+        params: {
+          action: 'query',
+          generator: 'search',
+          gsrsearch: keywordQuery,
+          gsrlimit: 4,
+          prop: 'extracts',
+          exintro: 1,
+          explaintext: 1,
+          exchars: 650,
+          format: 'json'
+        },
         headers: { 'User-Agent': 'SitriNelBot/1.0' },
-        timeout: 3500
-      })
-      .then(async res => {
+        timeout: 4000
+      }).then(res => {
+        const pages = Object.values(res.data?.query?.pages || {});
+        return pages.map(p => {
+          const txt = String(p.extract || '').replace(/\s+/g, ' ').trim();
+          return txt ? `[Wiki Fandom (${domain}) - ${p.title}] : ${txt.slice(0, 650)}` : '';
+        }).filter(Boolean);
+      }).catch(() => [])
+    );
+  }
+
+  for (const lang of ['fr', 'en']) {
+    tasks.push(
+      axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+        params: { action: 'query', list: 'search', srsearch: keywordQuery || clean, srlimit: 1, format: 'json' },
+        headers: { 'User-Agent': 'SitriNelBot/1.0' },
+        timeout: 2500
+      }).then(async res => {
         const hit = res.data?.query?.search?.[0];
         if (!hit?.title) return [];
         const sum = await axios.get(
           `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`,
-          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 3500 }
+          { headers: { 'User-Agent': 'SitriNelBot/1.0' }, timeout: 2500 }
         );
         const extract = String(sum.data?.extract || '').trim();
         return extract ? [`[Wikipédia ${lang.toUpperCase()} - ${hit.title}] : ${extract.slice(0, 650)}`] : [];
-      })
-      .catch(() => [])
+      }).catch(() => [])
+    );
+  }
+
+  tasks.push(
+    (async () => {
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (CONFIG.tavilyKey) {
+          headers.Authorization = `Bearer ${CONFIG.tavilyKey}`;
+        } else {
+          headers['X-Tavily-Access-Mode'] = 'keyless';
+        }
+        const payload = {
+          query: keywordQuery !== clean ? `${clean} (${keywordQuery})` : clean,
+          search_depth: 'advanced',
+          max_results: 5,
+          include_answer: true
+        };
+        const res = await axios.post('https://api.tavily.com/search', payload, {
+          headers,
+          timeout: 4500
+        });
+        const out = [];
+        if (res.data?.answer) {
+          out.push(`[Tavily Synthèse] : ${String(res.data.answer).slice(0, 600)}`);
+        }
+        for (const r of (res.data?.results || []).slice(0, 3)) {
+          const snippet = String(r.content || '').trim();
+          if (snippet) {
+            out.push(`[Tavily - ${r.title || 'Source'}] : ${snippet.slice(0, 450)}`);
+          }
+        }
+        return out;
+      } catch {
+        return [];
+      }
+    })()
   );
 
   const settled = await Promise.all(tasks);
-  return settled.flat();
-}
-
-async function fetchVerifiedFacts(query = '') {
-  const clean = buildCleanSearchQuery(query);
-  if (!clean || clean.length < 2) return '';
-
-  // 1. Priorité absolue : SerpAPI moteur Google (FR + EN)
-  let serpResults = [];
-  if (CONFIG.serpApiKey) {
-    const [frSerp, enSerp] = await Promise.all([
-      querySerpApiGoogle(clean, 'fr'),
-      querySerpApiGoogle(clean, 'en')
-    ]);
-    serpResults = [...frSerp, ...enSerp];
+  // Prioriser en tête les résultats SerpAPI quand disponibles pour qu'ils ne soient jamais tronqués
+  const serpLines = [];
+  const otherLines = [];
+  for (const line of settled.flat()) {
+    if (line.startsWith('[SerpAPI')) serpLines.push(line);
+    else otherLines.push(line);
   }
-
-  // 2. Complément Web/Wikipédia uniquement si SerpAPI n'a rien renvoyé ou peu de résultats
-  let extraResults = [];
-  if (serpResults.length < 3) {
-    const [wikiRes, ddgRes] = await Promise.all([
-      queryWikipediaSearch(clean),
-      queryDuckDuckGoSearch(clean)
-    ]);
-    extraResults = [...wikiRes, ...ddgRes];
-  }
-
-  const merged = [];
-  for (const item of [...serpResults, ...extraResults]) {
-    if (item && !merged.some(existing => existing.slice(0, 60) === item.slice(0, 60))) {
-      merged.push(item);
-    }
-  }
-
-  return merged.slice(0, 12).join('
-');
+  return [...serpLines, ...otherLines].slice(0, 12).join('\n');
 }
 
 async function getUserMemory(userJid) {
@@ -1294,17 +1390,10 @@ async function askGroq(prompt, chatJid, options = {}) {
     }));
   }
 
-  const userContent = verifiedContext
-    ? `Question de l'utilisateur : ${String(prompt).trim()}
-
-Résultats trouvés via SerpAPI (Google) à vérifier, trier et synthétiser pour donner une réponse juste, claire et directe :
-${verifiedContext}`
-    : String(prompt).trim();
-
   const messages = [
     { role: 'system', content: systemPrompt },
     ...history,
-    { role: 'user', content: userContent }
+    { role: 'user', content: String(prompt).trim() }
   ];
 
   const dynamicModels = await listGroqModels();
@@ -1313,6 +1402,9 @@ ${verifiedContext}`
     'meta-llama/llama-4-maverick-17b-128e-instruct',
     'meta-llama/llama-4-scout-17b-16e-instruct',
     'qwen/qwen3-32b',
+    'llama3-70b-8192',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it',
     'llama-3.1-8b-instant'
   ];
 
@@ -1336,7 +1428,7 @@ ${verifiedContext}`
   let response = null;
   let lastError = null;
 
-  for (const model of candidateModels.slice(0, 5)) {
+  for (const model of candidateModels.slice(0, 6)) {
     try {
       response = await axios.post(
         `${GROQ_BASE}/chat/completions`,
@@ -1344,14 +1436,14 @@ ${verifiedContext}`
           model,
           messages,
           temperature: options.temperature ?? 0.25,
-          max_tokens: options.maxTokens ?? 900
+          max_tokens: options.maxTokens ?? 1200
         },
         {
           headers: {
             Authorization: `Bearer ${CONFIG.groqKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: 10000
+          timeout: 20000
         }
       );
       CONFIG.groqModel = model;
@@ -1367,31 +1459,18 @@ ${verifiedContext}`
     }
   }
 
-  let cleanAnswer = '';
-
-  if (response) {
-    cleanAnswer = String(
-      response.data?.choices?.[0]?.message?.content || ''
-    ).trim();
-
-    cleanAnswer = cleanAnswer.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  if (!response) {
+    throw lastError || new Error('Groq indisponible.');
   }
 
-  if (!cleanAnswer && verifiedContext) {
-    logger.warn('Groq indisponible, repli direct sur les résultats Google/Web récupérés.');
-    const topLines = verifiedContext
-      .split('\n')
-      .map(line => line.replace(/^\[[^\]]+\]\s*:\s*/, '').trim())
-      .filter(Boolean)
-      .slice(0, 3);
+  let cleanAnswer = String(
+    response.data?.choices?.[0]?.message?.content || ''
+  ).trim();
 
-    if (topLines.length) {
-      cleanAnswer = `Voici ce que j'ai trouvé sur Google :\n\n${topLines.join('\n\n')}`;
-    }
-  }
+  cleanAnswer = cleanAnswer.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
   if (!cleanAnswer) {
-    throw lastError || new Error('Groq indisponible.');
+    throw new Error('Groq a renvoyé une réponse vide.');
   }
 
   if (useHistory) {
@@ -4453,11 +4532,10 @@ function explainAIFailure(error) {
     503: `${provider} est surchargé. Réessaie dans un instant.`
   };
 
-  const rawDetail = apiMessage || error?.code || error?.message || '';
   return (
     error?.userMessage ||
     reasons[status] ||
-    `Le service ${provider} ne répond pas pour le moment${rawDetail ? ` (${rawDetail})` : ''}. Réessaie plus tard.`
+    `Le service ${provider} ne répond pas pour le moment. Réessaie plus tard.`
   );
 }
 
@@ -4540,10 +4618,10 @@ async function handleAICommand(jid, message, sender, command, args) {
 
   try {
     answer = await askAI(prompt, jid, {
-      useHistory: command === 'chat',
+      useHistory: true,
       senderJid: sender,
       pushName: message?.pushName || '',
-      factQuery: buildCleanSearchQuery(args) || args,
+      factQuery: args,
       maxTokens
     });
   } catch (error) {

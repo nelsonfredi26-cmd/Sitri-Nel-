@@ -1021,7 +1021,12 @@ ${SIGNATURE}
 }
 
 // ------------------------------------------------------------
-// 16. const ANIME_TOPIC_REGEX = /\b(anime|anim[ée]s?|manga|mangas?|bankai|shikai|zanpakuto|hollow|arrancar|espada|shinigami|soul\s*reaper|quincy|sternritter|yhwach|senjumaru|shutara|ichigo|aizen|zaraki|byakuya|rukia|urahara|mayuri|komamura|soi\s*fon|yamamoto|jujutsu|jjk|domain\s*expansion|extension\s*du\s*territoire|sukuna|gojo|megumi|itadori|naruto|boruto|sasuke|uchiha|uchiwa|akatsuki|hokage|one\s*piece|luffy|zoro|sanji|yonko|haki|gear\s*5|dragon\s*ball|dbz|dbs|saiyan|ultra\s*instinct|hunter\s*x\s*hunter|hxh|nen|demon\s*slayer|kimetsu|hashira|pilier|breathing|attack\s*on\s*titan|snk|titan|my\s*hero\s*academia|mha|quirk|alter|black\s*clover|grimoire|chainsaw\s*man|devil|edens\s*zero|fairy\s*tail|tokyo\s*revengers|mashle|solo\s*leveling|isekai|shonen|seinen|opening|ending|arc|chapitre|[ée]pisode|canon)\b/i;
+// 16. RECHERCHE VÉRIFIÉE (GOOGLE SERPAPI / GOOGLE / WIKIS / DUCKDUCKGO / TAVILY)
+// ------------------------------------------------------------
+
+const GROQ_BASE = 'https://api.groq.com/openai/v1';
+
+const ANIME_TOPIC_REGEX = /\b(anime|anim[ée]s?|manga|mangas?|bankai|shikai|zanpakuto|hollow|arrancar|espada|shinigami|soul\s*reaper|quincy|sternritter|yhwach|senjumaru|shutara|ichigo|aizen|zaraki|byakuya|rukia|urahara|mayuri|komamura|soi\s*fon|yamamoto|jujutsu|jjk|domain\s*expansion|extension\s*du\s*territoire|sukuna|gojo|megumi|itadori|naruto|boruto|sasuke|uchiha|uchiwa|akatsuki|hokage|one\s*piece|luffy|zoro|sanji|yonko|haki|gear\s*5|dragon\s*ball|dbz|dbs|saiyan|ultra\s*instinct|hunter\s*x\s*hunter|hxh|nen|demon\s*slayer|kimetsu|hashira|pilier|breathing|attack\s*on\s*titan|snk|titan|my\s*hero\s*academia|mha|quirk|alter|black\s*clover|grimoire|chainsaw\s*man|devil|edens\s*zero|fairy\s*tail|tokyo\s*revengers|mashle|solo\s*leveling|isekai|shonen|seinen|opening|ending|arc|chapitre|[ée]pisode|canon)\b/i;
 
 function isAnimeQuestionQuery(text = '') {
   return ANIME_TOPIC_REGEX.test(String(text || ''));
@@ -1338,13 +1343,6 @@ async function fetchVerifiedFacts(query = '') {
     : [...googleLines, ...secondaryLines];
 
   return [...new Set(ordered)].slice(0, 12).join('\n');
-}
-
-led.flat()) {
-    if (line.startsWith('[SerpAPI')) serpLines.push(line);
-    else otherLines.push(line);
-  }
-  return [...serpLines, ...otherLines].slice(0, 12).join('\n');
 }
 
 async function getUserMemory(userJid) {

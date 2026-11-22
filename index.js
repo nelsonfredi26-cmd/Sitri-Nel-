@@ -308,6 +308,11 @@ async function initDatabase(force = false) {
           id TEXT PRIMARY KEY,
           owner TEXT NOT NULL,
           expires_at INTEGER NOT NULL
+        )`,
+      `CREATE TABLE IF NOT EXISTS quiz_points_sessions (
+          chat_jid TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
         )`
     ];
 
@@ -5133,6 +5138,298 @@ async function grantPassiveMessageXp(senderJid) {
   }
 }
 
+// 25 bis. QUIZ POINTS (RÉACTIONS DU MODÉRATEUR)
+// ------------------------------------------------------------
+
+const quizPointSessions = new Map();
+const quizPointLocks = new Map();
+const QUIZ_COINS = [500, 250, 100];
+const QUIZ_XP = [50, 25, 10];
+
+function normalizeQuizEmoji(value = '') {
+  return String(value || '').replace(/\uFE0F/g, '').trim();
+}
+
+function pickFirstEmoji(text = '') {
+  const t = String(text || '').trim();
+  if (!t) return '';
+  let first = t;
+  try {
+    const seg = new Intl.Segmenter('fr', { granularity: 'grapheme' });
+    first = [...seg.segment(t)][0]?.segment || t;
+  } catch {
+    first = Array.from(t)[0] || t;
+  }
+  return /\p{Extended_Pictographic}/u.test(first) ? first : '';
+}
+
+function withQuizLock(chatJid, task) {
+  const previous = quizPointLocks.get(chatJid) || Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  quizPointLocks.set(chatJid, next);
+  return next;
+}
+
+async function loadQuizSession(chatJid) {
+  if (quizPointSessions.has(chatJid)) return quizPointSessions.get(chatJid);
+  try {
+    const res = await executeDbWithRetry({
+      sql: 'SELECT state FROM quiz_points_sessions WHERE chat_jid = ?',
+      args: [chatJid]
+    });
+    const raw = res.rows[0]?.state;
+    const session = raw ? JSON.parse(String(raw)) : null;
+    quizPointSessions.set(chatJid, session);
+    return session;
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Quiz points : lecture de la session impossible.');
+    return null;
+  }
+}
+
+async function saveQuizSession(chatJid, session) {
+  quizPointSessions.set(chatJid, session);
+  try {
+    await executeDbWithRetry({
+      sql: `INSERT INTO quiz_points_sessions (chat_jid, state, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_jid) DO UPDATE SET
+              state = excluded.state,
+              updated_at = excluded.updated_at`,
+      args: [chatJid, JSON.stringify(session), Date.now()]
+    });
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Quiz points : sauvegarde de la session impossible.');
+  }
+}
+
+async function deleteQuizSession(chatJid) {
+  quizPointSessions.set(chatJid, null);
+  try {
+    await executeDbWithRetry({
+      sql: 'DELETE FROM quiz_points_sessions WHERE chat_jid = ?',
+      args: [chatJid]
+    });
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Quiz points : suppression de la session impossible.');
+  }
+}
+
+function rankQuizPlayers(session) {
+  return Object.entries(session?.scores || {})
+    .filter(([, points]) => Number(points) > 0)
+    .sort(
+      (a, b) =>
+        Number(b[1]) - Number(a[1]) ||
+        Number(session.lastAt?.[a[0]] || 0) - Number(session.lastAt?.[b[0]] || 0)
+    )
+    .map(([jid, points]) => ({ jid, points: Number(points) }));
+}
+
+// Compte (ou retire) un point quand le modérateur met / enlève l'émoji du quiz
+async function applyQuizReaction({ chatJid, targetKey, emoji }) {
+  if (!chatJid || !targetKey?.id) return;
+
+  await withQuizLock(chatJid, async () => {
+    const session = await loadQuizSession(chatJid);
+    if (!session) return;
+
+    const targetId = targetKey.id;
+    const previous = session.awarded[targetId];
+    const wanted = normalizeQuizEmoji(session.emoji);
+    const given = normalizeQuizEmoji(emoji);
+
+    if (given && given === wanted) {
+      if (previous) return;
+      if (targetKey.fromMe) return;
+
+      const player = getMessageSender({
+        key: { ...targetKey, remoteJid: targetKey.remoteJid || chatJid }
+      });
+      if (!player || isOwner(player)) return;
+
+      session.scores[player] = Number(session.scores[player] || 0) + 1;
+      session.lastAt[player] = Date.now();
+      session.awarded[targetId] = player;
+      await saveQuizSession(chatJid, session);
+      return;
+    }
+
+    if (previous) {
+      const left = Math.max(0, Number(session.scores[previous] || 1) - 1);
+      if (left === 0) {
+        delete session.scores[previous];
+        delete session.lastAt[previous];
+      } else {
+        session.scores[previous] = left;
+      }
+      delete session.awarded[targetId];
+      await saveQuizSession(chatJid, session);
+    }
+  });
+}
+
+async function quizPlayerLabel(jid) {
+  let name = '';
+  try {
+    name = (await getUserMemory(jid)).name || '';
+  } catch {}
+  return name || `+${getNumber(jid)}`;
+}
+
+function quizPlaceLabel(index) {
+  if (index === 0) return '🥇 1er';
+  if (index === 1) return '🥈 2e';
+  if (index === 2) return '🥉 3e';
+  return `▫️ ${index + 1}e`;
+}
+
+function quizBold(text = '') {
+  return Array.from(String(text))
+    .map(ch => {
+      const c = ch.codePointAt(0);
+      if (c >= 65 && c <= 90) return String.fromCodePoint(0x1d5d4 + c - 65);
+      if (c >= 97 && c <= 122) return String.fromCodePoint(0x1d5ee + c - 97);
+      if (c >= 48 && c <= 57) return String.fromCodePoint(0x1d7ec + c - 48);
+      return ch;
+    })
+    .join('');
+}
+
+const QUIZ_BADGES = ['🥇', '🥈', '🥉'];
+const QUIZ_ORDINALS = ['Le 1er', 'Le 2e', 'Le 3e'];
+
+// Liste compacte des joueurs, même style que le menu du bot
+function buildQuizBoard({ title, rows }) {
+  const out = [`*╭─〔 ⌬ ${title} 〕*`, '*│*'];
+  rows.forEach((row, i) => {
+    out.push(`*├ ◈ ${row.label} ${row.points}p${QUIZ_BADGES[i] || ''}*`);
+  });
+  out.push('*│*', '*╰━━━━━━━━━━━━━━━━━━━━━*');
+  return out.join('\n');
+}
+
+async function handleQuizPointsCommand(jid, message, command, args, ownerCommand) {
+  if (!ownerCommand) return;
+
+  if (command === 'start') {
+    const emoji = pickFirstEmoji(args);
+    if (!emoji) {
+      await sendReply(
+        jid,
+        '🧠 Utilisation : Xstart 👍\nMets un espace puis l’émoji qui validera les bonnes réponses.',
+        message
+      );
+      return;
+    }
+
+    const existing = await withQuizLock(jid, () => loadQuizSession(jid));
+    if (existing) {
+      const players = rankQuizPlayers(existing).length;
+      await sendReply(
+        jid,
+        `🧠 Un quiz est déjà en cours ici (émoji ${existing.emoji}, ${players} participant(s) avec des points).\nUtilise Xrecap pour voir le classement ou Xtab pour le terminer.`,
+        message
+      );
+      return;
+    }
+
+    await withQuizLock(jid, () =>
+      saveQuizSession(jid, {
+        emoji,
+        startedAt: Date.now(),
+        scores: {},
+        lastAt: {},
+        awarded: {}
+      })
+    );
+
+    await sendReply(
+      jid,
+      `🧠 𝗤𝗨𝗜𝗭 𝗟𝗔𝗡𝗖𝗘́\n\nÉmoji de bonne réponse : ${emoji}\nÀ chaque ${emoji} mis sur une réponse, la personne gagne 1 point.\n\n• Xrecap : classement en cours\n• Xtab : tableau final et récompenses`,
+      message
+    );
+    return;
+  }
+
+  const session = await withQuizLock(jid, () => loadQuizSession(jid));
+  if (!session) {
+    await sendReply(jid, '🧠 Aucun quiz en cours ici. Lance-en un avec Xstart 👍.', message);
+    return;
+  }
+
+  const ranking = rankQuizPlayers(session);
+
+  if (command === 'recap') {
+    if (!ranking.length) {
+      await sendReply(
+        jid,
+        `📊 Aucun point pour l’instant (émoji ${session.emoji}).`,
+        message
+      );
+      return;
+    }
+
+    const rows = [];
+    for (const player of ranking) {
+      const label = (await quizPlayerLabel(player.jid)).slice(0, 18);
+      rows.push({ label, points: player.points });
+    }
+
+    await sendReply(jid, buildQuizBoard({ title: 'RÉCAP EN COURS', rows }), message);
+    return;
+  }
+
+  if (command === 'tab') {
+    if (!ranking.length) {
+      await deleteQuizSession(jid);
+      await sendReply(jid, '🏁 Quiz terminé : aucun point n’a été attribué.', message);
+      return;
+    }
+
+    const rows = ranking.map(player => ({
+      label: `@${getNumber(player.jid)}`,
+      points: player.points
+    }));
+
+    // Message 1 : la liste de tous ceux qui ont joué
+    await sock.sendMessage(jid, {
+      text: buildQuizBoard({ title: 'RÉCAPITULATIF', rows }),
+      mentions: ranking.map(player => player.jid)
+    });
+
+    // Récompenses du podium
+    const winners = [];
+    const rewardLines = [];
+    for (let i = 0; i < Math.min(ranking.length, QUIZ_COINS.length); i++) {
+      const coins = QUIZ_COINS[i];
+      const xp = QUIZ_XP[i];
+      const tag = `@${getNumber(ranking[i].jid)}`;
+      winners.push(ranking[i].jid);
+      try {
+        await addRewards(ranking[i].jid, coins, xp);
+        rewardLines.push(`${QUIZ_BADGES[i]} ${QUIZ_ORDINALS[i]} ${tag} : ${coins} XCoins et ${xp} XP`);
+      } catch (error) {
+        logger.warn({ error: error?.message }, 'Quiz points : récompense non attribuée.');
+        rewardLines.push(`${QUIZ_BADGES[i]} ${QUIZ_ORDINALS[i]} ${tag} : ⚠️ récompense non attribuée`);
+      }
+    }
+
+    await sleep(800);
+
+    // Message 2 : récompenses + remerciement
+    await sock.sendMessage(jid, {
+      text:
+        `🎁 *RÉCOMPENSES*\n\n${rewardLines.join('\n')}\n\n` +
+        '🙏 Merci à toutes et à tous pour votre participation et pour tous vos efforts !',
+      mentions: winners
+    });
+
+    await deleteQuizSession(jid);
+  }
+}
+
+// ------------------------------------------------------------
 // 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
@@ -5142,7 +5439,8 @@ const KNOWN_COMMANDS = new Set([
   'quiz', 'reponse',
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
-  'on', 'off', 'restart', 'upt', 'menu', 'models'
+  'on', 'off', 'restart', 'upt', 'menu', 'models',
+  'start', 'recap', 'tab'
 ]);
 
 const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp' };
@@ -5298,6 +5596,11 @@ async function processCommand(message) {
   }
 
   if (isBotSleeping) {
+    return;
+  }
+
+  if (['start', 'recap', 'tab'].includes(command)) {
+    await handleQuizPointsCommand(jid, message, command, args, ownerCommand);
     return;
   }
 
@@ -5780,11 +6083,44 @@ async function startBot() {
 
       for (const message of event.messages) {
         if (!message?.message) continue;
+
+        const quizReaction = unwrapContent(message)?.reactionMessage;
+        if (quizReaction) {
+          if (isOwnerMessage(message)) {
+            applyQuizReaction({
+              chatJid: message.key?.remoteJid,
+              targetKey: quizReaction.key,
+              emoji: quizReaction.text
+            }).catch(error =>
+              logger.warn({ error: error?.message }, 'Quiz points : réaction non traitée.')
+            );
+          }
+          continue;
+        }
+
         rememberMessage(message);
         try {
           await handleIncomingMessage(message);
         } catch (error) {
           logger.error({ error: error?.message }, 'Erreur de réception du message.');
+        }
+      }
+    });
+
+    socket.ev.on('messages.reaction', async events => {
+      for (const item of events || []) {
+        try {
+          const reactorKey = item?.reaction?.key || {};
+          const byOwner = Boolean(reactorKey.fromMe) || isOwner(getMessageSender({ key: reactorKey }));
+          if (!byOwner) continue;
+
+          await applyQuizReaction({
+            chatJid: item?.key?.remoteJid,
+            targetKey: item?.key,
+            emoji: item?.reaction?.text
+          });
+        } catch (error) {
+          logger.warn({ error: error?.message }, 'Quiz points : réaction non traitée.');
         }
       }
     });

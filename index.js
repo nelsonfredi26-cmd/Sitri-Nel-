@@ -25,6 +25,7 @@ try {
   loadImageFn = null;
 }
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 const makeWASocket =
@@ -4074,6 +4075,72 @@ async function convertImageToSticker(jid, message) {
   }
 }
 
+function isAnimatedWebp(buffer) {
+  try {
+    return (
+      Buffer.isBuffer(buffer) &&
+      buffer.length > 21 &&
+      buffer.toString('ascii', 0, 4) === 'RIFF' &&
+      buffer.toString('ascii', 8, 12) === 'WEBP' &&
+      buffer.toString('ascii', 12, 16) === 'VP8X' &&
+      (buffer[20] & 0x02) === 0x02
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Sticker animé : WebP -> GIF (sharp) -> MP4 (ffmpeg). Renvoie null si impossible.
+async function convertAnimatedStickerToMp4(buffer) {
+  let gifBuffer;
+  try {
+    const sharpMod = await import('sharp');
+    const sharpFn = sharpMod.default || sharpMod;
+    gifBuffer = await sharpFn(buffer, { animated: true }).gif().toBuffer();
+  } catch {
+    return null;
+  }
+
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const run = promisify(execFile);
+
+  let ffmpegBin = 'ffmpeg';
+  try {
+    const ffmpegStatic = await import('ffmpeg-static');
+    if (ffmpegStatic.default) ffmpegBin = ffmpegStatic.default;
+  } catch {
+    // On garde ffmpeg du système
+  }
+
+  const base = path.join(os.tmpdir(), `xi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const gifPath = `${base}.gif`;
+  const mp4Path = `${base}.mp4`;
+
+  try {
+    fs.writeFileSync(gifPath, gifBuffer);
+    await run(
+      ffmpegBin,
+      [
+        '-y', '-i', gifPath,
+        '-movflags', 'faststart',
+        '-pix_fmt', 'yuv420p',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        mp4Path
+      ],
+      { timeout: 30000 }
+    );
+    const out = fs.readFileSync(mp4Path);
+    return out.length ? out : null;
+  } catch {
+    return null;
+  } finally {
+    for (const f of [gifPath, mp4Path]) {
+      try { fs.unlinkSync(f); } catch {}
+    }
+  }
+}
+
 async function convertStickerToImage(jid, message) {
   try {
     const mediaResult = await downloadTargetMediaBuffer(message, 'sticker');
@@ -4084,6 +4151,24 @@ async function convertStickerToImage(jid, message) {
         message
       );
       return true;
+    }
+
+    if (isAnimatedWebp(mediaResult.buffer)) {
+      const videoBuffer = await convertAnimatedStickerToMp4(mediaResult.buffer);
+      if (videoBuffer) {
+        await sock.sendMessage(
+          jid,
+          {
+            video: videoBuffer,
+            mimetype: 'video/mp4',
+            gifPlayback: true,
+            caption: `🎞️ 𝗦𝗧𝗜𝗖𝗞𝗘𝗥 𝗔𝗡𝗜𝗠𝗘́ 𝗘𝗡 𝗩𝗜𝗗𝗘́𝗢\n\n${SIGNATURE}`
+          },
+          { quoted: message }
+        );
+        return true;
+      }
+      // Sinon : repli sur la première image du sticker
     }
 
     const pngBuffer = await decodeStickerToPngBuffer(mediaResult.buffer);
@@ -4492,6 +4577,98 @@ async function resolveStreamUrl(videoUrl, mode = 'audio') {
   return null;
 }
 
+// Cookies YouTube : fichier cookies.txt en base64 (YOUTUBE_COOKIES_BASE64),
+// ou texte collé tel quel (YOUTUBE_COOKIES) : format Netscape ou "nom=valeur; nom2=valeur2"
+function buildYoutubeCookiesFile() {
+  const b64 = cleanEnv(process.env.YOUTUBE_COOKIES_BASE64);
+  let raw = b64
+    ? Buffer.from(b64, 'base64').toString('utf8')
+    : String(process.env.YOUTUBE_COOKIES || '').trim();
+  if (!raw) return '';
+
+  if (!raw.includes('\n') && raw.includes('\\n')) raw = raw.replace(/\\n/g, '\n');
+
+  if (raw.startsWith('# Netscape') || raw.includes('\t')) {
+    return raw.endsWith('\n') ? raw : `${raw}\n`;
+  }
+
+  const lines = ['# Netscape HTTP Cookie File'];
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 1) continue;
+    const name = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!name) continue;
+    lines.push(`.youtube.com\tTRUE\t/\tTRUE\t2000000000\t${name}\t${value}`);
+  }
+  return lines.length > 1 ? `${lines.join('\n')}\n` : '';
+}
+
+// Téléchargement audio avec yt-dlp (comme song.js). Renvoie null si indisponible.
+async function downloadAudioWithYtdlp(videoUrl) {
+  let ytdlp;
+  try {
+    const mod = await import('yt-dlp-exec');
+    ytdlp = mod.default || mod;
+  } catch {
+    return null;
+  }
+
+  const dir = path.join(os.tmpdir(), 'sitri-nel-play');
+  fs.mkdirSync(dir, { recursive: true });
+
+  const base = `play_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  let cookiesPath = null;
+
+  try {
+    const options = {
+      output: path.join(dir, `${base}.%(ext)s`),
+      format: 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio',
+      noPlaylist: true,
+      noWarnings: true,
+      maxFilesize: `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`
+    };
+
+    const cookiesContent = buildYoutubeCookiesFile();
+    if (cookiesContent) {
+      cookiesPath = path.join(dir, `${base}_cookies.txt`);
+      fs.writeFileSync(cookiesPath, cookiesContent);
+      options.cookies = cookiesPath;
+    }
+
+    await ytdlp(videoUrl, options, { timeout: 120000 });
+
+    const file = fs.readdirSync(dir).find(n => n.startsWith(base) && !n.endsWith('_cookies.txt'));
+    if (!file) return null;
+
+    const ext = path.extname(file).slice(1).toLowerCase();
+    const mimeByExt = {
+      m4a: 'audio/mp4',
+      mp4: 'audio/mp4',
+      aac: 'audio/aac',
+      mp3: 'audio/mpeg',
+      ogg: 'audio/ogg; codecs=opus',
+      opus: 'audio/ogg; codecs=opus'
+    };
+    const mimetype = mimeByExt[ext];
+    if (!mimetype) return null;
+
+    const buffer = fs.readFileSync(path.join(dir, file));
+    if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) return null;
+
+    return { buffer, mimetype };
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'yt-dlp : téléchargement audio impossible.');
+    return null;
+  } finally {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.startsWith(base)) fs.unlinkSync(path.join(dir, f));
+      }
+    } catch {}
+  }
+}
+
 async function handlePlayOrVideoCommand(jid, message, command, args) {
   const query = String(args || '').trim();
   const isAudio = command === 'play';
@@ -4525,6 +4702,19 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
       message
     );
     return true;
+  }
+
+  if (isAudio) {
+    const audio = await downloadAudioWithYtdlp(top.url);
+    if (audio) {
+      await sock.sendMessage(
+        jid,
+        { audio: audio.buffer, mimetype: audio.mimetype, ptt: false },
+        { quoted: message }
+      );
+      await sendReply(jid, `🎶 ${top.title}\n\n${SIGNATURE}`, message);
+      return true;
+    }
   }
 
   const resolved = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');
@@ -5468,7 +5658,7 @@ const KNOWN_COMMANDS = new Set([
   'start', 'recap', 'tab'
 ]);
 
-const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp' };
+const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
 
 async function processCommand(message) {
   const jid = message?.key?.remoteJid;

@@ -5309,6 +5309,31 @@ function buildQuizBoard({ title, rows }) {
   return out.join('\n');
 }
 
+// Le modérateur envoie l'émoji du quiz EN RÉPONSE au message d'un joueur
+async function handleQuizEmojiReply(jid, message, text) {
+  const given = normalizeQuizEmoji(text);
+  if (!given) return false;
+
+  const session = await withQuizLock(jid, () => loadQuizSession(jid));
+  if (!session || normalizeQuizEmoji(session.emoji) !== given) return false;
+
+  const context = getQuotedMessage(message);
+  if (!context?.stanzaId) return false;
+
+  await applyQuizReaction({
+    chatJid: jid,
+    targetKey: {
+      id: context.stanzaId,
+      remoteJid: jid,
+      participant: context.participant,
+      fromMe: Boolean(context.participant) && isOwner(context.participant)
+    },
+    emoji: text
+  });
+
+  return true;
+}
+
 async function handleQuizPointsCommand(jid, message, command, args, ownerCommand) {
   if (!ownerCommand) return;
 
@@ -5455,6 +5480,14 @@ async function processCommand(message) {
 
   const sender = getMessageSender(message);
   if (!sender) return;
+
+  if (message.key?.fromMe || isOwnerMessage(message)) {
+    try {
+      if (await handleQuizEmojiReply(jid, message, text)) return;
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Quiz points : émoji de réponse non traité.');
+    }
+  }
 
   if (!message.key?.fromMe) {
     updateMemoryFromMessage(sender, message?.pushName || '', text).catch(() => {});

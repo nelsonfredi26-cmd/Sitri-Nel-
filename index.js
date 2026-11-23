@@ -4674,6 +4674,7 @@ function buildYoutubeCookiesFile() {
 }
 
 // Téléchargement audio avec yt-dlp (multi-clients + fallback anti-"The page needs to be reloaded")
+// Téléchargement audio avec yt-dlp (multi-clients + fallback format souple)
 async function downloadAudioWithYtdlp(videoUrl) {
   lastYtdlpFailure = '';
 
@@ -4699,19 +4700,27 @@ async function downloadAudioWithYtdlp(videoUrl) {
 
   const maxMb = Math.floor(CONFIG.maxMediaBytes / (1024 * 1024));
 
-  // Profils ordonnés pour contourner "The page needs to be reloaded" sur IP datacenter (Railway)
+  // Clients yt-dlp compatibles avec les formats actuels YouTube (évite "Requested format is not available")
   const extractorProfiles = [
     {
-      name: 'android_vr+tv',
-      extractorArgs: 'youtube:player_client=android_vr,tv_embedded;player_skip=webpage,configs'
+      name: 'default+mweb',
+      extractorArgs: null,
+      format: 'ba/b'
     },
     {
-      name: 'ios+mweb',
-      extractorArgs: 'youtube:player_client=ios,mweb;player_skip=webpage'
+      name: 'tv_embedded',
+      extractorArgs: 'youtube:player_client=tv_embedded',
+      format: 'ba/b'
     },
     {
-      name: 'android+web_creator',
-      extractorArgs: 'youtube:player_client=android,web_creator'
+      name: 'ios+web',
+      extractorArgs: 'youtube:player_client=ios,web',
+      format: 'ba/b'
+    },
+    {
+      name: 'android_vr',
+      extractorArgs: 'youtube:player_client=android_vr',
+      format: 'ba/b'
     }
   ];
 
@@ -4733,7 +4742,7 @@ async function downloadAudioWithYtdlp(videoUrl) {
       const args = [
         videoUrl,
         '-o', path.join(dir, `${base}.%(ext)s`),
-        '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
+        '-f', profile.format,
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
@@ -4743,13 +4752,16 @@ async function downloadAudioWithYtdlp(videoUrl) {
         '--fragment-retries', '2',
         '--socket-timeout', '20',
         '--max-filesize', `${maxMb}M`,
-        '--extractor-args', profile.extractorArgs,
         '--add-header', 'Accept-Language:fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
         '--add-header', 'Referer:https://www.youtube.com/'
       ];
 
+      if (profile.extractorArgs) {
+        args.push('--extractor-args', profile.extractorArgs);
+      }
+
       if (ffmpegBin) {
-        args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0', '--ffmpeg-location', ffmpegBin);
+        args.push('-x', '--audio-format', 'mp3', '--audio-quality', '5', '--ffmpeg-location', ffmpegBin);
       }
 
       if (cookiesContent) {

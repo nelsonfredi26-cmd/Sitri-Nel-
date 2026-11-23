@@ -4657,7 +4657,7 @@ function buildYoutubeCookiesFile() {
   return lines.length > 1 ? `${lines.join('\n')}\n` : '';
 }
 
-// Téléchargement audio avec yt-dlp (mêmes réglages anti-blocage qu'Erwin-Bot)
+// Téléchargement audio avec yt-dlp (authentification navigateur via cookies YouTube)
 async function downloadAudioWithYtdlp(videoUrl) {
   lastYtdlpFailure = '';
 
@@ -4675,71 +4675,101 @@ async function downloadAudioWithYtdlp(videoUrl) {
   const base = `play_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   let cookiesPath = null;
 
+  const userAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
+  const cookiesContent = buildYoutubeCookiesFile();
+  if (cookiesContent) {
+    cookiesPath = path.join(dir, `${base}_cookies.txt`);
+    fs.writeFileSync(cookiesPath, cookiesContent, { mode: 0o600 });
+  }
+
+  let ffmpegBin = null;
   try {
-    const args = [
-      videoUrl,
-      '-o', path.join(dir, `${base}.%(ext)s`),
-      '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
-      '--no-playlist',
-      '--no-warnings',
-      '--force-ipv4',
-      '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`,
-      '--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android',
-      '--add-header', 'referer:https://www.youtube.com/'
-    ];
+    const ffmpegStatic = await import('ffmpeg-static');
+    if (ffmpegStatic.default) ffmpegBin = ffmpegStatic.default;
+  } catch {
+    ffmpegBin = null;
+  }
 
-    try {
-      const ffmpegStatic = await import('ffmpeg-static');
-      if (ffmpegStatic.default) {
-        args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0', '--ffmpeg-location', ffmpegStatic.default);
+  const clientProfiles = cookiesPath
+    ? ['web,web_embedded', 'tv,web']
+    : ['web,web_embedded', 'android_vr,web_creator,ios,android'];
+
+  try {
+    for (const clientProfile of clientProfiles) {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.startsWith(base) && f !== `${base}_cookies.txt`) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch {}
+        }
       }
-    } catch {
-      // sans ffmpeg : on garde le format d'origine
+
+      const args = [
+        videoUrl,
+        '-o', path.join(dir, `${base}.%(ext)s`),
+        '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
+        '--no-playlist',
+        '--no-warnings',
+        '--force-ipv4',
+        '--sleep-requests', '1',
+        '--user-agent', userAgent,
+        '--add-header', 'referer:https://www.youtube.com/',
+        '--add-header', 'accept-language:fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        '--extractor-args', `youtube:player_client=${clientProfile}`,
+        '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`
+      ];
+
+      if (cookiesPath) {
+        args.push('--cookies', cookiesPath);
+      }
+
+      if (ffmpegBin) {
+        args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0', '--ffmpeg-location', ffmpegBin);
+      }
+
+      try {
+        await runBinary(bin, args, { timeout: 120000 });
+      } catch (error) {
+        const detail = String(error?.stderr || error?.message || '');
+        const errLine =
+          detail.split('\n').reverse().find(l => l.includes('ERROR')) ||
+          detail.split('\n').filter(Boolean).pop() ||
+          detail;
+        lastYtdlpFailure = errLine.trim().slice(0, 300);
+        logger.warn({ clientProfile, error: lastYtdlpFailure }, 'yt-dlp : tentative échouée.');
+        continue;
+      }
+
+      const file = fs.readdirSync(dir).find(n => n.startsWith(base) && !n.endsWith('_cookies.txt'));
+      if (!file) {
+        lastYtdlpFailure = 'Aucun fichier audio produit (fichier trop gros ou format indisponible).';
+        continue;
+      }
+
+      const ext = path.extname(file).slice(1).toLowerCase();
+      const mimeByExt = {
+        m4a: 'audio/mp4',
+        mp4: 'audio/mp4',
+        aac: 'audio/aac',
+        mp3: 'audio/mpeg',
+        ogg: 'audio/ogg; codecs=opus',
+        opus: 'audio/ogg; codecs=opus'
+      };
+      const mimetype = mimeByExt[ext];
+      if (!mimetype) {
+        lastYtdlpFailure = `Format audio non compatible avec WhatsApp (.${ext}).`;
+        continue;
+      }
+
+      const buffer = fs.readFileSync(path.join(dir, file));
+      if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) {
+        lastYtdlpFailure = 'Fichier audio vide ou trop gros.';
+        continue;
+      }
+
+      return { buffer, mimetype };
     }
 
-    const cookiesContent = buildYoutubeCookiesFile();
-    if (cookiesContent) {
-      cookiesPath = path.join(dir, `${base}_cookies.txt`);
-      fs.writeFileSync(cookiesPath, cookiesContent);
-      args.push('--cookies', cookiesPath);
-    }
-
-    await runBinary(bin, args, { timeout: 120000 });
-
-    const file = fs.readdirSync(dir).find(n => n.startsWith(base) && !n.endsWith('_cookies.txt'));
-    if (!file) {
-      lastYtdlpFailure = 'Aucun fichier audio produit (fichier trop gros ou format indisponible).';
-      return null;
-    }
-
-    const ext = path.extname(file).slice(1).toLowerCase();
-    const mimeByExt = {
-      m4a: 'audio/mp4',
-      mp4: 'audio/mp4',
-      aac: 'audio/aac',
-      mp3: 'audio/mpeg',
-      ogg: 'audio/ogg; codecs=opus',
-      opus: 'audio/ogg; codecs=opus'
-    };
-    const mimetype = mimeByExt[ext];
-    if (!mimetype) {
-      lastYtdlpFailure = `Format audio non compatible avec WhatsApp (.${ext}).`;
-      return null;
-    }
-
-    const buffer = fs.readFileSync(path.join(dir, file));
-    if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) {
-      lastYtdlpFailure = 'Fichier audio vide ou trop gros.';
-      return null;
-    }
-
-    return { buffer, mimetype };
-  } catch (error) {
-    const detail = String(error?.stderr || error?.message || '');
-    const errLine =
-      detail.split('\n').reverse().find(l => l.includes('ERROR')) || detail.split('\n').filter(Boolean).pop() || detail;
-    lastYtdlpFailure = errLine.trim().slice(0, 300);
-    logger.warn({ error: lastYtdlpFailure }, 'yt-dlp : téléchargement audio impossible.');
     return null;
   } finally {
     try {

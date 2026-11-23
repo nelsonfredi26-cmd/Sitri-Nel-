@@ -4683,18 +4683,19 @@ async function downloadAudioWithYtdlp(videoUrl) {
       '--no-playlist',
       '--no-warnings',
       '--force-ipv4',
+      '--socket-timeout', '15',
+      '--retries', '2',
+      '--extractor-retries', '1',
       '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`,
-      '--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android',
       '--add-header', 'referer:https://www.youtube.com/'
     ];
 
+    let ffmpegPath = null;
     try {
       const ffmpegStatic = await import('ffmpeg-static');
-      if (ffmpegStatic.default) {
-        args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0', '--ffmpeg-location', ffmpegStatic.default);
-      }
+      ffmpegPath = ffmpegStatic.default || null;
     } catch {
-      // sans ffmpeg : on garde le format d'origine
+      // sans ffmpeg : pas de conversion de secours
     }
 
     const cookiesContent = buildYoutubeCookiesFile();
@@ -4704,7 +4705,40 @@ async function downloadAudioWithYtdlp(videoUrl) {
       args.push('--cookies', cookiesPath);
     }
 
-    await runBinary(bin, args, { timeout: 120000 });
+    // Plusieurs profils d'appareils : si YouTube ne propose aucun format à l'un, on essaie l'autre
+    // Avec des cookies, les profils android/ios sont ignorés par yt-dlp : on utilise les clients web.
+    // Node sert à résoudre les protections JavaScript de YouTube (sinon aucun format audio n'apparaît).
+    const jsArgs = ['--js-runtimes', 'node'];
+    const clientProfiles = cookiesPath
+      ? [
+          [...jsArgs],
+          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
+        ]
+      : [
+          ['--extractor-args', 'youtube:player_client=android_vr,ios,android'],
+          [...jsArgs],
+          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
+        ];
+
+    let lastError = null;
+    let succeeded = false;
+
+    for (const profile of clientProfiles) {
+      try {
+        await runBinary(bin, [...args, ...profile], { timeout: 45000 });
+        succeeded = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        try {
+          for (const f of fs.readdirSync(dir)) {
+            if (f.startsWith(base) && !f.endsWith('_cookies.txt')) fs.unlinkSync(path.join(dir, f));
+          }
+        } catch {}
+      }
+    }
+
+    if (!succeeded) throw lastError || new Error('yt-dlp a échoué.');
 
     const file = fs.readdirSync(dir).find(n => n.startsWith(base) && !n.endsWith('_cookies.txt'));
     if (!file) {
@@ -4712,7 +4746,8 @@ async function downloadAudioWithYtdlp(videoUrl) {
       return null;
     }
 
-    const ext = path.extname(file).slice(1).toLowerCase();
+    let ext = path.extname(file).slice(1).toLowerCase();
+    let finalFile = file;
     const mimeByExt = {
       m4a: 'audio/mp4',
       mp4: 'audio/mp4',
@@ -4721,13 +4756,28 @@ async function downloadAudioWithYtdlp(videoUrl) {
       ogg: 'audio/ogg; codecs=opus',
       opus: 'audio/ogg; codecs=opus'
     };
+    if (!mimeByExt[ext] && ffmpegPath) {
+      try {
+        const converted = `${base}_conv.m4a`;
+        await runBinary(
+          ffmpegPath,
+          ['-y', '-i', path.join(dir, file), '-vn', '-c:a', 'aac', '-b:a', '128k', path.join(dir, converted)],
+          { timeout: 60000 }
+        );
+        finalFile = converted;
+        ext = 'm4a';
+      } catch (convError) {
+        logger.warn({ error: convError?.message }, 'Conversion audio impossible.');
+      }
+    }
+
     const mimetype = mimeByExt[ext];
     if (!mimetype) {
       lastYtdlpFailure = `Format audio non compatible avec WhatsApp (.${ext}).`;
       return null;
     }
 
-    const buffer = fs.readFileSync(path.join(dir, file));
+    const buffer = fs.readFileSync(path.join(dir, finalFile));
     if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) {
       lastYtdlpFailure = 'Fichier audio vide ou trop gros.';
       return null;
@@ -4786,15 +4836,25 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
   }
 
   if (isAudio) {
-    const audio = await downloadAudioWithYtdlp(top.url);
-    if (audio) {
-      await sock.sendMessage(
-        jid,
-        { audio: audio.buffer, mimetype: audio.mimetype, ptt: false },
-        { quoted: message }
-      );
-      await sendReply(jid, `🎶 ${top.title}\n\n${SIGNATURE}`, message);
-      return true;
+    // On essaie les 3 premiers résultats : certaines vidéos n'ont aucun format audio exploitable
+    const playStartedAt = Date.now();
+    for (const candidate of results.slice(0, 3)) {
+      if (!candidate?.url) continue;
+      if (Date.now() - playStartedAt > 70000) break;
+
+      const audio = await downloadAudioWithYtdlp(candidate.url);
+      if (audio) {
+        await sock.sendMessage(
+          jid,
+          { audio: audio.buffer, mimetype: audio.mimetype, ptt: false },
+          { quoted: message }
+        );
+        await sendReply(jid, `🎶 ${candidate.title || top.title}\n\n${SIGNATURE}`, message);
+        return true;
+      }
+
+      // Si YouTube bloque tout le serveur ou que yt-dlp est absent, inutile d'insister
+      if (/Sign in|bot|Binaire yt-dlp indisponible/i.test(lastYtdlpFailure)) break;
     }
   }
 

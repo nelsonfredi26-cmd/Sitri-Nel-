@@ -5691,8 +5691,15 @@ function quizBold(text = '') {
 const QUIZ_BADGES = ['🥇', '🥈', '🥉'];
 
 // Liste compacte des joueurs, même style que le menu du bot
-function buildQuizBoard({ title, rows }) {
-  const out = [`*╭─〔 ⌬ ${title} 〕*`, '*│*'];
+function buildQuizBoard({ title = 'RÉCAPITULATIF', rows, info = '' }) {
+  const out = [
+    '*╭─〔 ⌬ SITRI~QUIZ 〕*',
+    '*│*',
+    `*├ ◈ 📋 ${title}*`,
+    `*├ ◈ 👥 Participants : ${rows.length}*`
+  ];
+  if (info) out.push(`*├ ◈ ${info}*`);
+  out.push('*│*');
   rows.forEach((row, i) => {
     out.push(`*├ ◈ ${row.label} ${row.points}p${QUIZ_BADGES[i] || ''}*`);
   });
@@ -5853,7 +5860,7 @@ const AUTO_QUIZ_CATEGORIES = {
   cg: { label: 'CG', icon: '🧠', desc: 'culture générale' }
 };
 const AUTO_QUIZ_COUNTS = [10, 20, 30];
-const AUTO_QUIZ_TIME_MS = 30000;
+const AUTO_QUIZ_TIME_MS = 13000;
 const AUTO_QUIZ_SETUP_TIMEOUT_MS = 3 * 60 * 1000;
 
 const autoQuizzes = new Map();
@@ -5950,14 +5957,13 @@ function isQuizAnswerCorrect(submitted, question) {
     // Tous les mots attendus sont retrouvés (ordre libre, fautes légères)
     if (candTokens.every(ct => subTokens.some(st => fuzzyEqual(st, ct)))) return true;
 
-    // Personnage : un seul mot du nom suffit (prénom ou nom)
-    if (
-      question.type === 'image' &&
-      subTokens.length === 1 &&
-      subTokens[0].length >= 3 &&
-      candTokens.some(ct => ct.length >= 3 && fuzzyEqual(subTokens[0], ct))
-    ) {
-      return true;
+    // Personnage (ID) : le prénom seul suffit ; le nom de famille seul est refusé (plusieurs personnages
+    // le portent), sauf pour les noms à 3 mots ou plus où le dernier mot est le nom d'usage (ex. Monkey D. Luffy)
+    if (question.type === 'image' && subTokens.length === 1 && subTokens[0].length >= 3 && cand === normalizeLoose(question.answer)) {
+      const rawTokens = normalizeLoose(question.answer).split(' ').filter(Boolean);
+      const accepted = [rawTokens[0]];
+      if (rawTokens.length >= 3) accepted.push(rawTokens[rawTokens.length - 1]);
+      if (accepted.some(ct => ct && ct.length >= 3 && fuzzyEqual(subTokens[0], ct))) return true;
     }
   }
 
@@ -5966,7 +5972,7 @@ function isQuizAnswerCorrect(submitted, question) {
 
 // --- Génération des questions
 
-async function groqJson(prompt, maxTokens = 3500) {
+async function groqJson(prompt, maxTokens = 3500, temperature = 0.6) {
   const res = await axios.post(
     'https://api.groq.com/openai/v1/chat/completions',
     {
@@ -5978,13 +5984,36 @@ async function groqJson(prompt, maxTokens = 3500) {
         },
         { role: 'user', content: prompt }
       ],
-      temperature: 0.6,
+      temperature,
       max_tokens: maxTokens,
       response_format: { type: 'json_object' }
     },
     { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 45000 }
   );
   return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
+}
+
+// Juge une réponse approximative (explications, réponses courtes) : on accepte l'idée essentielle
+async function judgeQuizAnswer(question, playerText) {
+  try {
+    const keypoints = Array.isArray(question.keypoints) && question.keypoints.length
+      ? `Idées essentielles : ${question.keypoints.join(' ; ')}\n`
+      : '';
+    const data = await groqJson(
+      `Tu es juge d'un quiz, bienveillant mais rigoureux.
+Question : ${question.question}
+Réponse attendue : ${question.answer}
+${keypoints}Réponse du joueur : ${playerText}
+Le joueur a-t-il donné l'idée essentielle de la réponse attendue ? Accepte les formulations différentes, approximatives, plus courtes ou avec des fautes, tant que le sens principal est correct. Refuse si c'est hors sujet, faux, contradictoire ou trop vague.
+Réponds en JSON : {"correct": true} ou {"correct": false}`,
+      60,
+      0
+    );
+    return data?.correct === true;
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : juge indisponible.');
+    return false;
+  }
 }
 
 async function generateTextQuizQuestions(category, total) {
@@ -5996,30 +6025,37 @@ async function generateTextQuizQuestions(category, total) {
     attempts++;
     const need = Math.min(10, total - questions.length);
 
-    const alts =
-      'Dans "alts", mets les autres écritures acceptables de la réponse (orthographes ou traductions réellement utilisées, sans rien inventer), sinon une liste vide.';
     const prompt =
       category === 'multivers'
-        ? `Génère exactement ${need} questions de quiz en français sur les animés et mangas.
+        ? `Génère exactement ${need} questions de quiz en français sur des animés et mangas, pour des fans.
 Règles :
-- une seule question par univers : chaque question porte sur un anime/manga DIFFÉRENT ;
-- difficulté moyenne : ni trop facile (pas de question que tout le monde connaît), ni très difficile ;
-- réponse courte (1 à 4 mots), précise et incontestable ;
-- ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
+- UNE seule question par univers : chaque question porte sur un anime/manga DIFFÉRENT ;
+- difficulté moyenne à un peu difficile, mais toujours compréhensible : la question doit être complète, claire et compréhensible seule (cite les noms des personnages et la situation), sans sous-entendu ni référence floue ;
+- mélange : environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), par exemple « Pourquoi Kenjaku a-t-il organisé le jeu meurtrier, selon Tengen ? », et l'autre moitié de questions factuelles précises (qui, quel, comment s'appelle) ;
+- ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, choisis un autre sujet ; n'invente rien ;
 - la réponse ne doit pas apparaître dans la question.
+Champ "type" :
+- "nom" : la réponse est un nom propre (personnage, technique, lieu...) ;
+- "court" : réponse de 1 à 4 mots qui n'est pas un nom propre ;
+- "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
+Champ "alts" :
+- personnage : mets les appellations acceptables : prénom seul, surnoms ; le nom de famille seul UNIQUEMENT s'il ne désigne qu'un seul personnage important de l'œuvre (ex : "Gojo" pour Satoru Gojo est accepté ; "Uchiha" pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
+- autres réponses : variantes ou traductions réellement utilisées ;
+- ne liste pas les simples fautes d'orthographe (elles sont déjà tolérées).
 Univers déjà utilisés (interdits) : ${usedTopics.join(', ') || 'aucun'}.
-${alts}
-Réponds en JSON : {"questions":[{"univers":"nom de l'anime","question":"...","answer":"...","alts":["..."]}]}`
+Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
         : `Génère exactement ${need} questions de culture générale en français.
 Règles :
 - sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) ;
-- difficulté moyenne : ni trop facile, ni très difficile ;
+- difficulté moyenne, question complète, claire et compréhensible seule ;
 - réponse courte (1 à 4 mots), précise et incontestable ;
 - ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
 - la réponse ne doit pas apparaître dans la question.
+Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
+Champ "person" : true si la réponse est le nom d'une personne.
+Champ "alts" : si la réponse est une personne, mets le nom de famille seul (avec sa particule usuelle, ex : "de Vinci" et "Vinci"), JAMAIS le prénom seul ; sinon les variantes ou traductions réellement utilisées. Ne liste pas les simples fautes d'orthographe.
 Questions déjà posées (interdites) : ${questions.map(q => q.question).slice(-30).join(' | ') || 'aucune'}.
-${alts}
-Réponds en JSON : {"questions":[{"question":"...","answer":"...","alts":["..."]}]}`;
+Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"...","answer":"...","alts":["..."]}]}`;
 
     try {
       const data = await groqJson(prompt);
@@ -6028,27 +6064,46 @@ Réponds en JSON : {"questions":[{"question":"...","answer":"...","alts":["..."]
       for (const item of list) {
         const question = String(item?.question || '').trim();
         const answer = String(item?.answer || '').trim();
-        if (!question || !answer || answer.length > 60) continue;
+        if (!question || !answer || answer.length > 140) continue;
 
         const key = normalizeLoose(question);
         if (questions.some(q => normalizeLoose(q.question) === key)) continue;
 
-        if (category === 'multivers' && item?.univers) {
-          const topic = normalizeLoose(item.univers);
+        let univers = '';
+        if (category === 'multivers') {
+          univers = String(item?.univers || '').trim();
+          const topic = normalizeLoose(univers);
           if (topic && usedTopics.includes(topic)) continue;
           if (topic) usedTopics.push(topic);
         }
 
+        const answerType = ['nom', 'court', 'explication'].includes(item?.type) ? item.type : 'court';
+        let alts = Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 10) : [];
+
+        // Culture générale : nom de famille accepté, prénom seul refusé
+        if (category === 'cg' && item?.person === true) {
+          const tokens = significantTokens(answer);
+          if (tokens.length >= 2) {
+            alts = alts.filter(a => normalizeLoose(a) !== tokens[0]);
+            const last = tokens[tokens.length - 1];
+            if (!alts.some(a => significantTokens(a).includes(last))) alts.push(last);
+          }
+        }
+
         questions.push({
           type: 'text',
+          answerType,
+          univers,
           question,
           answer,
-          alts: Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 8) : []
+          alts,
+          keypoints: Array.isArray(item?.keypoints) ? item.keypoints.map(String).slice(0, 4) : []
         });
 
         if (questions.length >= total) break;
       }
     } catch (error) {
+      lastQuizGenerationError = `Groq : ${String(error?.response?.data?.error?.message || error?.message || error).slice(0, 150)}`;
       logger.warn({ error: error?.message }, 'Sitri~Quiz : génération de questions échouée.');
     }
   }
@@ -6056,45 +6111,116 @@ Réponds en JSON : {"questions":[{"question":"...","answer":"...","alts":["..."]
   return questions;
 }
 
-async function generateIdQuizQuestions(total) {
-  // Pages 3 à 30 du classement des personnages : connus, mais pas les plus évidents
-  const pages = new Set();
-  const wanted = Math.ceil(total / 7) + 1;
-  while (pages.size < wanted) pages.add(3 + Math.floor(Math.random() * 28));
+let lastQuizGenerationError = '';
 
+async function fetchAniListCharacters(page) {
+  const res = await axios.post(
+    'https://graphql.anilist.co',
+    {
+      query: `query ($page: Int) {
+        Page(page: $page, perPage: 50) {
+          characters(sort: FAVOURITES_DESC) {
+            id
+            name { full alternative }
+            image { large }
+            media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { romaji english } } }
+          }
+        }
+      }`,
+      variables: { page }
+    },
+    { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000 }
+  );
+
+  const out = [];
+  for (const c of res.data?.data?.Page?.characters || []) {
+    const imageUrl = c?.image?.large || '';
+    const name = String(c?.name?.full || '').trim();
+    if (!c?.id || !name || !imageUrl || imageUrl.includes('default')) continue;
+
+    const title = c?.media?.nodes?.[0]?.title;
+    out.push({
+      id: `al${c.id}`,
+      type: 'image',
+      imageUrl,
+      answer: name,
+      alts: (c?.name?.alternative || []).map(String).filter(a => a.length <= 30).slice(0, 4),
+      hintText: String(title?.english || title?.romaji || '')
+    });
+  }
+  return out;
+}
+
+async function fetchJikanCharacters(page) {
+  const res = await axios.get('https://api.jikan.moe/v4/top/characters', {
+    params: { page, limit: 25 },
+    timeout: 15000
+  });
+
+  const out = [];
+  for (const c of res.data?.data || []) {
+    const imageUrl = c?.images?.jpg?.image_url || c?.images?.webp?.image_url || '';
+    if (!c?.mal_id || !imageUrl || imageUrl.includes('questionmark')) continue;
+
+    let name = String(c.name || '').trim();
+    if (name.includes(',')) {
+      const [last, first] = name.split(',').map(part => part.trim());
+      name = `${first} ${last}`.trim();
+    }
+    if (!name) continue;
+
+    out.push({
+      id: `jk${c.mal_id}`,
+      type: 'image',
+      imageUrl,
+      answer: name,
+      alts: Array.isArray(c.nicknames) ? c.nicknames.map(String).slice(0, 4) : [],
+      hintText: ''
+    });
+  }
+  return out;
+}
+
+async function generateIdQuizQuestions(total) {
+  // Classement des personnages : on évite les tout premiers (trop évidents)
   const pool = [];
   const seen = new Set();
-
-  for (const page of pages) {
-    try {
-      const res = await axios.get('https://api.jikan.moe/v4/top/characters', {
-        params: { page, limit: 25 },
-        timeout: 15000
-      });
-
-      for (const c of res.data?.data || []) {
-        const imageUrl = c?.images?.jpg?.image_url || c?.images?.webp?.image_url || '';
-        if (!c?.mal_id || seen.has(c.mal_id) || !imageUrl || imageUrl.includes('questionmark')) continue;
-
-        let name = String(c.name || '').trim();
-        if (name.includes(',')) {
-          const [last, first] = name.split(',').map(part => part.trim());
-          name = `${first} ${last}`.trim();
-        }
-        if (!name) continue;
-
-        seen.add(c.mal_id);
-        pool.push({
-          type: 'image',
-          imageUrl,
-          answer: name,
-          alts: Array.isArray(c.nicknames) ? c.nicknames.map(String).slice(0, 6) : []
-        });
-      }
-    } catch (error) {
-      logger.warn({ error: error?.message, page }, 'Sitri~Quiz : récupération des personnages échouée.');
+  const addAll = list => {
+    for (const item of list) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      pool.push(item);
     }
-    await sleep(450);
+  };
+
+  const wanted = Math.ceil(total / 8) + 1;
+  const aniPages = new Set();
+  while (aniPages.size < wanted) aniPages.add(2 + Math.floor(Math.random() * 15));
+
+  for (const page of aniPages) {
+    try {
+      addAll(await fetchAniListCharacters(page));
+    } catch (error) {
+      lastQuizGenerationError = `AniList : ${String(error?.response?.status || error?.message || error).slice(0, 120)}`;
+      logger.warn({ error: error?.message, page }, 'Sitri~Quiz : AniList indisponible.');
+    }
+    await sleep(700);
+  }
+
+  // Secours : Jikan (MyAnimeList)
+  if (pool.length < total) {
+    const jikanPages = new Set();
+    while (jikanPages.size < wanted) jikanPages.add(3 + Math.floor(Math.random() * 28));
+
+    for (const page of jikanPages) {
+      try {
+        addAll(await fetchJikanCharacters(page));
+      } catch (error) {
+        lastQuizGenerationError = `Jikan : ${String(error?.response?.status || error?.message || error).slice(0, 120)}`;
+        logger.warn({ error: error?.message, page }, 'Sitri~Quiz : Jikan indisponible.');
+      }
+      await sleep(600);
+    }
   }
 
   for (let i = pool.length - 1; i > 0; i--) {
@@ -6103,6 +6229,18 @@ async function generateIdQuizQuestions(total) {
   }
 
   return pool.slice(0, total);
+}
+
+async function downloadQuizImage(url) {
+  const res = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 15000,
+    maxContentLength: 8 * 1024 * 1024,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Sitri-Nel)' }
+  });
+  const buffer = Buffer.from(res.data);
+  if (!buffer.length) throw new Error('image vide');
+  return buffer;
 }
 
 // --- Déroulement du quiz
@@ -6139,8 +6277,11 @@ async function finishAutoQuiz(session, { stopped = false } = {}) {
       points: player.points
     }));
 
+    const category = AUTO_QUIZ_CATEGORIES[session.category];
+    const info = category ? `${category.icon} ${category.label} • ${session.asked || 0} question${(session.asked || 0) > 1 ? 's' : ''}` : '';
+
     await quizSend(jid, {
-      text: buildQuizBoard({ title: 'RÉCAPITULATIF', rows }),
+      text: buildQuizBoard({ title: 'RÉCAPITULATIF', rows, info }),
       mentions: ranking.map(player => player.jid)
     });
 
@@ -6170,20 +6311,23 @@ async function askNextAutoQuestion(session) {
 
     try {
       if (q.type === 'image') {
+        const image = await downloadQuizImage(q.imageUrl);
         await quizSend(jid, {
-          image: { url: q.imageUrl },
+          image,
           caption: `🖼️ *Question ${number}/${session.questions.length}* — Qui est ce personnage ?\n\n⏱️ ${seconds} secondes`
         });
       } else {
-        await quizSend(jid, {
-          text: `❓ *Question ${number}/${session.questions.length}* — ${category.icon} ${category.label}\n\n${q.question}\n\n⏱️ ${seconds} secondes`
-        });
+        const lines = [`❓ *Question ${number}/${session.questions.length}* — ${category.icon} ${category.label}`, '', q.question];
+        if (q.univers) lines.push('', `📺 *${q.univers}*`);
+        lines.push('', `⏱️ ${seconds} secondes`);
+        await quizSend(jid, { text: lines.join('\n') });
       }
     } catch (error) {
       logger.warn({ error: error?.message }, 'Sitri~Quiz : question non envoyée, passage à la suivante.');
       continue;
     }
 
+    session.asked = (session.asked || 0) + 1;
     session.current = q;
     session.answered = false;
 
@@ -6191,9 +6335,12 @@ async function askNextAutoQuestion(session) {
       session.hintTimer = setTimeout(async () => {
         if (autoQuizzes.get(jid) !== session || session.answered || session.current !== q) return;
         const first = significantTokens(q.answer)[0] || '';
-        if (first) {
-          await quizSend(jid, { text: `💡 Indice : le prénom ou le nom commence par *${first[0].toUpperCase()}*` }).catch(() => {});
-        }
+        const hint = q.hintText
+          ? `💡 Indice : ça vient de *${q.hintText}*`
+          : first
+            ? `💡 Indice : le nom commence par *${first[0].toUpperCase()}*`
+            : '';
+        if (hint) await quizSend(jid, { text: hint }).catch(() => {});
       }, Math.round(AUTO_QUIZ_TIME_MS / 2));
     }
 
@@ -6207,6 +6354,25 @@ async function askNextAutoQuestion(session) {
 
     return;
   }
+}
+
+// Donne le point au premier qui trouve et répond simplement ☑️
+async function awardAutoQuizPoint(session, q, sender, message) {
+  if (autoQuizzes.get(session.chatJid) !== session || session.answered || session.current !== q) return false;
+
+  session.answered = true;
+  clearTimeout(session.timer);
+  if (session.hintTimer) clearTimeout(session.hintTimer);
+  session.timer = null;
+  session.hintTimer = null;
+
+  session.scores[sender] = Number(session.scores[sender] || 0) + 1;
+  session.lastAt[sender] = Date.now();
+
+  await quizSend(session.chatJid, { text: '☑️' }, { quoted: message }).catch(() => {});
+
+  session.nextTimer = setTimeout(() => askNextAutoQuestion(session), 2000);
+  return true;
 }
 
 async function startAutoQuiz(session) {
@@ -6233,7 +6399,11 @@ async function startAutoQuiz(session) {
       autoQuizzes.delete(jid);
       clearAutoQuizTimers(session);
       await quizSend(jid, {
-        text: '⚠️ Impossible de préparer les questions pour le moment. Réessaie avec Xquiz dans un instant.'
+        text:
+          '⚠️ Impossible de préparer les questions pour le moment. Réessaie avec Xquiz dans un instant.' +
+          (cleanEnv(process.env.XPLAY_DEBUG) === '1' && lastQuizGenerationError
+            ? `\n\n🛠️ Diagnostic : ${lastQuizGenerationError}`
+            : '')
       });
       return;
     }
@@ -6309,33 +6479,30 @@ async function handleAutoQuizMessage(jid, message, text, sender) {
 
   if (session.stage === 'running') {
     const trimmed = String(text || '').trim();
-    const words = trimmed.split(/\s+/).length;
-    if (!trimmed || words > 8 || trimmed.length > 80) return false;
-
-    if (session.answered || !session.current) return true;
-    if (!isQuizAnswerCorrect(trimmed, session.current)) return true;
-
-    // Bonne réponse : le premier qui trouve gagne le point
-    session.answered = true;
     const q = session.current;
-    clearTimeout(session.timer);
-    if (session.hintTimer) clearTimeout(session.hintTimer);
-    session.timer = null;
-    session.hintTimer = null;
+    const long = q && q.type === 'text' && q.answerType === 'explication';
+    const maxWords = long ? 25 : 8;
+    const words = trimmed.split(/\s+/).length;
+    if (!trimmed || words > maxWords || trimmed.length > (long ? 200 : 80)) return false;
 
-    session.scores[sender] = Number(session.scores[sender] || 0) + 1;
-    session.lastAt[sender] = Date.now();
+    if (session.answered || !q) return true;
 
-    await quizSend(
-      jid,
-      {
-        text: `✅ @${getNumber(sender)} a trouvé : *${q.answer}* (+1 point)`,
-        mentions: [sender]
-      },
-      { quoted: message }
-    ).catch(() => {});
+    if (isQuizAnswerCorrect(trimmed, q)) {
+      await awardAutoQuizPoint(session, q, sender, message);
+      return true;
+    }
 
-    session.nextTimer = setTimeout(() => askNextAutoQuestion(session), 2500);
+    // Réponses approximatives (explications, réponses courtes) : jugées sur le sens
+    if (q.type === 'text' && q.answerType !== 'nom' && (words >= 2 || trimmed.length >= 6) && (session.judging || 0) < 3) {
+      session.judging = (session.judging || 0) + 1;
+      judgeQuizAnswer(q, trimmed)
+        .then(ok => (ok ? awardAutoQuizPoint(session, q, sender, message) : false))
+        .catch(() => {})
+        .finally(() => {
+          session.judging = Math.max(0, (session.judging || 1) - 1);
+        });
+    }
+
     return true;
   }
 
@@ -6377,6 +6544,8 @@ async function handleAutoQuizCommand(jid, message, command, args, ownerCommand) 
       answered: false,
       scores: {},
       lastAt: {},
+      asked: 0,
+      judging: 0,
       timer: null,
       hintTimer: null,
       nextTimer: null,

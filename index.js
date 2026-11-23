@@ -4673,7 +4673,7 @@ function buildYoutubeCookiesFile() {
 }
 
 // Téléchargement audio avec yt-dlp (mêmes réglages anti-blocage qu'Erwin-Bot)
-async function downloadAudioWithYtdlp(videoUrl) {
+async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
   lastYtdlpFailure = '';
 
   let bin;
@@ -4694,16 +4694,25 @@ async function downloadAudioWithYtdlp(videoUrl) {
     const args = [
       videoUrl,
       '-o', path.join(dir, `${base}.%(ext)s`),
-      '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
+      '-f',
+      soundcloud
+        ? 'bestaudio[protocol^=http][ext=mp3]/bestaudio[ext=mp3]/bestaudio'
+        : 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
       '--no-playlist',
       '--no-warnings',
       '--force-ipv4',
       '--socket-timeout', '15',
       '--retries', '2',
       '--extractor-retries', '1',
-      '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`,
-      '--add-header', 'referer:https://www.youtube.com/'
+      '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`
     ];
+
+    if (soundcloud) {
+      // On évite les extraits de 30 secondes et les pistes trop longues
+      args.push('--match-filter', 'duration>60 & duration<900');
+    } else {
+      args.push('--add-header', 'referer:https://www.youtube.com/');
+    }
 
     let ffmpegPath = null;
     try {
@@ -4712,8 +4721,9 @@ async function downloadAudioWithYtdlp(videoUrl) {
     } catch {
       // sans ffmpeg : pas de conversion de secours
     }
+    if (ffmpegPath) args.push('--ffmpeg-location', ffmpegPath);
 
-    const cookiesContent = buildYoutubeCookiesFile();
+    const cookiesContent = soundcloud ? '' : buildYoutubeCookiesFile();
     if (cookiesContent) {
       cookiesPath = path.join(dir, `${base}_cookies.txt`);
       fs.writeFileSync(cookiesPath, cookiesContent);
@@ -4725,17 +4735,20 @@ async function downloadAudioWithYtdlp(videoUrl) {
     // Si les cookies sont périmés (« The page needs to be reloaded »), on retente sans cookies.
     const jsArgs = ['--js-runtimes', 'node'];
     const cookieArgs = cookiesPath ? ['--cookies', cookiesPath] : [];
-    const clientProfiles = [
-      ...(cookiesPath
-        ? [
-            [...jsArgs, ...cookieArgs],
-            [...jsArgs, ...cookieArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
-          ]
-        : []),
-      ['--extractor-args', 'youtube:player_client=android_vr,ios,android'],
-      [...jsArgs],
-      [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
-    ];
+    const clientProfiles = soundcloud
+      ? [[]]
+      : [
+          // Profil d'origine, sans cookies : c'est celui qui marchait au départ
+          ['--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'],
+          ...(cookiesPath
+            ? [
+                [...jsArgs, ...cookieArgs],
+                [...jsArgs, ...cookieArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
+              ]
+            : []),
+          [...jsArgs],
+          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
+        ];
     const ytdlpDeadline = Date.now() + 75000;
 
     let lastError = null;
@@ -4873,8 +4886,22 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
       }
 
       // Si YouTube bloque tout le serveur ou que yt-dlp est absent, inutile d'insister
-      if (/Sign in|bot|Binaire yt-dlp indisponible/i.test(lastYtdlpFailure)) break;
+      if (/Sign in|bot|reloaded|Binaire yt-dlp indisponible/i.test(lastYtdlpFailure)) break;
     }
+
+    // Plan B : SoundCloud (n'est pas bloqué comme YouTube sur les serveurs)
+    const youtubeFailure = lastYtdlpFailure;
+    const sc = await downloadAudioWithYtdlp(`scsearch1:${query}`, { soundcloud: true });
+    if (sc) {
+      await sock.sendMessage(
+        jid,
+        { audio: sc.buffer, mimetype: sc.mimetype, ptt: false },
+        { quoted: message }
+      );
+      await sendReply(jid, `🎶 ${query}\n(source : SoundCloud)\n\n${SIGNATURE}`, message);
+      return true;
+    }
+    lastYtdlpFailure = `YouTube : ${youtubeFailure} | SoundCloud : ${lastYtdlpFailure}`.slice(0, 400);
   }
 
   const resolved = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');

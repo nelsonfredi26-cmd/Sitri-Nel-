@@ -4481,7 +4481,9 @@ async function resolveStreamUrl(videoUrl, mode = 'audio') {
     const pipedInstances = [
       'https://pipedapi.kavin.rocks',
       'https://pipedapi.adminforge.de',
-      'https://pipedapi.moomoo.me'
+      'https://pipedapi.moomoo.me',
+      'https://api.piped.private.coffee',
+      'https://pipedapi.leptons.xyz'
     ];
 
     for (const base of pipedInstances) {
@@ -4531,7 +4533,9 @@ async function resolveStreamUrl(videoUrl, mode = 'audio') {
     const invidiousInstances = [
       'https://inv.nadeko.net',
       'https://invidious.nerdvpn.de',
-      'https://invidious.privacyredirect.com'
+      'https://invidious.privacyredirect.com',
+      'https://invidious.protokolla.fi',
+      'https://yewtu.be'
     ];
 
     for (const base of invidiousInstances) {
@@ -4579,7 +4583,7 @@ async function resolveStreamUrl(videoUrl, mode = 'audio') {
 
 let lastYtdlpFailure = '';
 
-// Binaire autonome de yt-dlp (sans Python), téléchargé au besoin comme dans Erwin-Bot
+// Binaire autonome de yt-dlp (sans Python), téléchargé au besoin
 const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
 const YTDLP_BIN = path.join(os.tmpdir(), 'sitri-nel-ytdlp', 'yt-dlp');
 let ytdlpReadyPromise = null;
@@ -4587,7 +4591,7 @@ let ytdlpReadyPromise = null;
 async function runBinary(file, args, options = {}) {
   const { execFile } = await import('child_process');
   const { promisify } = await import('util');
-  return promisify(execFile)(file, args, { maxBuffer: 20 * 1024 * 1024, ...options });
+  return promisify(execFile)(file, args, { maxBuffer: 25 * 1024 * 1024, ...options });
 }
 
 function ensureYtdlpBinary() {
@@ -4630,13 +4634,25 @@ setTimeout(() => {
   );
 }, 8000);
 
-// Cookies YouTube : fichier cookies.txt en base64 (YOUTUBE_COOKIES_BASE64),
+// Cookies YouTube : fichier cookies.txt local, base64 (YOUTUBE_COOKIES_BASE64),
 // ou texte collé tel quel (YOUTUBE_COOKIES) : format Netscape ou "nom=valeur; nom2=valeur2"
 function buildYoutubeCookiesFile() {
+  const localCookiesFile = path.join(ROOT_DIR, 'cookies.txt');
+  let raw = '';
+
   const b64 = cleanEnv(process.env.YOUTUBE_COOKIES_BASE64);
-  let raw = b64
-    ? Buffer.from(b64, 'base64').toString('utf8')
-    : String(process.env.YOUTUBE_COOKIES || '').trim();
+  if (b64) {
+    raw = Buffer.from(b64, 'base64').toString('utf8');
+  } else if (String(process.env.YOUTUBE_COOKIES || '').trim()) {
+    raw = String(process.env.YOUTUBE_COOKIES || '').trim();
+  } else if (fs.existsSync(localCookiesFile)) {
+    try {
+      raw = fs.readFileSync(localCookiesFile, 'utf8').trim();
+    } catch {
+      raw = '';
+    }
+  }
+
   if (!raw) return '';
 
   if (!raw.includes('\n') && raw.includes('\\n')) raw = raw.replace(/\\n/g, '\n');
@@ -4657,7 +4673,7 @@ function buildYoutubeCookiesFile() {
   return lines.length > 1 ? `${lines.join('\n')}\n` : '';
 }
 
-// Téléchargement audio avec yt-dlp (authentification navigateur via cookies YouTube)
+// Téléchargement audio avec yt-dlp (multi-clients + fallback anti-"The page needs to be reloaded")
 async function downloadAudioWithYtdlp(videoUrl) {
   lastYtdlpFailure = '';
 
@@ -4672,112 +4688,186 @@ async function downloadAudioWithYtdlp(videoUrl) {
   const dir = path.join(os.tmpdir(), 'sitri-nel-play');
   fs.mkdirSync(dir, { recursive: true });
 
-  const base = `play_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  let cookiesPath = null;
-
-  const userAgent =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-
   const cookiesContent = buildYoutubeCookiesFile();
-  if (cookiesContent) {
-    cookiesPath = path.join(dir, `${base}_cookies.txt`);
-    fs.writeFileSync(cookiesPath, cookiesContent, { mode: 0o600 });
-  }
-
-  let ffmpegBin = null;
+  let ffmpegBin = '';
   try {
     const ffmpegStatic = await import('ffmpeg-static');
     if (ffmpegStatic.default) ffmpegBin = ffmpegStatic.default;
   } catch {
-    ffmpegBin = null;
+    // sans ffmpeg : on garde le format d'origine
   }
 
-  const clientProfiles = cookiesPath
-    ? ['web,web_embedded', 'tv,web']
-    : ['web,web_embedded', 'android_vr,web_creator,ios,android'];
+  const maxMb = Math.floor(CONFIG.maxMediaBytes / (1024 * 1024));
 
-  try {
-    for (const clientProfile of clientProfiles) {
-      for (const f of fs.readdirSync(dir)) {
-        if (f.startsWith(base) && f !== `${base}_cookies.txt`) {
-          try { fs.unlinkSync(path.join(dir, f)); } catch {}
-        }
-      }
+  // Profils ordonnés pour contourner "The page needs to be reloaded" sur IP datacenter (Railway)
+  const extractorProfiles = [
+    {
+      name: 'android_vr+tv',
+      extractorArgs: 'youtube:player_client=android_vr,tv_embedded;player_skip=webpage,configs'
+    },
+    {
+      name: 'ios+mweb',
+      extractorArgs: 'youtube:player_client=ios,mweb;player_skip=webpage'
+    },
+    {
+      name: 'android+web_creator',
+      extractorArgs: 'youtube:player_client=android,web_creator'
+    }
+  ];
 
+  const mimeByExt = {
+    m4a: 'audio/mp4',
+    mp4: 'audio/mp4',
+    aac: 'audio/aac',
+    mp3: 'audio/mpeg',
+    ogg: 'audio/ogg; codecs=opus',
+    opus: 'audio/ogg; codecs=opus',
+    webm: 'audio/webm'
+  };
+
+  for (const profile of extractorProfiles) {
+    const base = `play_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let cookiesPath = null;
+
+    try {
       const args = [
         videoUrl,
         '-o', path.join(dir, `${base}.%(ext)s`),
         '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
         '--no-playlist',
         '--no-warnings',
+        '--no-check-certificates',
+        '--geo-bypass',
         '--force-ipv4',
-        '--sleep-requests', '1',
-        '--user-agent', userAgent,
-        '--add-header', 'referer:https://www.youtube.com/',
-        '--add-header', 'accept-language:fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-        '--extractor-args', `youtube:player_client=${clientProfile}`,
-        '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`
+        '--retries', '2',
+        '--fragment-retries', '2',
+        '--socket-timeout', '20',
+        '--max-filesize', `${maxMb}M`,
+        '--extractor-args', profile.extractorArgs,
+        '--add-header', 'Accept-Language:fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        '--add-header', 'Referer:https://www.youtube.com/'
       ];
-
-      if (cookiesPath) {
-        args.push('--cookies', cookiesPath);
-      }
 
       if (ffmpegBin) {
         args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0', '--ffmpeg-location', ffmpegBin);
       }
 
-      try {
-        await runBinary(bin, args, { timeout: 120000 });
-      } catch (error) {
-        const detail = String(error?.stderr || error?.message || '');
-        const errLine =
-          detail.split('\n').reverse().find(l => l.includes('ERROR')) ||
-          detail.split('\n').filter(Boolean).pop() ||
-          detail;
-        lastYtdlpFailure = errLine.trim().slice(0, 300);
-        logger.warn({ clientProfile, error: lastYtdlpFailure }, 'yt-dlp : tentative échouée.');
-        continue;
+      if (cookiesContent) {
+        cookiesPath = path.join(dir, `${base}_cookies.txt`);
+        fs.writeFileSync(cookiesPath, cookiesContent);
+        args.push('--cookies', cookiesPath);
       }
+
+      await runBinary(bin, args, { timeout: 90000 });
 
       const file = fs.readdirSync(dir).find(n => n.startsWith(base) && !n.endsWith('_cookies.txt'));
       if (!file) {
-        lastYtdlpFailure = 'Aucun fichier audio produit (fichier trop gros ou format indisponible).';
+        lastYtdlpFailure = `[${profile.name}] Aucun fichier audio produit.`;
         continue;
       }
 
       const ext = path.extname(file).slice(1).toLowerCase();
-      const mimeByExt = {
-        m4a: 'audio/mp4',
-        mp4: 'audio/mp4',
-        aac: 'audio/aac',
-        mp3: 'audio/mpeg',
-        ogg: 'audio/ogg; codecs=opus',
-        opus: 'audio/ogg; codecs=opus'
-      };
-      const mimetype = mimeByExt[ext];
-      if (!mimetype) {
-        lastYtdlpFailure = `Format audio non compatible avec WhatsApp (.${ext}).`;
-        continue;
-      }
-
+      const mimetype = mimeByExt[ext] || 'audio/mp4';
       const buffer = fs.readFileSync(path.join(dir, file));
+
       if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) {
-        lastYtdlpFailure = 'Fichier audio vide ou trop gros.';
+        lastYtdlpFailure = `[${profile.name}] Fichier audio vide ou trop gros.`;
         continue;
       }
 
       return { buffer, mimetype };
+    } catch (error) {
+      const detail = String(error?.stderr || error?.message || '');
+      const errLine =
+        detail.split('\n').reverse().find(l => l.includes('ERROR')) ||
+        detail.split('\n').filter(Boolean).pop() ||
+        detail;
+      lastYtdlpFailure = `[${profile.name}] ${errLine.trim().slice(0, 260)}`;
+      logger.warn({ profile: profile.name, error: lastYtdlpFailure }, 'yt-dlp : tentative audio échouée.');
+    } finally {
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          if (f.startsWith(base)) fs.unlinkSync(path.join(dir, f));
+        }
+      } catch {}
     }
-
-    return null;
-  } finally {
-    try {
-      for (const f of fs.readdirSync(dir)) {
-        if (f.startsWith(base)) fs.unlinkSync(path.join(dir, f));
-      }
-    } catch {}
   }
+
+  return null;
+}
+
+// Secours : flux Cobalt/Piped/Invidious puis recherche directe sur Audius
+async function downloadAudioFallbackFromWeb(query, videoUrl) {
+  const resolved = await resolveStreamUrl(videoUrl, 'audio');
+  if (resolved?.streamUrl) {
+    try {
+      const dl = await axios.get(resolved.streamUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        maxContentLength: CONFIG.maxMediaBytes,
+        maxBodyLength: CONFIG.maxMediaBytes,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+          Referer: 'https://www.youtube.com/'
+        }
+      });
+      const buf = Buffer.from(dl.data);
+      const headerMime = String(dl.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+      const mime = headerMime || resolved.mime || 'audio/mp4';
+      if (buf.length > 1024 && buf.length <= CONFIG.maxMediaBytes) {
+        return {
+          buffer: buf,
+          mimetype: mime.startsWith('audio/') ? mime : 'audio/mp4'
+        };
+      }
+    } catch (err) {
+      logger.warn({ error: err?.message }, 'Flux direct resolveStreamUrl impossible.');
+    }
+  }
+
+  const cleanSearch = String(query || '')
+    .replace(/\((?:official|audio|video|lyrics|slowed|reverb|clip|hd|4k)[^)]*\)/gi, '')
+    .replace(/\[(?:official|audio|video|lyrics|slowed|reverb|clip|hd|4k)[^\]]*\]/gi, '')
+    .trim();
+
+  if (cleanSearch) {
+    const audiusHosts = [
+      'https://discoveryprovider.audius.co',
+      'https://discoveryprovider2.audius.co',
+      'https://audius-discovery-1.cultur3stake.com'
+    ];
+    for (const host of audiusHosts) {
+      try {
+        const searchRes = await axios.get(`${host}/v1/tracks/search`, {
+          params: { query: cleanSearch, app_name: 'SitriNelBot' },
+          timeout: 8000
+        });
+        const track = (searchRes.data?.data || []).find(t => t?.id && t?.is_streamable !== false);
+        if (track?.id) {
+          const streamRes = await axios.get(`${host}/v1/tracks/${track.id}/stream`, {
+            params: { app_name: 'SitriNelBot' },
+            responseType: 'arraybuffer',
+            timeout: 25000,
+            maxContentLength: CONFIG.maxMediaBytes,
+            maxBodyLength: CONFIG.maxMediaBytes,
+            maxRedirects: 5
+          });
+          const buf = Buffer.from(streamRes.data);
+          if (buf.length > 4096 && buf.length <= CONFIG.maxMediaBytes) {
+            return {
+              buffer: buf,
+              mimetype: 'audio/mpeg',
+              matchedTitle: `${track.title}${track.user?.name ? ` - ${track.user.name}` : ''}`
+            };
+          }
+        }
+      } catch {
+        // Host suivant
+      }
+    }
+  }
+
+  return null;
 }
 
 async function handlePlayOrVideoCommand(jid, message, command, args) {
@@ -4798,15 +4888,20 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
   await sendReply(
     jid,
     isAudio
-      ? `🎵 Recherche audio en cours pour : "${query}"...`
+      ? `🎵 Recherche et téléchargement audio pour : "${query}"...`
       : `🎬 Recherche vidéo en cours pour : "${query}" (max 3 min)...`,
     message
   );
 
-  const results = await searchYouTubeCandidates(query);
-  const top = results[0];
+  // Permet aussi de coller directement un lien YouTube après Xplay / Xvideo
+  const directId = extractYouTubeId(query);
+  const results = directId
+    ? [{ title: query, url: `https://www.youtube.com/watch?v=${directId}` }]
+    : await searchYouTubeCandidates(query);
 
-  if (!top?.url) {
+  const candidates = results.slice(0, 3);
+
+  if (!candidates.length) {
     await sendReply(
       jid,
       `⚠️ Aucun résultat trouvé pour "${query}". Réessaie avec un titre plus précis.`,
@@ -4815,72 +4910,87 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
     return true;
   }
 
+  const top = candidates[0];
+
   if (isAudio) {
-    const audio = await downloadAudioWithYtdlp(top.url);
-    if (audio) {
+    for (const candidate of candidates) {
+      const audio = await downloadAudioWithYtdlp(candidate.url);
+      if (audio?.buffer) {
+        await sock.sendMessage(
+          jid,
+          {
+            audio: audio.buffer,
+            mimetype: audio.mimetype,
+            ptt: false
+          },
+          { quoted: message }
+        );
+        await sendReply(jid, `🎶 *${candidate.title}*\n\n${SIGNATURE}`, message);
+        return true;
+      }
+    }
+
+    const fallbackAudio = await downloadAudioFallbackFromWeb(query, top.url);
+    if (fallbackAudio?.buffer) {
       await sock.sendMessage(
         jid,
-        { audio: audio.buffer, mimetype: audio.mimetype, ptt: false },
+        {
+          audio: fallbackAudio.buffer,
+          mimetype: fallbackAudio.mimetype,
+          ptt: false
+        },
         { quoted: message }
       );
-      await sendReply(jid, `🎶 ${top.title}\n\n${SIGNATURE}`, message);
+      await sendReply(
+        jid,
+        `🎶 *${fallbackAudio.matchedTitle || top.title}*\n\n${SIGNATURE}`,
+        message
+      );
       return true;
     }
-  }
+  } else {
+    const resolved = await resolveStreamUrl(top.url, 'video');
 
-  const resolved = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');
+    if (resolved?.tooLong) {
+      await sendReply(
+        jid,
+        `⏱️ 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗣 𝗟𝗢𝗡𝗚𝗨𝗘 (${formatDuration(resolved.durationSec)})\n` +
+          `La limite pour l'envoi direct est fixée à 3 minutes (180 s).\n` +
+          `🔗 Lien : ${top.url}\n\n${SIGNATURE}`,
+        message
+      );
+      return true;
+    }
 
-  if (resolved?.tooLong) {
-    await sendReply(
-      jid,
-      `⏱️ 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗣 𝗟𝗢𝗡𝗚𝗨𝗘 (${formatDuration(resolved.durationSec)})\n` +
-        `La limite pour l'envoi direct est fixée à 3 minutes (180 s).\n` +
-        `🔗 Lien : ${top.url}\n\n${SIGNATURE}`,
-      message
-    );
-    return true;
-  }
+    if (resolved?.streamUrl) {
+      try {
+        const dl = await axios.get(resolved.streamUrl, {
+          responseType: 'arraybuffer',
+          timeout: 30000,
+          maxContentLength: CONFIG.maxMediaBytes,
+          maxBodyLength: CONFIG.maxMediaBytes,
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SitriNelBot/1.0' }
+        });
 
-  if (resolved?.streamUrl) {
-    try {
-      const dl = await axios.get(resolved.streamUrl, {
-        responseType: 'arraybuffer',
-        timeout: 30000,
-        maxContentLength: CONFIG.maxMediaBytes,
-        maxBodyLength: CONFIG.maxMediaBytes,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SitriNelBot/1.0' }
-      });
+        const buf = Buffer.from(dl.data);
+        const headerMime = String(dl.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+        const mime = headerMime || resolved.mime || 'video/mp4';
 
-      const buf = Buffer.from(dl.data);
-      const headerMime = String(dl.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
-      const mime = headerMime || resolved.mime || (isAudio ? 'audio/mpeg' : 'video/mp4');
-
-      if (buf.length > 0 && buf.length <= CONFIG.maxMediaBytes) {
-        if (isAudio) {
+        if (buf.length > 0 && buf.length <= CONFIG.maxMediaBytes) {
           await sock.sendMessage(
             jid,
             {
-              audio: buf,
-              mimetype: mime.startsWith('audio/') ? mime : 'audio/mp4',
-              ptt: false
+              video: buf,
+              mimetype: mime.startsWith('video/') ? mime : 'video/mp4',
+              caption: `🎬 *${top.title}*\n\n${SIGNATURE}`
             },
             { quoted: message }
           );
           return true;
         }
-
-        await sock.sendMessage(
-          jid,
-          {
-            video: buf,
-            mimetype: mime.startsWith('video/') ? mime : 'video/mp4'
-          },
-          { quoted: message }
-        );
-        return true;
+      } catch (dlErr) {
+        logger.warn({ error: dlErr?.message }, 'Téléchargement direct vidéo impossible, repli sur le lien.');
       }
-    } catch (dlErr) {
-      logger.warn({ error: dlErr?.message }, 'Téléchargement direct du flux impossible, repli sur le lien.');
     }
   }
 
@@ -4899,8 +5009,8 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
   return true;
 }
 
-async function multimediaNotIntegrated(jid, message, command) {
-  return handlePlayOrVideoCommand(jid, message, command, '');
+async function multimediaNotIntegrated(jid, message, command, args = '') {
+  return handlePlayOrVideoCommand(jid, message, command, args);
 }
 
 // ------------------------------------------------------------
@@ -5197,7 +5307,7 @@ async function handleMediaCommand(jid, message, command, args) {
   }
 
   if (command === 'play' || command === 'video') {
-    await multimediaNotIntegrated(jid, message, command);
+    await handlePlayOrVideoCommand(jid, message, command, args);
     return true;
   }
 

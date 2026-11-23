@@ -5418,8 +5418,6 @@ async function grantPassiveMessageXp(senderJid) {
 
 const quizPointSessions = new Map();
 const quizPointLocks = new Map();
-const QUIZ_COINS = [500, 250, 100];
-const QUIZ_XP = [50, 25, 10];
 
 function normalizeQuizEmoji(value = '') {
   return String(value || '').replace(/\uFE0F/g, '').trim();
@@ -5501,13 +5499,24 @@ function rankQuizPlayers(session) {
     .map(([jid, points]) => ({ jid, points: Number(points) }));
 }
 
-// Compte (ou retire) un point quand le modérateur met / enlève l'émoji du quiz
-async function applyQuizReaction({ chatJid, targetKey, emoji }) {
+function sameUser(a, b) {
+  if (!a || !b) return false;
+  return getNumber(normalizeJid(a)) === getNumber(normalizeJid(b));
+}
+
+const QUIZ_THANKS_TEXT = '🙏 Merci pour la participation au *Sitri~Quiz* !';
+
+// Compte (ou retire) un point quand l'animateur du quiz met / enlève l'émoji
+async function applyQuizReaction({ chatJid, targetKey, emoji, byJid }) {
   if (!chatJid || !targetKey?.id) return;
 
   await withQuizLock(chatJid, async () => {
     const session = await loadQuizSession(chatJid);
     if (!session) return;
+
+    // Seul l'animateur (celui qui a lancé Xstart) peut donner des points
+    const byHost = session.host ? sameUser(byJid, session.host) : isOwner(byJid);
+    if (!byHost) return;
 
     const targetId = targetKey.id;
     const previous = session.awarded[targetId];
@@ -5516,12 +5525,14 @@ async function applyQuizReaction({ chatJid, targetKey, emoji }) {
 
     if (given && given === wanted) {
       if (previous) return;
-      if (targetKey.fromMe) return;
 
       const player = getMessageSender({
         key: { ...targetKey, remoteJid: targetKey.remoteJid || chatJid }
       });
-      if (!player || isOwner(player)) return;
+      if (!player) return;
+
+      // L'animateur ne se marque pas de points lui-même
+      if (session.host ? sameUser(player, session.host) : isOwner(player)) return;
 
       session.scores[player] = Number(session.scores[player] || 0) + 1;
       session.lastAt[player] = Date.now();
@@ -5572,7 +5583,6 @@ function quizBold(text = '') {
 }
 
 const QUIZ_BADGES = ['🥇', '🥈', '🥉'];
-const QUIZ_ORDINALS = ['Le 1er', 'Le 2e', 'Le 3e'];
 
 // Liste compacte des joueurs, même style que le menu du bot
 function buildQuizBoard({ title, rows }) {
@@ -5584,13 +5594,20 @@ function buildQuizBoard({ title, rows }) {
   return out.join('\n');
 }
 
-// Le modérateur envoie l'émoji du quiz EN RÉPONSE au message d'un joueur
+// L'animateur envoie l'émoji du quiz EN RÉPONSE au message d'un joueur
 async function handleQuizEmojiReply(jid, message, text) {
-  const given = normalizeQuizEmoji(text);
+  const raw = String(text || '').trim();
+  if (!raw || raw.length > 12 || !/\p{Extended_Pictographic}/u.test(raw)) return false;
+
+  const given = normalizeQuizEmoji(raw);
   if (!given) return false;
 
   const session = await withQuizLock(jid, () => loadQuizSession(jid));
   if (!session || normalizeQuizEmoji(session.emoji) !== given) return false;
+
+  const byJid = getMessageSender(message);
+  const byHost = session.host ? sameUser(byJid, session.host) : isOwner(byJid);
+  if (!byHost) return false;
 
   const context = getQuotedMessage(message);
   if (!context?.stanzaId) return false;
@@ -5603,21 +5620,31 @@ async function handleQuizEmojiReply(jid, message, text) {
       participant: context.participant,
       fromMe: Boolean(context.participant) && isOwner(context.participant)
     },
-    emoji: text
+    emoji: raw,
+    byJid
   });
 
   return true;
 }
 
 async function handleQuizPointsCommand(jid, message, command, args, ownerCommand) {
-  if (!ownerCommand) return;
+  const sender = getMessageSender(message);
 
   if (command === 'start') {
     const emoji = pickFirstEmoji(args);
     if (!emoji) {
       await sendReply(
         jid,
-        '🧠 Utilisation : Xstart 👍\nMets un espace puis l’émoji qui validera les bonnes réponses.',
+        '🧠 Utilisation : Xstart 🟩\nMets un espace puis l’émoji qui validera les bonnes réponses.',
+        message
+      );
+      return;
+    }
+
+    if (autoQuizzes.has(jid)) {
+      await sendReply(
+        jid,
+        '🧠 Un Sitri~Quiz est déjà en cours ici. Termine-le avec Xend avant d’en lancer un autre.',
         message
       );
       return;
@@ -5628,7 +5655,7 @@ async function handleQuizPointsCommand(jid, message, command, args, ownerCommand
       const players = rankQuizPlayers(existing).length;
       await sendReply(
         jid,
-        `🧠 Un quiz est déjà en cours ici (émoji ${existing.emoji}, ${players} participant(s) avec des points).\nUtilise Xrecap pour voir le classement ou Xtab pour le terminer.`,
+        `🧠 Un quiz est déjà en cours ici (émoji ${existing.emoji}, ${players} participant(s) avec des points).\nXrecap pour le classement, Xtab pour le terminer, Xend pour l’annuler.`,
         message
       );
       return;
@@ -5637,6 +5664,7 @@ async function handleQuizPointsCommand(jid, message, command, args, ownerCommand
     await withQuizLock(jid, () =>
       saveQuizSession(jid, {
         emoji,
+        host: sender,
         startedAt: Date.now(),
         scores: {},
         lastAt: {},
@@ -5644,19 +5672,24 @@ async function handleQuizPointsCommand(jid, message, command, args, ownerCommand
       })
     );
 
-    await sendReply(
-      jid,
-      `🧠 𝗤𝗨𝗜𝗭 𝗟𝗔𝗡𝗖𝗘́\n\nÉmoji de bonne réponse : ${emoji}\nÀ chaque ${emoji} mis sur une réponse, la personne gagne 1 point.\n\n• Xrecap : classement en cours\n• Xtab : tableau final et récompenses`,
-      message
-    );
+    // Discret : juste une réaction sous la commande, sans message ni notification
+    try {
+      await sock.sendMessage(jid, { react: { text: emoji, key: message.key } });
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Quiz points : réaction de confirmation impossible.');
+    }
     return;
   }
 
   const session = await withQuizLock(jid, () => loadQuizSession(jid));
   if (!session) {
-    await sendReply(jid, '🧠 Aucun quiz en cours ici. Lance-en un avec Xstart 👍.', message);
+    await sendReply(jid, '🧠 Aucun quiz en cours ici. Lance-en un avec Xstart 🟩.', message);
     return;
   }
+
+  // Seul l'animateur (ou le créateur du bot) peut utiliser Xrecap / Xtab
+  const canManage = ownerCommand || (session.host && sameUser(sender, session.host));
+  if (!canManage) return;
 
   const ranking = rankQuizPlayers(session);
 
@@ -5692,40 +5725,600 @@ async function handleQuizPointsCommand(jid, message, command, args, ownerCommand
       points: player.points
     }));
 
-    // Message 1 : la liste de tous ceux qui ont joué
     await sock.sendMessage(jid, {
       text: buildQuizBoard({ title: 'RÉCAPITULATIF', rows }),
       mentions: ranking.map(player => player.jid)
     });
 
-    // Récompenses du podium
-    const winners = [];
-    const rewardLines = [];
-    for (let i = 0; i < Math.min(ranking.length, QUIZ_COINS.length); i++) {
-      const coins = QUIZ_COINS[i];
-      const xp = QUIZ_XP[i];
-      const tag = `@${getNumber(ranking[i].jid)}`;
-      winners.push(ranking[i].jid);
-      try {
-        await addRewards(ranking[i].jid, coins, xp);
-        rewardLines.push(`${QUIZ_BADGES[i]} ${QUIZ_ORDINALS[i]} ${tag} : ${coins} XCoins et ${xp} XP`);
-      } catch (error) {
-        logger.warn({ error: error?.message }, 'Quiz points : récompense non attribuée.');
-        rewardLines.push(`${QUIZ_BADGES[i]} ${QUIZ_ORDINALS[i]} ${tag} : ⚠️ récompense non attribuée`);
-      }
-    }
-
     await sleep(800);
-
-    // Message 2 : récompenses + remerciement
-    await sock.sendMessage(jid, {
-      text:
-        `🎁 *RÉCOMPENSES*\n\n${rewardLines.join('\n')}\n\n` +
-        '🙏 Merci à toutes et à tous pour votre participation et pour tous vos efforts !',
-      mentions: winners
-    });
+    await sock.sendMessage(jid, { text: QUIZ_THANKS_TEXT });
 
     await deleteQuizSession(jid);
+  }
+}
+
+// ------------------------------------------------------------
+// 25 ter. SITRI~QUIZ : quiz automatique par catégories
+// ------------------------------------------------------------
+
+const AUTO_QUIZ_CATEGORIES = {
+  multivers: { label: 'Multivers', icon: '🌌', desc: 'questions sur les animés' },
+  id: { label: 'ID', icon: '🖼️', desc: 'identifie le personnage sur l’image' },
+  cg: { label: 'CG', icon: '🧠', desc: 'culture générale' }
+};
+const AUTO_QUIZ_COUNTS = [10, 20, 30];
+const AUTO_QUIZ_TIME_MS = 30000;
+const AUTO_QUIZ_SETUP_TIMEOUT_MS = 3 * 60 * 1000;
+
+const autoQuizzes = new Map();
+const quizBotTexts = new Set();
+const quizBotIds = new Set();
+
+function rememberQuizBotText(text) {
+  const t = String(text || '').trim();
+  if (!t) return;
+  quizBotTexts.add(t);
+  if (quizBotTexts.size > 300) quizBotTexts.delete(quizBotTexts.values().next().value);
+}
+
+// Envoie un message du quiz et le mémorise pour ne pas le prendre pour une réponse
+async function quizSend(jid, content, options = {}) {
+  rememberQuizBotText(content.text || content.caption);
+  const sent = await sock.sendMessage(jid, content, options);
+  const id = sent?.key?.id;
+  if (id) {
+    quizBotIds.add(id);
+    if (quizBotIds.size > 300) quizBotIds.delete(quizBotIds.values().next().value);
+  }
+  return sent;
+}
+
+function isQuizBotEcho(message, text) {
+  if (!message?.key?.fromMe) return false;
+  return quizBotIds.has(message.key.id) || quizBotTexts.has(String(text || '').trim());
+}
+
+// --- Reconnaissance des réponses (fautes légères tolérées, pas d'orthographes inventées)
+
+function normalizeLoose(value = '') {
+  return String(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function levenshtein(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function fuzzyEqual(a, b) {
+  if (a === b) return true;
+  const len = Math.max(a.length, b.length);
+  if (len <= 4) return false;
+  const maxD = len <= 7 ? 1 : 2;
+  if (Math.abs(a.length - b.length) > maxD) return false;
+  return levenshtein(a, b) <= maxD;
+}
+
+const QUIZ_STOPWORDS = new Set(['le', 'la', 'les', 'l', 'un', 'une', 'des', 'du', 'de', 'd', 'et', 'the', 'of', 'a', 'an', 'au', 'aux', 'en']);
+
+function significantTokens(value) {
+  return normalizeLoose(value)
+    .split(' ')
+    .filter(token => token && !QUIZ_STOPWORDS.has(token));
+}
+
+function isQuizAnswerCorrect(submitted, question) {
+  const sub = normalizeLoose(submitted);
+  if (!sub) return false;
+
+  const subTokens = significantTokens(submitted);
+  const candidates = [question.answer, ...(question.alts || [])]
+    .map(normalizeLoose)
+    .filter(Boolean);
+
+  for (const cand of candidates) {
+    if (sub === cand || fuzzyEqual(sub, cand)) return true;
+
+    const candTokens = significantTokens(cand);
+    if (!candTokens.length || !subTokens.length) continue;
+
+    // Tous les mots attendus sont retrouvés (ordre libre, fautes légères)
+    if (candTokens.every(ct => subTokens.some(st => fuzzyEqual(st, ct)))) return true;
+
+    // Personnage : un seul mot du nom suffit (prénom ou nom)
+    if (
+      question.type === 'image' &&
+      subTokens.length === 1 &&
+      subTokens[0].length >= 3 &&
+      candTokens.some(ct => ct.length >= 3 && fuzzyEqual(subTokens[0], ct))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// --- Génération des questions
+
+async function groqJson(prompt, maxTokens = 3500) {
+  const res = await axios.post(
+    'https://api.groq.com/openai/v1/chat/completions',
+    {
+      model: CONFIG.groqModel,
+      messages: [
+        {
+          role: 'system',
+          content: 'Tu es un générateur de quiz rigoureux. Tu réponds uniquement par un objet JSON valide.'
+        },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.6,
+      max_tokens: maxTokens,
+      response_format: { type: 'json_object' }
+    },
+    { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 45000 }
+  );
+  return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
+}
+
+async function generateTextQuizQuestions(category, total) {
+  const questions = [];
+  const usedTopics = [];
+  let attempts = 0;
+
+  while (questions.length < total && attempts < 6) {
+    attempts++;
+    const need = Math.min(10, total - questions.length);
+
+    const alts =
+      'Dans "alts", mets les autres écritures acceptables de la réponse (orthographes ou traductions réellement utilisées, sans rien inventer), sinon une liste vide.';
+    const prompt =
+      category === 'multivers'
+        ? `Génère exactement ${need} questions de quiz en français sur les animés et mangas.
+Règles :
+- une seule question par univers : chaque question porte sur un anime/manga DIFFÉRENT ;
+- difficulté moyenne : ni trop facile (pas de question que tout le monde connaît), ni très difficile ;
+- réponse courte (1 à 4 mots), précise et incontestable ;
+- ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
+- la réponse ne doit pas apparaître dans la question.
+Univers déjà utilisés (interdits) : ${usedTopics.join(', ') || 'aucun'}.
+${alts}
+Réponds en JSON : {"questions":[{"univers":"nom de l'anime","question":"...","answer":"...","alts":["..."]}]}`
+        : `Génère exactement ${need} questions de culture générale en français.
+Règles :
+- sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) ;
+- difficulté moyenne : ni trop facile, ni très difficile ;
+- réponse courte (1 à 4 mots), précise et incontestable ;
+- ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
+- la réponse ne doit pas apparaître dans la question.
+Questions déjà posées (interdites) : ${questions.map(q => q.question).slice(-30).join(' | ') || 'aucune'}.
+${alts}
+Réponds en JSON : {"questions":[{"question":"...","answer":"...","alts":["..."]}]}`;
+
+    try {
+      const data = await groqJson(prompt);
+      const list = Array.isArray(data.questions) ? data.questions : [];
+
+      for (const item of list) {
+        const question = String(item?.question || '').trim();
+        const answer = String(item?.answer || '').trim();
+        if (!question || !answer || answer.length > 60) continue;
+
+        const key = normalizeLoose(question);
+        if (questions.some(q => normalizeLoose(q.question) === key)) continue;
+
+        if (category === 'multivers' && item?.univers) {
+          const topic = normalizeLoose(item.univers);
+          if (topic && usedTopics.includes(topic)) continue;
+          if (topic) usedTopics.push(topic);
+        }
+
+        questions.push({
+          type: 'text',
+          question,
+          answer,
+          alts: Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 8) : []
+        });
+
+        if (questions.length >= total) break;
+      }
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : génération de questions échouée.');
+    }
+  }
+
+  return questions;
+}
+
+async function generateIdQuizQuestions(total) {
+  // Pages 3 à 30 du classement des personnages : connus, mais pas les plus évidents
+  const pages = new Set();
+  const wanted = Math.ceil(total / 7) + 1;
+  while (pages.size < wanted) pages.add(3 + Math.floor(Math.random() * 28));
+
+  const pool = [];
+  const seen = new Set();
+
+  for (const page of pages) {
+    try {
+      const res = await axios.get('https://api.jikan.moe/v4/top/characters', {
+        params: { page, limit: 25 },
+        timeout: 15000
+      });
+
+      for (const c of res.data?.data || []) {
+        const imageUrl = c?.images?.jpg?.image_url || c?.images?.webp?.image_url || '';
+        if (!c?.mal_id || seen.has(c.mal_id) || !imageUrl || imageUrl.includes('questionmark')) continue;
+
+        let name = String(c.name || '').trim();
+        if (name.includes(',')) {
+          const [last, first] = name.split(',').map(part => part.trim());
+          name = `${first} ${last}`.trim();
+        }
+        if (!name) continue;
+
+        seen.add(c.mal_id);
+        pool.push({
+          type: 'image',
+          imageUrl,
+          answer: name,
+          alts: Array.isArray(c.nicknames) ? c.nicknames.map(String).slice(0, 6) : []
+        });
+      }
+    } catch (error) {
+      logger.warn({ error: error?.message, page }, 'Sitri~Quiz : récupération des personnages échouée.');
+    }
+    await sleep(450);
+  }
+
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+
+  return pool.slice(0, total);
+}
+
+// --- Déroulement du quiz
+
+function clearAutoQuizTimers(session) {
+  for (const key of ['timer', 'hintTimer', 'nextTimer', 'setupTimer']) {
+    if (session[key]) {
+      clearTimeout(session[key]);
+      session[key] = null;
+    }
+  }
+}
+
+async function finishAutoQuiz(session, { stopped = false } = {}) {
+  if (autoQuizzes.get(session.chatJid) !== session) return;
+
+  autoQuizzes.delete(session.chatJid);
+  clearAutoQuizTimers(session);
+  session.stage = 'ended';
+
+  const jid = session.chatJid;
+  const ranking = rankQuizPlayers(session);
+
+  try {
+    if (stopped) await quizSend(jid, { text: '🛑 Quiz arrêté.' });
+
+    if (!ranking.length) {
+      await quizSend(jid, { text: '🏁 Quiz terminé : aucun point marqué.' });
+      return;
+    }
+
+    const rows = ranking.map(player => ({
+      label: `@${getNumber(player.jid)}`,
+      points: player.points
+    }));
+
+    await quizSend(jid, {
+      text: buildQuizBoard({ title: 'RÉCAPITULATIF', rows }),
+      mentions: ranking.map(player => player.jid)
+    });
+
+    await sleep(800);
+    await quizSend(jid, { text: QUIZ_THANKS_TEXT });
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : envoi du récapitulatif impossible.');
+  }
+}
+
+async function askNextAutoQuestion(session) {
+  if (autoQuizzes.get(session.chatJid) !== session || session.stage !== 'running') return;
+
+  const jid = session.chatJid;
+  const category = AUTO_QUIZ_CATEGORIES[session.category];
+
+  while (true) {
+    session.index += 1;
+    if (session.index >= session.questions.length) {
+      await finishAutoQuiz(session);
+      return;
+    }
+
+    const q = session.questions[session.index];
+    const number = session.index + 1;
+    const seconds = Math.round(AUTO_QUIZ_TIME_MS / 1000);
+
+    try {
+      if (q.type === 'image') {
+        await quizSend(jid, {
+          image: { url: q.imageUrl },
+          caption: `🖼️ *Question ${number}/${session.questions.length}* — Qui est ce personnage ?\n\n⏱️ ${seconds} secondes`
+        });
+      } else {
+        await quizSend(jid, {
+          text: `❓ *Question ${number}/${session.questions.length}* — ${category.icon} ${category.label}\n\n${q.question}\n\n⏱️ ${seconds} secondes`
+        });
+      }
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : question non envoyée, passage à la suivante.');
+      continue;
+    }
+
+    session.current = q;
+    session.answered = false;
+
+    if (q.type === 'image') {
+      session.hintTimer = setTimeout(async () => {
+        if (autoQuizzes.get(jid) !== session || session.answered || session.current !== q) return;
+        const first = significantTokens(q.answer)[0] || '';
+        if (first) {
+          await quizSend(jid, { text: `💡 Indice : le prénom ou le nom commence par *${first[0].toUpperCase()}*` }).catch(() => {});
+        }
+      }, Math.round(AUTO_QUIZ_TIME_MS / 2));
+    }
+
+    session.timer = setTimeout(async () => {
+      if (autoQuizzes.get(jid) !== session || session.answered || session.current !== q) return;
+      session.answered = true;
+      if (session.hintTimer) clearTimeout(session.hintTimer);
+      await quizSend(jid, { text: `⏱️ Temps écoulé ! La réponse était : *${q.answer}*` }).catch(() => {});
+      session.nextTimer = setTimeout(() => askNextAutoQuestion(session), 2500);
+    }, AUTO_QUIZ_TIME_MS);
+
+    return;
+  }
+}
+
+async function startAutoQuiz(session) {
+  const jid = session.chatJid;
+  const category = AUTO_QUIZ_CATEGORIES[session.category];
+
+  try {
+    await quizSend(jid, {
+      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n📋 ${session.total} questions\n\nPréparation des questions...`
+    });
+
+    if (!CONFIG.groqKey && session.category !== 'id') {
+      throw new Error('GROQ_API_KEY absent');
+    }
+
+    const questions =
+      session.category === 'id'
+        ? await generateIdQuizQuestions(session.total)
+        : await generateTextQuizQuestions(session.category, session.total);
+
+    if (autoQuizzes.get(jid) !== session) return;
+
+    if (questions.length < 3) {
+      autoQuizzes.delete(jid);
+      clearAutoQuizTimers(session);
+      await quizSend(jid, {
+        text: '⚠️ Impossible de préparer les questions pour le moment. Réessaie avec Xquiz dans un instant.'
+      });
+      return;
+    }
+
+    session.questions = questions;
+    session.total = questions.length;
+    session.stage = 'running';
+    session.index = -1;
+
+    await askNextAutoQuestion(session);
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : démarrage impossible.');
+    autoQuizzes.delete(jid);
+    clearAutoQuizTimers(session);
+    await quizSend(jid, { text: '⚠️ Le quiz n’a pas pu démarrer. Réessaie avec Xquiz.' }).catch(() => {});
+  }
+}
+
+function matchQuizCategory(text) {
+  const n = normalizeLoose(text);
+  if (!n) return null;
+  if (n === 'multivers' || n === 'multiverse') return 'multivers';
+  if (n === 'id' || n === 'identification') return 'id';
+  if (n === 'cg' || n === 'culture generale' || n === 'culture g') return 'cg';
+  return null;
+}
+
+// Messages normaux pendant un Sitri~Quiz : choix de catégorie / nombre, puis réponses
+async function handleAutoQuizMessage(jid, message, text, sender) {
+  const session = autoQuizzes.get(jid);
+  if (!session) return false;
+
+  if (isQuizBotEcho(message, text)) return true;
+
+  if (session.stage === 'category') {
+    if (!sameUser(sender, session.host)) return false;
+    const category = matchQuizCategory(text);
+    if (!category) return false;
+
+    session.category = category;
+    session.stage = 'count';
+
+    const sent = await quizSend(jid, {
+      text:
+        `*╭─〔 ⌬ SITRI~QUIZ 〕*\n*│*\n` +
+        `*├ ◈ ${AUTO_QUIZ_CATEGORIES[category].icon} ${AUTO_QUIZ_CATEGORIES[category].label}*\n` +
+        `*│*\n*├ ◈ Combien de questions ?*\n*├ ◈ ${AUTO_QUIZ_COUNTS.join(' • ')}*\n*│*\n` +
+        `*├ ◈ Réponds à ce message avec le nombre*\n*╰━━━━━━━━━━━━━━━━━━━━━*`
+    }, { quoted: message });
+    session.promptId = sent?.key?.id || null;
+    return true;
+  }
+
+  if (session.stage === 'count') {
+    if (!sameUser(sender, session.host)) return false;
+    const match = String(text).trim().match(/^(10|20|30)\b/);
+    if (!match) return false;
+
+    session.total = Number(match[1]);
+    session.stage = 'generating';
+    if (session.setupTimer) {
+      clearTimeout(session.setupTimer);
+      session.setupTimer = null;
+    }
+
+    startAutoQuiz(session).catch(error =>
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : erreur au démarrage.')
+    );
+    return true;
+  }
+
+  if (session.stage === 'generating') return false;
+
+  if (session.stage === 'running') {
+    const trimmed = String(text || '').trim();
+    const words = trimmed.split(/\s+/).length;
+    if (!trimmed || words > 8 || trimmed.length > 80) return false;
+
+    if (session.answered || !session.current) return true;
+    if (!isQuizAnswerCorrect(trimmed, session.current)) return true;
+
+    // Bonne réponse : le premier qui trouve gagne le point
+    session.answered = true;
+    const q = session.current;
+    clearTimeout(session.timer);
+    if (session.hintTimer) clearTimeout(session.hintTimer);
+    session.timer = null;
+    session.hintTimer = null;
+
+    session.scores[sender] = Number(session.scores[sender] || 0) + 1;
+    session.lastAt[sender] = Date.now();
+
+    await quizSend(
+      jid,
+      {
+        text: `✅ @${getNumber(sender)} a trouvé : *${q.answer}* (+1 point)`,
+        mentions: [sender]
+      },
+      { quoted: message }
+    ).catch(() => {});
+
+    session.nextTimer = setTimeout(() => askNextAutoQuestion(session), 2500);
+    return true;
+  }
+
+  return false;
+}
+
+async function handleAutoQuizCommand(jid, message, command, args, ownerCommand) {
+  const sender = getMessageSender(message);
+
+  if (command === 'quiz') {
+    if (autoQuizzes.has(jid)) {
+      await sendReply(
+        jid,
+        '🧠 Un Sitri~Quiz est déjà en cours ici. L’animateur ou le créateur peut l’arrêter avec Xend.',
+        message
+      );
+      return;
+    }
+
+    const emojiSession = await withQuizLock(jid, () => loadQuizSession(jid));
+    if (emojiSession) {
+      await sendReply(
+        jid,
+        '🧠 Un quiz avec émoji est déjà en cours ici. Termine-le avec Xtab (ou Xend) avant de lancer Xquiz.',
+        message
+      );
+      return;
+    }
+
+    const session = {
+      chatJid: jid,
+      host: sender,
+      stage: 'category',
+      category: null,
+      total: 0,
+      questions: [],
+      index: -1,
+      current: null,
+      answered: false,
+      scores: {},
+      lastAt: {},
+      timer: null,
+      hintTimer: null,
+      nextTimer: null,
+      setupTimer: null
+    };
+    autoQuizzes.set(jid, session);
+
+    session.setupTimer = setTimeout(async () => {
+      if (autoQuizzes.get(jid) !== session || !['category', 'count'].includes(session.stage)) return;
+      autoQuizzes.delete(jid);
+      await quizSend(jid, { text: '⌛ Quiz annulé : pas de réponse.' }).catch(() => {});
+    }, AUTO_QUIZ_SETUP_TIMEOUT_MS);
+
+    const lines = Object.values(AUTO_QUIZ_CATEGORIES).map(
+      c => `*├ ◈ ${c.icon} ${c.label} : ${c.desc}*`
+    );
+
+    const sent = await quizSend(
+      jid,
+      {
+        text:
+          `*╭─〔 ⌬ SITRI~QUIZ 〕*\n*│*\n${lines.join('\n')}\n*│*\n` +
+          `*├ ◈ Réponds à ce message avec la catégorie*\n*╰━━━━━━━━━━━━━━━━━━━━━*`
+      },
+      { quoted: message }
+    );
+    session.promptId = sent?.key?.id || null;
+    return;
+  }
+
+  if (command === 'end') {
+    const session = autoQuizzes.get(jid);
+    if (session) {
+      if (!(ownerCommand || sameUser(sender, session.host))) return;
+      await finishAutoQuiz(session, { stopped: true });
+      return;
+    }
+
+    const emojiSession = await withQuizLock(jid, () => loadQuizSession(jid));
+    if (emojiSession) {
+      const allowed = ownerCommand || (emojiSession.host && sameUser(sender, emojiSession.host));
+      if (!allowed) return;
+      await deleteQuizSession(jid);
+      await sendReply(jid, '🛑 Quiz arrêté (sans classement).', message);
+      return;
+    }
+
+    await sendReply(jid, '🧠 Aucun quiz en cours ici.', message);
   }
 }
 
@@ -5740,7 +6333,7 @@ const KNOWN_COMMANDS = new Set([
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models',
-  'start', 'recap', 'tab'
+  'start', 'recap', 'tab', 'end'
 ]);
 
 const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
@@ -5756,7 +6349,17 @@ async function processCommand(message) {
   const sender = getMessageSender(message);
   if (!sender) return;
 
-  if (message.key?.fromMe || isOwnerMessage(message)) {
+  const earlyParsed = parseCommand(text);
+  const earlyCommand = earlyParsed ? COMMAND_ALIASES[earlyParsed.command] || earlyParsed.command : null;
+  const isKnownEarly = Boolean(earlyCommand && KNOWN_COMMANDS.has(earlyCommand));
+
+  if (!isKnownEarly) {
+    try {
+      if (await handleAutoQuizMessage(jid, message, text, sender)) return;
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : message non traité.');
+    }
+
     try {
       if (await handleQuizEmojiReply(jid, message, text)) return;
     } catch (error) {
@@ -5904,6 +6507,11 @@ async function processCommand(message) {
   }
 
   if (isBotSleeping) {
+    return;
+  }
+
+  if (command === 'quiz' || command === 'end') {
+    await handleAutoQuizCommand(jid, message, command, args, ownerCommand);
     return;
   }
 
@@ -6394,15 +7002,14 @@ async function startBot() {
 
         const quizReaction = unwrapContent(message)?.reactionMessage;
         if (quizReaction) {
-          if (isOwnerMessage(message)) {
-            applyQuizReaction({
-              chatJid: message.key?.remoteJid,
-              targetKey: quizReaction.key,
-              emoji: quizReaction.text
-            }).catch(error =>
-              logger.warn({ error: error?.message }, 'Quiz points : réaction non traitée.')
-            );
-          }
+          applyQuizReaction({
+            chatJid: message.key?.remoteJid,
+            targetKey: quizReaction.key,
+            emoji: quizReaction.text,
+            byJid: getMessageSender(message)
+          }).catch(error =>
+            logger.warn({ error: error?.message }, 'Quiz points : réaction non traitée.')
+          );
           continue;
         }
 
@@ -6419,13 +7026,15 @@ async function startBot() {
       for (const item of events || []) {
         try {
           const reactorKey = item?.reaction?.key || {};
-          const byOwner = Boolean(reactorKey.fromMe) || isOwner(getMessageSender({ key: reactorKey }));
-          if (!byOwner) continue;
+          const byJid = getMessageSender({
+            key: { ...reactorKey, remoteJid: reactorKey.remoteJid || item?.key?.remoteJid }
+          });
 
           await applyQuizReaction({
             chatJid: item?.key?.remoteJid,
             targetKey: item?.key,
-            emoji: item?.reaction?.text
+            emoji: item?.reaction?.text,
+            byJid
           });
         } catch (error) {
           logger.warn({ error: error?.message }, 'Quiz points : réaction non traitée.');

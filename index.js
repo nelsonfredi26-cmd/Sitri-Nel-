@@ -4641,8 +4641,23 @@ function buildYoutubeCookiesFile() {
 
   if (!raw.includes('\n') && raw.includes('\\n')) raw = raw.replace(/\\n/g, '\n');
 
-  if (raw.startsWith('# Netscape') || raw.includes('\t')) {
-    return raw.endsWith('\n') ? raw : `${raw}\n`;
+  if (raw.startsWith('# Netscape') || raw.startsWith('# HTTP') || raw.includes('\t')) {
+    // « Export all » : on ne garde que les cookies YouTube / Google, les autres sites sont ignorés
+    const keep = ['# Netscape HTTP Cookie File'];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      const httpOnly = trimmed.startsWith('#HttpOnly_');
+      if (trimmed.startsWith('#') && !httpOnly) continue;
+
+      const fields = (httpOnly ? trimmed.slice('#HttpOnly_'.length) : trimmed).split('\t');
+      const domain = String(fields[0] || '').replace(/^\./, '').toLowerCase();
+      if (/(^|\.)(youtube\.com|google\.com|googlevideo\.com|youtube-nocookie\.com)$/.test(domain)) {
+        keep.push(trimmed);
+      }
+    }
+    return keep.length > 1 ? `${keep.join('\n')}\n` : '';
   }
 
   const lines = ['# Netscape HTTP Cookie File'];
@@ -4702,28 +4717,32 @@ async function downloadAudioWithYtdlp(videoUrl) {
     if (cookiesContent) {
       cookiesPath = path.join(dir, `${base}_cookies.txt`);
       fs.writeFileSync(cookiesPath, cookiesContent);
-      args.push('--cookies', cookiesPath);
     }
 
     // Plusieurs profils d'appareils : si YouTube ne propose aucun format à l'un, on essaie l'autre
     // Avec des cookies, les profils android/ios sont ignorés par yt-dlp : on utilise les clients web.
     // Node sert à résoudre les protections JavaScript de YouTube (sinon aucun format audio n'apparaît).
+    // Si les cookies sont périmés (« The page needs to be reloaded »), on retente sans cookies.
     const jsArgs = ['--js-runtimes', 'node'];
-    const clientProfiles = cookiesPath
-      ? [
-          [...jsArgs],
-          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
-        ]
-      : [
-          ['--extractor-args', 'youtube:player_client=android_vr,ios,android'],
-          [...jsArgs],
-          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
-        ];
+    const cookieArgs = cookiesPath ? ['--cookies', cookiesPath] : [];
+    const clientProfiles = [
+      ...(cookiesPath
+        ? [
+            [...jsArgs, ...cookieArgs],
+            [...jsArgs, ...cookieArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
+          ]
+        : []),
+      ['--extractor-args', 'youtube:player_client=android_vr,ios,android'],
+      [...jsArgs],
+      [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
+    ];
+    const ytdlpDeadline = Date.now() + 75000;
 
     let lastError = null;
     let succeeded = false;
 
     for (const profile of clientProfiles) {
+      if (Date.now() > ytdlpDeadline) break;
       try {
         await runBinary(bin, [...args, ...profile], { timeout: 45000 });
         succeeded = true;

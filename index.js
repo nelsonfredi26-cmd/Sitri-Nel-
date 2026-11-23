@@ -4577,6 +4577,59 @@ async function resolveStreamUrl(videoUrl, mode = 'audio') {
   return null;
 }
 
+let lastYtdlpFailure = '';
+
+// Binaire autonome de yt-dlp (sans Python), téléchargé au besoin comme dans Erwin-Bot
+const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
+const YTDLP_BIN = path.join(os.tmpdir(), 'sitri-nel-ytdlp', 'yt-dlp');
+let ytdlpReadyPromise = null;
+
+async function runBinary(file, args, options = {}) {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  return promisify(execFile)(file, args, { maxBuffer: 20 * 1024 * 1024, ...options });
+}
+
+function ensureYtdlpBinary() {
+  if (ytdlpReadyPromise) return ytdlpReadyPromise;
+
+  ytdlpReadyPromise = (async () => {
+    try {
+      await runBinary(YTDLP_BIN, ['--version'], { timeout: 20000 });
+      return YTDLP_BIN;
+    } catch {
+      // absent ou inutilisable : on le télécharge
+    }
+
+    fs.mkdirSync(path.dirname(YTDLP_BIN), { recursive: true });
+    logger.info('yt-dlp : téléchargement du binaire...');
+
+    const res = await axios.get(YTDLP_URL, {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+      maxRedirects: 5
+    });
+    fs.writeFileSync(YTDLP_BIN, Buffer.from(res.data), { mode: 0o755 });
+    fs.chmodSync(YTDLP_BIN, 0o755);
+
+    const { stdout } = await runBinary(YTDLP_BIN, ['--version'], { timeout: 20000 });
+    logger.info({ version: String(stdout).trim() }, 'yt-dlp : binaire prêt.');
+    return YTDLP_BIN;
+  })().catch(error => {
+    ytdlpReadyPromise = null;
+    throw error;
+  });
+
+  return ytdlpReadyPromise;
+}
+
+// Préparation en arrière-plan au démarrage
+setTimeout(() => {
+  ensureYtdlpBinary().catch(error =>
+    logger.warn({ error: error?.message }, 'yt-dlp : préparation du binaire impossible.')
+  );
+}, 8000);
+
 // Cookies YouTube : fichier cookies.txt en base64 (YOUTUBE_COOKIES_BASE64),
 // ou texte collé tel quel (YOUTUBE_COOKIES) : format Netscape ou "nom=valeur; nom2=valeur2"
 function buildYoutubeCookiesFile() {
@@ -4604,13 +4657,15 @@ function buildYoutubeCookiesFile() {
   return lines.length > 1 ? `${lines.join('\n')}\n` : '';
 }
 
-// Téléchargement audio avec yt-dlp (comme song.js). Renvoie null si indisponible.
+// Téléchargement audio avec yt-dlp (mêmes réglages anti-blocage qu'Erwin-Bot)
 async function downloadAudioWithYtdlp(videoUrl) {
-  let ytdlp;
+  lastYtdlpFailure = '';
+
+  let bin;
   try {
-    const mod = await import('yt-dlp-exec');
-    ytdlp = mod.default || mod;
-  } catch {
+    bin = await ensureYtdlpBinary();
+  } catch (error) {
+    lastYtdlpFailure = `Binaire yt-dlp indisponible : ${String(error?.message || error).slice(0, 200)}`;
     return null;
   }
 
@@ -4621,25 +4676,41 @@ async function downloadAudioWithYtdlp(videoUrl) {
   let cookiesPath = null;
 
   try {
-    const options = {
-      output: path.join(dir, `${base}.%(ext)s`),
-      format: 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio',
-      noPlaylist: true,
-      noWarnings: true,
-      maxFilesize: `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`
-    };
+    const args = [
+      videoUrl,
+      '-o', path.join(dir, `${base}.%(ext)s`),
+      '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
+      '--no-playlist',
+      '--no-warnings',
+      '--force-ipv4',
+      '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`,
+      '--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android',
+      '--add-header', 'referer:https://www.youtube.com/'
+    ];
+
+    try {
+      const ffmpegStatic = await import('ffmpeg-static');
+      if (ffmpegStatic.default) {
+        args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0', '--ffmpeg-location', ffmpegStatic.default);
+      }
+    } catch {
+      // sans ffmpeg : on garde le format d'origine
+    }
 
     const cookiesContent = buildYoutubeCookiesFile();
     if (cookiesContent) {
       cookiesPath = path.join(dir, `${base}_cookies.txt`);
       fs.writeFileSync(cookiesPath, cookiesContent);
-      options.cookies = cookiesPath;
+      args.push('--cookies', cookiesPath);
     }
 
-    await ytdlp(videoUrl, options, { timeout: 120000 });
+    await runBinary(bin, args, { timeout: 120000 });
 
     const file = fs.readdirSync(dir).find(n => n.startsWith(base) && !n.endsWith('_cookies.txt'));
-    if (!file) return null;
+    if (!file) {
+      lastYtdlpFailure = 'Aucun fichier audio produit (fichier trop gros ou format indisponible).';
+      return null;
+    }
 
     const ext = path.extname(file).slice(1).toLowerCase();
     const mimeByExt = {
@@ -4651,14 +4722,24 @@ async function downloadAudioWithYtdlp(videoUrl) {
       opus: 'audio/ogg; codecs=opus'
     };
     const mimetype = mimeByExt[ext];
-    if (!mimetype) return null;
+    if (!mimetype) {
+      lastYtdlpFailure = `Format audio non compatible avec WhatsApp (.${ext}).`;
+      return null;
+    }
 
     const buffer = fs.readFileSync(path.join(dir, file));
-    if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) return null;
+    if (!buffer.length || buffer.length > CONFIG.maxMediaBytes) {
+      lastYtdlpFailure = 'Fichier audio vide ou trop gros.';
+      return null;
+    }
 
     return { buffer, mimetype };
   } catch (error) {
-    logger.warn({ error: error?.message }, 'yt-dlp : téléchargement audio impossible.');
+    const detail = String(error?.stderr || error?.message || '');
+    const errLine =
+      detail.split('\n').reverse().find(l => l.includes('ERROR')) || detail.split('\n').filter(Boolean).pop() || detail;
+    lastYtdlpFailure = errLine.trim().slice(0, 300);
+    logger.warn({ error: lastYtdlpFailure }, 'yt-dlp : téléchargement audio impossible.');
     return null;
   } finally {
     try {
@@ -4778,7 +4859,11 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
     `${isAudio ? '🎵 𝗔𝗨𝗗𝗜𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́' : '🎬 𝗩𝗜𝗗𝗘́𝗢 𝗧𝗥𝗢𝗨𝗩𝗘́𝗘'}\n\n` +
       `📌 Titre : ${top.title}\n` +
       `🔗 Lien : ${top.url}\n\n` +
-      `Le téléchargement direct du fichier n’a pas abouti côté serveur, utilise le lien ci-dessus.\n\n${SIGNATURE}`,
+      `Le téléchargement direct du fichier n’a pas abouti côté serveur, utilise le lien ci-dessus.` +
+      (isAudio && lastYtdlpFailure && cleanEnv(process.env.XPLAY_DEBUG) === '1' && isOwnerMessage(message)
+        ? `\n\n🛠️ Diagnostic : ${lastYtdlpFailure}`
+        : '') +
+      `\n\n${SIGNATURE}`,
     message
   );
   return true;

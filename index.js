@@ -4578,6 +4578,7 @@ async function resolveStreamUrl(videoUrl, mode = 'audio') {
 }
 
 let lastYtdlpFailure = '';
+let lastYtdlpDetails = '';
 
 // Binaire autonome de yt-dlp (sans Python), téléchargé au besoin comme dans Erwin-Bot
 const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
@@ -4675,6 +4676,7 @@ function buildYoutubeCookiesFile() {
 // Téléchargement audio avec yt-dlp (mêmes réglages anti-blocage qu'Erwin-Bot)
 async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
   lastYtdlpFailure = '';
+  lastYtdlpDetails = '';
 
   let bin;
   try {
@@ -4694,67 +4696,52 @@ async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
     const args = [
       videoUrl,
       '-o', path.join(dir, `${base}.%(ext)s`),
-      '-f',
-      soundcloud
-        ? 'bestaudio[protocol^=http][ext=mp3]/bestaudio[ext=mp3]/bestaudio'
-        : 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
       '--no-playlist',
       '--no-warnings',
       '--force-ipv4',
-      '--socket-timeout', '15',
-      '--retries', '2',
-      '--extractor-retries', '1',
       '--max-filesize', `${Math.floor(CONFIG.maxMediaBytes / (1024 * 1024))}M`
     ];
-
-    if (soundcloud) {
-      // On évite les extraits de 30 secondes et les pistes trop longues
-      args.push('--match-filter', 'duration>60 & duration<900');
-    } else {
-      args.push('--add-header', 'referer:https://www.youtube.com/');
-    }
 
     let ffmpegPath = null;
     try {
       const ffmpegStatic = await import('ffmpeg-static');
       ffmpegPath = ffmpegStatic.default || null;
     } catch {
-      // sans ffmpeg : pas de conversion de secours
+      // sans ffmpeg : pas de conversion
     }
     if (ffmpegPath) args.push('--ffmpeg-location', ffmpegPath);
 
-    const cookiesContent = soundcloud ? '' : buildYoutubeCookiesFile();
-    if (cookiesContent) {
-      cookiesPath = path.join(dir, `${base}_cookies.txt`);
-      fs.writeFileSync(cookiesPath, cookiesContent);
+    if (soundcloud) {
+      // SoundCloud : on évite les extraits de 30 secondes et les pistes trop longues
+      args.push(
+        '-f', 'bestaudio[protocol^=http][ext=mp3]/bestaudio[ext=mp3]/bestaudio',
+        '--socket-timeout', '15',
+        '--retries', '2',
+        '--match-filter', 'duration>60 & duration<900'
+      );
+    } else {
+      // YouTube : exactement les réglages d'Erwin-Bot, sans cookies
+      args.push(
+        '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+        '--no-check-certificate',
+        '--add-header',
+        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        '--add-header', 'referer:https://www.youtube.com/',
+        '--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'
+      );
+      if (ffmpegPath) args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0');
     }
 
-    // Plusieurs profils d'appareils : si YouTube ne propose aucun format à l'un, on essaie l'autre
-    // Avec des cookies, les profils android/ios sont ignorés par yt-dlp : on utilise les clients web.
-    // Node sert à résoudre les protections JavaScript de YouTube (sinon aucun format audio n'apparaît).
-    // Si les cookies sont périmés (« The page needs to be reloaded »), on retente sans cookies.
-    const jsArgs = ['--js-runtimes', 'node'];
-    const cookieArgs = cookiesPath ? ['--cookies', cookiesPath] : [];
-    const clientProfiles = soundcloud
-      ? [[]]
-      : [
-          // Profil d'origine, sans cookies : c'est celui qui marchait au départ
-          ['--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'],
-          ...(cookiesPath
-            ? [
-                [...jsArgs, ...cookieArgs],
-                [...jsArgs, ...cookieArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
-              ]
-            : []),
-          [...jsArgs],
-          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,mweb,web_safari']
-        ];
-    const ytdlpDeadline = Date.now() + 75000;
+    const clientProfiles = [[]];
+    const ytdlpDeadline = Date.now() + 60000;
 
     let lastError = null;
     let succeeded = false;
+    const profileErrors = [];
+    let profileIndex = 0;
 
     for (const profile of clientProfiles) {
+      profileIndex += 1;
       if (Date.now() > ytdlpDeadline) break;
       try {
         await runBinary(bin, [...args, ...profile], { timeout: 45000 });
@@ -4762,6 +4749,16 @@ async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
         break;
       } catch (error) {
         lastError = error;
+
+        const detail = String(error?.stderr || error?.message || '');
+        const line =
+          detail.split('\n').reverse().find(l => l.includes('ERROR')) ||
+          detail.split('\n').filter(Boolean).pop() ||
+          detail;
+        profileErrors.push(
+          `P${profileIndex}: ${error?.killed ? 'délai dépassé' : line.replace(/^ERROR:\s*/, '').slice(0, 110)}`
+        );
+        lastYtdlpDetails = profileErrors.join(' ; ');
         try {
           for (const f of fs.readdirSync(dir)) {
             if (f.startsWith(base) && !f.endsWith('_cookies.txt')) fs.unlinkSync(path.join(dir, f));
@@ -4870,9 +4867,11 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
   if (isAudio) {
     // On essaie les 3 premiers résultats : certaines vidéos n'ont aucun format audio exploitable
     const playStartedAt = Date.now();
+    const ytDetails = [];
     for (const candidate of results.slice(0, 3)) {
       if (!candidate?.url) continue;
-      if (Date.now() - playStartedAt > 70000) break;
+      // On n'essaie une autre vidéo que si l'échec précédent a été rapide
+      if (Date.now() - playStartedAt > 25000) break;
 
       const audio = await downloadAudioWithYtdlp(candidate.url);
       if (audio) {
@@ -4885,14 +4884,20 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
         return true;
       }
 
+      if (lastYtdlpDetails) ytDetails.push(lastYtdlpDetails);
+
       // Si YouTube bloque tout le serveur ou que yt-dlp est absent, inutile d'insister
       if (/Sign in|bot|reloaded|Binaire yt-dlp indisponible/i.test(lastYtdlpFailure)) break;
     }
 
     // Plan B : SoundCloud (n'est pas bloqué comme YouTube sur les serveurs)
-    const youtubeFailure = lastYtdlpFailure;
+    const youtubeFailure = ytDetails.join(' || ') || lastYtdlpFailure;
+    const debugOwner = cleanEnv(process.env.XPLAY_DEBUG) === '1' && isOwnerMessage(message);
     const sc = await downloadAudioWithYtdlp(`scsearch1:${query}`, { soundcloud: true });
     if (sc) {
+      if (debugOwner) {
+        await sendReply(jid, `🛠️ YouTube a échoué : ${youtubeFailure}`.slice(0, 700), message);
+      }
       await sock.sendMessage(
         jid,
         { audio: sc.buffer, mimetype: sc.mimetype, ptt: false },
@@ -4901,7 +4906,7 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
       await sendReply(jid, `🎶 ${query}\n(source : SoundCloud)\n\n${SIGNATURE}`, message);
       return true;
     }
-    lastYtdlpFailure = `YouTube : ${youtubeFailure} | SoundCloud : ${lastYtdlpFailure}`.slice(0, 400);
+    lastYtdlpFailure = `YouTube : ${youtubeFailure} | SoundCloud : ${lastYtdlpFailure}`.slice(0, 700);
   }
 
   const resolved = await resolveStreamUrl(top.url, isAudio ? 'audio' : 'video');
@@ -5860,7 +5865,7 @@ const AUTO_QUIZ_CATEGORIES = {
   cg: { label: 'CG', icon: '🧠', desc: 'culture générale' }
 };
 const AUTO_QUIZ_COUNTS = [10, 20, 30];
-const AUTO_QUIZ_TIME_MS = 13000;
+const AUTO_QUIZ_TIME_MS = 15000;
 const AUTO_QUIZ_SETUP_TIMEOUT_MS = 3 * 60 * 1000;
 
 const autoQuizzes = new Map();
@@ -5993,18 +5998,30 @@ async function groqJson(prompt, maxTokens = 3500, temperature = 0.6) {
   return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
 }
 
-// Juge une réponse approximative (explications, réponses courtes) : on accepte l'idée essentielle
+// Juge une réponse : traductions (VO, VF, VOSTFR, anglais, romaji), fautes, formulations différentes
 async function judgeQuizAnswer(question, playerText) {
   try {
-    const keypoints = Array.isArray(question.keypoints) && question.keypoints.length
-      ? `Idées essentielles : ${question.keypoints.join(' ; ')}\n`
-      : '';
+    const extra = [];
+    if (question.univers) extra.push(`Œuvre : ${question.univers}`);
+    if (Array.isArray(question.alts) && question.alts.length) {
+      extra.push(`Autres réponses déjà acceptées : ${question.alts.join(' ; ')}`);
+    }
+    if (Array.isArray(question.keypoints) && question.keypoints.length) {
+      extra.push(`Idées essentielles : ${question.keypoints.join(' ; ')}`);
+    }
+
     const data = await groqJson(
-      `Tu es juge d'un quiz, bienveillant mais rigoureux.
+      `Tu es juge d'un quiz entre fans, attentif mais rigoureux. Lis bien la réponse du joueur.
 Question : ${question.question}
 Réponse attendue : ${question.answer}
-${keypoints}Réponse du joueur : ${playerText}
-Le joueur a-t-il donné l'idée essentielle de la réponse attendue ? Accepte les formulations différentes, approximatives, plus courtes ou avec des fautes, tant que le sens principal est correct. Refuse si c'est hors sujet, faux, contradictoire ou trop vague.
+${extra.length ? `${extra.join('\n')}\n` : ''}Réponse du joueur : ${playerText}
+
+Règles :
+- Accepte la même réponse écrite autrement : fautes d'orthographe, nom officiel ou traduction en VO, VF, VOSTFR, anglais ou romaji (ex. « Vide infini », « Vide incommensurable » et « Infinite Void » désignent la même technique), abréviation courante, formulation plus courte.
+- Personnage d'une œuvre : accepte le prénom ou le nom d'usage s'il identifie ce personnage de façon unique ; REFUSE un nom de famille seul partagé par plusieurs personnages connus (ex. « Uchiha » pour Sasuke).
+- Personne réelle : accepte le nom de famille ou le nom complet, REFUSE le prénom seul.
+- Question d'explication : accepte si l'idée essentielle est présente, même avec d'autres mots ou de façon approximative.
+- REFUSE si c'est hors sujet, faux, trop vague, ou si cela désigne autre chose.
 Réponds en JSON : {"correct": true} ou {"correct": false}`,
       60,
       0
@@ -6016,36 +6033,82 @@ Réponds en JSON : {"correct": true} ou {"correct": false}`,
   }
 }
 
+// Relecture : on écarte les questions douteuses, ambiguës ou factuellement fausses
+async function verifyQuizQuestions(list) {
+  if (!list.length) return list;
+
+  try {
+    const items = list
+      .map((q, i) => `${i + 1}. [${q.univers || 'culture générale'}] Question : ${q.question} | Réponse : ${q.answer}`)
+      .join('\n');
+
+    const data = await groqJson(
+      `Tu es relecteur exigeant d'un quiz. Pour chaque ligne, vérifie :
+1) la réponse est exacte selon l'œuvre originale ou les faits établis (qui fait quoi, quel personnage, quelle organisation, quelle technique) ;
+2) la question est claire, non ambiguë, compréhensible seule et correctement formulée en français ;
+3) la question n'est pas trop banale (ni connue de tout le monde).
+Au moindre doute sur l'exactitude, mets "ok": false.
+
+${items}
+
+Réponds en JSON : {"items":[{"n":1,"ok":true}]}`,
+      1500,
+      0
+    );
+
+    const verdict = new Map();
+    for (const item of data?.items || []) verdict.set(Number(item?.n), item?.ok === true);
+    if (!verdict.size) return list;
+
+    return list.filter((_, i) => verdict.get(i + 1) !== false);
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture des questions impossible.');
+    return list;
+  }
+}
+
 async function generateTextQuizQuestions(category, total) {
   const questions = [];
   const usedTopics = [];
   let attempts = 0;
 
-  while (questions.length < total && attempts < 6) {
+  while (questions.length < total && attempts < 7) {
     attempts++;
-    const need = Math.min(10, total - questions.length);
+    // Petite marge : la relecture peut écarter quelques questions
+    const need = Math.min(12, total - questions.length + 2);
 
     const prompt =
       category === 'multivers'
-        ? `Génère exactement ${need} questions de quiz en français sur des animés et mangas, pour des fans.
-Règles :
+        ? `Tu animes un quiz entre fans d'animés et de mangas sur WhatsApp. Génère exactement ${need} questions en français.
+
+Ton et formulation :
+- écris comme un fan qui lance une question à ses potes : naturel, décontracté, phrases simples et fluides (pas de style scolaire, pas de ton robotique) ;
+- utilise la terminologie française courante de la VF/VOSTFR (ex. « souffle » et non « respiration » pour Demon Slayer) ;
+- la question doit être complète, claire et compréhensible seule, sans sous-entendu ni référence floue ; cite les noms et la situation utiles.
+
+Niveau :
+- niveau fan : jamais de question que quelqu'un ayant vu quelques épisodes saurait (pas de « qui est le héros de… » ni de pouvoir principal évident), mais rien d'impossible ;
+- préfère des détails d'arcs précis, des noms de techniques, des causes, des conséquences, des personnages secondaires ;
+- environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), par exemple « Pourquoi Kenjaku a-t-il organisé le jeu meurtrier, selon Tengen ? », l'autre moitié de questions factuelles précises.
+
+Fiabilité (très important) :
 - UNE seule question par univers : chaque question porte sur un anime/manga DIFFÉRENT ;
-- difficulté moyenne à un peu difficile, mais toujours compréhensible : la question doit être complète, claire et compréhensible seule (cite les noms des personnages et la situation), sans sous-entendu ni référence floue ;
-- mélange : environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), par exemple « Pourquoi Kenjaku a-t-il organisé le jeu meurtrier, selon Tengen ? », et l'autre moitié de questions factuelles précises (qui, quel, comment s'appelle) ;
-- ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, choisis un autre sujet ; n'invente rien ;
+- ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, change de sujet ; vérifie bien QUI fait QUOI (ne confonds jamais les personnages, leurs rôles, leurs organisations) ;
 - la réponse ne doit pas apparaître dans la question.
+
 Champ "type" :
 - "nom" : la réponse est un nom propre (personnage, technique, lieu...) ;
 - "court" : réponse de 1 à 4 mots qui n'est pas un nom propre ;
 - "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
-Champ "alts" :
-- personnage : mets les appellations acceptables : prénom seul, surnoms ; le nom de famille seul UNIQUEMENT s'il ne désigne qu'un seul personnage important de l'œuvre (ex : "Gojo" pour Satoru Gojo est accepté ; "Uchiha" pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
-- autres réponses : variantes ou traductions réellement utilisées ;
+Champ "alts" : toutes les façons acceptables de répondre :
+- traductions officielles ou courantes en VO, VF, VOSTFR, anglais et romaji (ex. pour une technique : « Vide infini », « Vide incommensurable », « Infinite Void », « Muryō Kūsho ») ;
+- personnage : prénom seul, surnoms ; le nom de famille seul UNIQUEMENT s'il ne désigne qu'un seul personnage important de l'œuvre (ex : « Gojo » pour Satoru Gojo est accepté ; « Uchiha » pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
 - ne liste pas les simples fautes d'orthographe (elles sont déjà tolérées).
 Univers déjà utilisés (interdits) : ${usedTopics.join(', ') || 'aucun'}.
 Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
-        : `Génère exactement ${need} questions de culture générale en français.
+        : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
 Règles :
+- écris naturellement, comme un humain qui pose la question à l'oral (simple, fluide, décontracté) ;
 - sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) ;
 - difficulté moyenne, question complète, claire et compréhensible seule ;
 - réponse courte (1 à 4 mots), précise et incontestable ;
@@ -6053,13 +6116,14 @@ Règles :
 - la réponse ne doit pas apparaître dans la question.
 Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
 Champ "person" : true si la réponse est le nom d'une personne.
-Champ "alts" : si la réponse est une personne, mets le nom de famille seul (avec sa particule usuelle, ex : "de Vinci" et "Vinci"), JAMAIS le prénom seul ; sinon les variantes ou traductions réellement utilisées. Ne liste pas les simples fautes d'orthographe.
+Champ "alts" : si la réponse est une personne, mets le nom de famille seul (avec sa particule usuelle, ex : "de Vinci" et "Vinci"), JAMAIS le prénom seul ; sinon les variantes, traductions ou abréviations réellement utilisées. Ne liste pas les simples fautes d'orthographe.
 Questions déjà posées (interdites) : ${questions.map(q => q.question).slice(-30).join(' | ') || 'aucune'}.
 Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"...","answer":"...","alts":["..."]}]}`;
 
     try {
       const data = await groqJson(prompt);
       const list = Array.isArray(data.questions) ? data.questions : [];
+      const batch = [];
 
       for (const item of list) {
         const question = String(item?.question || '').trim();
@@ -6068,6 +6132,7 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"
 
         const key = normalizeLoose(question);
         if (questions.some(q => normalizeLoose(q.question) === key)) continue;
+        if (batch.some(q => normalizeLoose(q.question) === key)) continue;
 
         let univers = '';
         if (category === 'multivers') {
@@ -6078,10 +6143,11 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"
         }
 
         const answerType = ['nom', 'court', 'explication'].includes(item?.type) ? item.type : 'court';
-        let alts = Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 10) : [];
+        let alts = Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 12) : [];
+        const person = category === 'cg' && item?.person === true;
 
         // Culture générale : nom de famille accepté, prénom seul refusé
-        if (category === 'cg' && item?.person === true) {
+        if (person) {
           const tokens = significantTokens(answer);
           if (tokens.length >= 2) {
             alts = alts.filter(a => normalizeLoose(a) !== tokens[0]);
@@ -6090,17 +6156,22 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"
           }
         }
 
-        questions.push({
+        batch.push({
           type: 'text',
           answerType,
+          person,
           univers,
           question,
           answer,
           alts,
           keypoints: Array.isArray(item?.keypoints) ? item.keypoints.map(String).slice(0, 4) : []
         });
+      }
 
+      const verified = await verifyQuizQuestions(batch);
+      for (const q of verified) {
         if (questions.length >= total) break;
+        questions.push(q);
       }
     } catch (error) {
       lastQuizGenerationError = `Groq : ${String(error?.response?.data?.error?.message || error?.message || error).slice(0, 150)}`;
@@ -6492,15 +6563,29 @@ async function handleAutoQuizMessage(jid, message, text, sender) {
       return true;
     }
 
-    // Réponses approximatives (explications, réponses courtes) : jugées sur le sens
-    if (q.type === 'text' && q.answerType !== 'nom' && (words >= 2 || trimmed.length >= 6) && (session.judging || 0) < 3) {
-      session.judging = (session.judging || 0) + 1;
-      judgeQuizAnswer(q, trimmed)
-        .then(ok => (ok ? awardAutoQuizPoint(session, q, sender, message) : false))
-        .catch(() => {})
-        .finally(() => {
-          session.judging = Math.max(0, (session.judging || 1) - 1);
-        });
+    // Réponses non reconnues d'emblée (traductions VO/VF/VOSTFR, formulations différentes) :
+    // l'arbitre IA lit et analyse chaque réponse
+    if (q.type === 'text' && trimmed.length >= 3 && (session.judging || 0) < 4) {
+      if (session.judgeCacheFor !== q) {
+        session.judgeCacheFor = q;
+        session.judgeCache = new Set();
+        session.judgingBy = new Set();
+      }
+
+      const cacheKey = normalizeLoose(trimmed);
+      if (cacheKey && !session.judgeCache.has(cacheKey) && !session.judgingBy.has(sender)) {
+        session.judgeCache.add(cacheKey);
+        session.judgingBy.add(sender);
+        session.judging = (session.judging || 0) + 1;
+
+        judgeQuizAnswer(q, trimmed)
+          .then(ok => (ok ? awardAutoQuizPoint(session, q, sender, message) : false))
+          .catch(() => {})
+          .finally(() => {
+            session.judging = Math.max(0, (session.judging || 1) - 1);
+            session.judgingBy?.delete(sender);
+          });
+      }
     }
 
     return true;

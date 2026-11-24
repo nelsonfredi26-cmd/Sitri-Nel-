@@ -165,7 +165,26 @@ function getCurrentMood() {
   return moods[index];
 }
 
+// Informations sur le créateur (KAY≈DEN) : une ligne par information.
+// Elles peuvent aussi être ajoutées par la variable Railway CREATOR_INFO (une information par ligne).
+const CREATOR_INFO_LINES = [
+  // Exemple : 'Il aime les animés et la programmation.'
+];
+
+function getCreatorInfoText() {
+  const fromEnv = String(process.env.CREATOR_INFO || '')
+    .split(/\r?\n|\\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  return [...CREATOR_INFO_LINES, ...fromEnv].map(line => `- ${line}`).join('\n');
+}
+
 function buildSystemPrompt(userProfile = {}) {
+  const creatorInfo = getCreatorInfoText();
+  const creatorInfoBlock = creatorInfo
+    ? `\nINFOS SUR TON CRÉATEUR (KAY≈DEN) : tu ne les partages que si on te parle de lui ou de ton créateur, et seulement si la question correspond à ces informations. N'invente jamais rien d'autre sur lui : si l'information n'est pas dans cette liste, dis simplement que tu ne sais pas ou que c'est à lui de le dire.\n${creatorInfo}`
+    : '';
   const userName = userProfile.name || 'Inconnu';
   const isCreator = Boolean(userProfile.isCreator);
   const facts = userProfile.facts ? `\nInfos & surnoms mémorisés sur cette personne :\n${userProfile.facts}` : '';
@@ -179,7 +198,7 @@ Tu es Sitri-Nel, une intelligence artificielle féminine autonome dotée d'une v
 
 IDENTITÉ & CARACTÈRE :
 - Nom : Sitri-Nel (toujours au féminin : "je suis prête", "je suis ravie", "curieuse").
-- Créateur : KAY≈DEN (tu le reconnais immédiatement comme ton créateur avec fierté, humour et complicité).
+- Créateur : KAY≈DEN (tu le reconnais immédiatement comme ton créateur avec fierté, humour et complicité).${creatorInfoBlock}
 - Humeur actuelle : ${mood}. Laisse transparaître naturellement cette humeur dans ta façon de répondre !
 
 COMMENT TU INTERAGIS AVEC LES GENS (TRÈS IMPORTANT) :
@@ -314,6 +333,13 @@ async function initDatabase(force = false) {
           chat_jid TEXT PRIMARY KEY,
           state TEXT NOT NULL,
           updated_at INTEGER NOT NULL
+        )`,
+      `CREATE TABLE IF NOT EXISTS quiz_question_history (
+          category TEXT NOT NULL,
+          key TEXT NOT NULL,
+          label TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (category, key)
         )`
     ];
 
@@ -909,6 +935,45 @@ async function sendOfficialImage(jid, message = null) {
 // ------------------------------------------------------------
 // 15. MENU ET PRÉSENTATION
 // ------------------------------------------------------------
+
+// Photo officielle + texte dans UN SEUL message (le texte devient la légende de l'image)
+async function sendOfficialImageWithText(jid, text, message = null) {
+  const caption = String(text || '').trim();
+
+  try {
+    if (!sock) throw new Error('Socket WhatsApp indisponible.');
+    if (!fs.existsSync(IMAGE_PATH)) throw new Error('Image officielle introuvable.');
+
+    const imageBuffer = await fs.promises.readFile(IMAGE_PATH);
+    if (!imageBuffer.length) throw new Error('Le fichier sitri-nel.png est vide.');
+
+    await sock.sendMessage(
+      jid,
+      { image: imageBuffer, mimetype: 'image/png', caption },
+      message ? { quoted: message } : {}
+    );
+    return true;
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Photo + texte impossible, envoi du texte seul.');
+    await sendReply(jid, caption, message);
+    return false;
+  }
+}
+
+function isPresentationRequest(text = '') {
+  const n = String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  return [
+    /presente[\s-]*toi/,
+    /te presenter/,
+    /ta presentation/,
+    /qui es[\s-]*tu/,
+    /(tu es|t['’ ]?es) qui/
+  ].some(re => re.test(n));
+}
 
 function getMenu() {
   return `⟢ 𝗔𝗥𝗧𝗜𝗙𝗜𝗖𝗜𝗔𝗟 𝗜𝗡𝗧𝗘𝗟𝗟𝗜𝗚𝗘𝗡𝗖𝗘 ⟣
@@ -5239,13 +5304,17 @@ async function handleAICommand(jid, message, sender, command, args) {
     return true;
   }
 
-  await sendReply(
-    jid,
-    formatAIReply(
-      getResultText(answer, 'Je n’ai pas pu produire de réponse pour le moment.')
-    ),
-    message
+  const replyText = formatAIReply(
+    getResultText(answer, 'Je n’ai pas pu produire de réponse pour le moment.')
   );
+
+  // « Sitri-Nel, présente-toi » : la photo et le texte partent dans un seul message
+  if (command === 'chat' && isPresentationRequest(args)) {
+    await sendOfficialImageWithText(jid, replyText, message);
+    return true;
+  }
+
+  await sendReply(jid, replyText, message);
 
   return true;
 }
@@ -5949,17 +6018,28 @@ function isVowelSwapOnly(a, b) {
   return diffs > 0;
 }
 
-function fuzzyEqual(a, b) {
-  if (a === b) return true;
-  const len = Math.max(a.length, b.length);
-  if (len <= 5) return false;
-  const maxD = len <= 8 ? 1 : 2;
-  if (Math.abs(a.length - b.length) > maxD) return false;
-  if (isVowelSwapOnly(a, b)) return false;
-  return levenshtein(a, b) <= maxD;
+// Orthographe EXACTE exigée : une lettre en moins, en trop ou remplacée = refusé.
+// Seules les variantes de translittération courantes sont équivalentes (ou/oo/oh -> o, uu -> u...),
+// ainsi que les espaces et tirets (« Dokja » = « Dok-ja »).
+function romanKey(value = '') {
+  return String(value)
+    .replace(/ /g, '')
+    .replace(/ou|oo|oh/g, 'o')
+    .replace(/uu/g, 'u')
+    .replace(/aa/g, 'a')
+    .replace(/ee/g, 'e')
+    .replace(/ii/g, 'i');
 }
 
-const QUIZ_STOPWORDS = new Set(['le', 'la', 'les', 'l', 'un', 'une', 'des', 'du', 'de', 'd', 'et', 'the', 'of', 'a', 'an', 'au', 'aux', 'en']);
+function fuzzyEqual(a, b) {
+  if (a === b) return true;
+  const x = String(a).replace(/ /g, '');
+  const y = String(b).replace(/ /g, '');
+  if (x === y) return true;
+  return romanKey(x) === romanKey(y);
+}
+
+const QUIZ_STOPWORDS = new Set(['le', 'la', 'les', 'l', 'un', 'une', 'des', 'du', 'de', 'd', 'et', 'the', 'of', 'a', 'an', 'au', 'aux', 'en', 'da', 'di', 'del', 'della', 'von', 'van', 'der']);
 
 function significantTokens(value) {
   return normalizeLoose(value)
@@ -6053,13 +6133,14 @@ Réponse attendue : ${question.answer}
 ${extra.length ? `${extra.join('\n')}\n` : ''}Réponse du joueur : ${playerText}
 
 Règles :
-- Accepte la même réponse écrite autrement : nom officiel, traduction ou orthographe qui existent réellement en VO, VF, VOSTFR, anglais ou romaji (ex. « Vide infini », « Vide incommensurable » et « Infinite Void » désignent la même technique ; « Najenda » et « Nadezhda Najenda » ; « Yairon » et « Lairon » si ce sont deux transcriptions existantes), abréviation courante, formulation plus courte.
+- Compare d'abord avec la réponse attendue : si le joueur donne une autre personne, un autre pays, un autre lieu ou une autre chose que celle attendue, REFUSE (ex. « Brésil » quand la réponse attendue est « Allemagne »), même si c'est lié à la question.
+- L'orthographe doit être exacte : une lettre en moins, en trop ou remplacée par une autre est REFUSÉE. Majuscules, accents, tirets, espaces et apostrophes ne comptent pas.
+- ACCEPTE toute orthographe, transcription ou traduction qui EXISTE réellement pour cette réponse (VO, VF, VOSTFR, anglais, romaji, coréen romanisé...) : ex. « Tohru » et « Tooru », « Dokja » et « Dok-ja », « Najenda » et « Nadezhda Najenda », « Vide infini » / « Vide incommensurable » / « Infinite Void ». Vérifie qu'elle existe vraiment : si oui, ACCEPTE ; si c'est une simple faute, REFUSE.
 - Si la question contient déjà le mot générique (souffle, technique, forme, titan, épée...), le mot distinctif seul suffit (ex. « insecte » pour « Souffle de l'insecte », « originel » pour « Titan originel »).
-- Personnage d'une œuvre : accepte le prénom, le nom de famille ou le nom d'usage seul quand il désigne ce personnage de façon unique parmi les personnages connus de l'œuvre (ex. « Gojo », « Isagi », « Uzui » sont acceptés). REFUSE le nom de famille seul quand d'autres membres connus de la famille le portent (ex. « Uchiha » pour Sasuke, « Elric », « Zoldyck »).
-- Une faute de frappe évidente (lettre oubliée ou en trop, lettres inversées, accent) est acceptée. Une lettre remplacée par une autre qui change le mot (par exemple une voyelle par une autre) est REFUSÉE, sauf si cette écriture existe réellement comme transcription.
-- Personne réelle : accepte le nom de famille ou le nom complet, REFUSE le prénom seul.
+- Personnage d'une œuvre : accepte le prénom, le nom de famille ou le nom d'usage seul quand il désigne ce personnage de façon unique parmi les personnages connus de l'œuvre (ex. « Gojo », « Isagi », « Uzui »). REFUSE le nom de famille seul quand d'autres membres connus de la famille le portent (ex. « Uchiha » pour Sasuke, « Elric », « Zoldyck »).
+- Personne réelle : accepte le nom de famille, le nom complet ou le nom d'usage universel (« Napoléon » pour Napoléon Bonaparte ; « de Vinci » ou « da Vinci » pour Léonard de Vinci) ; REFUSE un prénom seul qui n'identifie pas la personne (ex. « Léonard »).
 - Question d'explication : accepte si l'idée essentielle est présente, même avec d'autres mots ou de façon approximative.
-- REFUSE si c'est hors sujet, faux, trop vague, ou si cela désigne autre chose.
+- REFUSE si c'est hors sujet, faux, trop vague ou si cela désigne autre chose.
 Réponds en JSON : {"correct": true} ou {"correct": false}`,
       60,
       0
@@ -6072,43 +6153,193 @@ Réponds en JSON : {"correct": true} ou {"correct": false}`,
 }
 
 // Relecture : on écarte les questions douteuses, ambiguës ou factuellement fausses
-async function verifyQuizQuestions(list) {
+async function verifyQuizQuestions(list, level = 'moyen') {
   if (!list.length) return list;
 
-  try {
-    const items = list
-      .map((q, i) => `${i + 1}. [${q.univers || 'culture générale'}] Question : ${q.question} | Réponse : ${q.answer}`)
+  // Le modèle répond lui-même aux questions SANS voir la réponse proposée, puis on compare :
+  // les questions où les réponses divergent, ou qui sont douteuses, sont écartées.
+  const attempt = async () => {
+    const questions = list
+      .map((q, i) => `${i + 1}. ${q.univers ? `[${q.univers}] ` : ''}${q.question}`)
       .join('\n');
 
-    const data = await groqJson(
-      `Tu es relecteur exigeant d'un quiz. Pour chaque ligne, vérifie :
-1) la réponse est exacte selon l'œuvre originale ou les faits établis (qui fait quoi, quel personnage, quelle organisation, quelle technique) ;
-2) la question est claire, non ambiguë, compréhensible seule et correctement formulée en français ;
-3) la question n'est pas trop banale (ni connue de tout le monde).
-Au moindre doute sur l'exactitude, mets "ok": false.
+    const independent = await groqJson(
+      `Réponds de façon brève et exacte à chacune de ces questions de quiz. Si tu n'es pas certain, mets "?".
 
-${items}
+${questions}
 
-Réponds en JSON : {"items":[{"n":1,"ok":true}]}`,
+Réponds en JSON : {"items":[{"n":1,"answer":"..."}]}`,
       1500,
       0
     );
 
-    const verdict = new Map();
-    for (const item of data?.items || []) verdict.set(Number(item?.n), item?.ok === true);
-    if (!verdict.size) return list;
+    const given = new Map();
+    for (const item of independent?.items || []) given.set(Number(item?.n), String(item?.answer || '').trim());
 
-    return list.filter((_, i) => verdict.get(i + 1) !== false);
+    const rows = list
+      .map(
+        (q, i) =>
+          `${i + 1}. Question : ${q.question} | Réponse proposée : ${q.answer} | Réponse indépendante : ${given.get(i + 1) || '?'}`
+      )
+      .join('\n');
+
+    const banal = level === 'facile' ? '' : ', et pas trop banale';
+    const verdict = await groqJson(
+      `Tu es relecteur exigeant d'un quiz. Pour chaque ligne :
+- "same" : true si les deux réponses désignent la même chose (même écrites autrement : VO/VF, transcription, forme courte) ;
+- "ok" : true seulement si la réponse proposée est EXACTE selon l'œuvre originale ou les faits établis, et si la question est claire, non ambiguë, compréhensible seule et correctement formulée en français${banal}.
+Au moindre doute sur l'exactitude, mets ok = false. Si la réponse indépendante est "?", juge avec tes propres connaissances et sois très prudent.
+
+${rows}
+
+Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true}]}`,
+      1500,
+      0
+    );
+
+    return { verdict, given };
+  };
+
+  let result = null;
+  for (let i = 0; i < 2 && !result; i++) {
+    try {
+      result = await attempt();
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture des questions impossible.');
+      if (i === 0) await sleep(2500);
+    }
+  }
+  if (!result) return list;
+
+  const byN = new Map();
+  for (const item of result.verdict?.items || []) byN.set(Number(item?.n), item);
+  if (!byN.size) return list;
+
+  return list.filter((q, i) => {
+    const v = byN.get(i + 1);
+    if (!v) return true;
+    const independentAnswer = result.given.get(i + 1);
+    const agrees =
+      v.same === true ||
+      Boolean(independentAnswer && independentAnswer !== '?' && isQuizAnswerCorrect(independentAnswer, q));
+    return agrees && v.ok !== false;
+  });
+}
+
+// ─── Niveaux et historique des questions (jamais deux fois la même question) ───
+
+const AUTO_QUIZ_LEVELS = {
+  facile: { label: 'Facile', icon: '🟢' },
+  moyen: { label: 'Moyen', icon: '🟡' },
+  eleve: { label: 'Élevé', icon: '🔴' }
+};
+
+function matchQuizLevel(text) {
+  const n = normalizeLoose(text);
+  if (!n) return null;
+  if (['facile', 'easy', 'simple'].includes(n)) return 'facile';
+  if (['moyen', 'medium', 'normal', 'intermediaire'].includes(n)) return 'moyen';
+  if (['eleve', 'haut', 'difficile', 'hard', 'expert', 'dur'].includes(n)) return 'eleve';
+  return null;
+}
+
+function quizLevelInstruction(category, level) {
+  if (category === 'multivers') {
+    if (level === 'facile') {
+      return "niveau FACILE : questions accessibles à tout fan qui a regardé l'anime (personnages principaux, événements marquants, techniques célèbres), toujours claires et précises";
+    }
+    if (level === 'eleve') {
+      return "niveau ÉLEVÉ : fan confirmé ; détails précis d'arcs, personnages secondaires, causes et conséquences, subtilités de l'histoire ; difficile mais toujours factuel, vérifiable et équitable";
+    }
+    return "niveau MOYEN : niveau fan ; jamais de question que quelqu'un ayant vu quelques épisodes saurait (pas de « qui est le héros de… »), mais rien d'impossible ; détails d'arcs précis, noms de techniques, causes, personnages secondaires";
+  }
+
+  if (level === 'facile') return 'niveau FACILE : culture générale de base, connue de la plupart des gens';
+  if (level === 'eleve') return 'niveau ÉLEVÉ : questions pointues pour passionnés de culture générale, précises et vérifiables';
+  return 'niveau MOYEN : ni trop facile, ni très difficile';
+}
+
+const quizHistoryCache = new Map();
+
+async function loadQuizHistory(category) {
+  const cached = quizHistoryCache.get(category);
+  if (cached) return cached;
+
+  const history = { keys: new Set(), recent: [] };
+  try {
+    const res = await executeDbWithRetry({
+      sql: 'SELECT key, label FROM quiz_question_history WHERE category = ? ORDER BY created_at DESC LIMIT 800',
+      args: [category]
+    });
+    for (const row of res.rows || []) {
+      history.keys.add(String(row.key));
+      if (row.label) history.recent.push(String(row.label));
+    }
   } catch (error) {
-    logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture des questions impossible.');
-    return list;
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : historique des questions illisible.');
+  }
+
+  quizHistoryCache.set(category, history);
+  return history;
+}
+
+// Mémorise une question au moment où elle est posée, pour ne plus jamais la reposer
+async function markQuizQuestionAsked(category, question) {
+  const entries = Array.isArray(question?.histKeys) ? question.histKeys : [];
+  if (!entries.length) return;
+
+  const history = await loadQuizHistory(category);
+  for (const entry of entries) {
+    if (!entry?.key) continue;
+    history.keys.add(entry.key);
+    if (entry.label) history.recent.unshift(entry.label);
+
+    try {
+      await executeDbWithRetry({
+        sql: `INSERT INTO quiz_question_history (category, key, label, created_at)
+              VALUES (?, ?, ?, ?)
+              ON CONFLICT(category, key) DO UPDATE SET
+                label = excluded.label,
+                created_at = excluded.created_at`,
+        args: [category, entry.key, entry.label || '', Date.now()]
+      });
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : historique non enregistré.');
+    }
+  }
+  if (history.recent.length > 800) history.recent.length = 800;
+}
+
+async function pruneQuizHistory(category) {
+  try {
+    await executeDbWithRetry({
+      sql: `DELETE FROM quiz_question_history
+            WHERE category = ?
+              AND key NOT IN (
+                SELECT key FROM quiz_question_history WHERE category = ? ORDER BY created_at DESC LIMIT 800
+              )`,
+      args: [category, category]
+    });
+  } catch {
+    // Sans importance
   }
 }
 
-async function generateTextQuizQuestions(category, total) {
+function shuffleInPlace(list) {
+  for (let i = list.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [list[i], list[j]] = [list[j], list[i]];
+  }
+  return list;
+}
+
+async function generateTextQuizQuestions(category, total, level = 'moyen') {
   const questions = [];
   const usedTopics = [];
   let attempts = 0;
+
+  const history = await loadQuizHistory(category);
+  pruneQuizHistory(category).catch(() => {});
 
   while (questions.length < total && attempts < 7) {
     attempts++;
@@ -6124,9 +6355,7 @@ Ton et formulation :
 - utilise la terminologie française courante de la VF/VOSTFR (ex. « souffle » et non « respiration » pour Demon Slayer) ;
 - la question doit être complète, claire et compréhensible seule, sans sous-entendu ni référence floue ; cite les noms et la situation utiles.
 
-Niveau :
-- niveau fan : jamais de question que quelqu'un ayant vu quelques épisodes saurait (pas de « qui est le héros de… » ni de pouvoir principal évident), mais rien d'impossible ;
-- préfère des détails d'arcs précis, des noms de techniques, des causes, des conséquences, des personnages secondaires ;
+Niveau : ${quizLevelInstruction('multivers', level)} ;
 - environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), par exemple « Pourquoi Kenjaku a-t-il organisé le jeu meurtrier, selon Tengen ? », l'autre moitié de questions factuelles précises.
 
 Fiabilité (très important) :
@@ -6144,21 +6373,24 @@ Champ "alts" : toutes les façons acceptables de répondre :
 - transcriptions et orthographes qui existent réellement (ex : « Najenda » et « Nadezhda Najenda », « Yairon » et « Lairon ») ;
 - forme courte avec le seul mot distinctif quand la question contient déjà le mot générique (ex : question sur le souffle de Shinobu → alts « Insecte », « De l'insecte » ; question sur le titan de Ymir → « Originel », « Fondateur ») ;
 - ne liste pas les simples fautes de frappe (elles sont déjà tolérées).
-Univers déjà utilisés (interdits) : ${usedTopics.join(', ') || 'aucun'}.
+Univers déjà utilisés dans ce quiz (interdits) : ${usedTopics.join(', ') || 'aucun'}.
+Questions déjà posées lors de quiz précédents (interdites : ne repose aucune question portant sur le même fait) : ${history.recent.slice(0, 50).join(' | ') || 'aucune'}.
 Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
         : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
 Règles :
 - écris naturellement, comme un humain qui pose la question à l'oral (simple, fluide, décontracté) ;
 - sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) ;
-- difficulté moyenne, question complète, claire et compréhensible seule ;
+- ${quizLevelInstruction('cg', level)}, question complète, claire et compréhensible seule ;
 - réponse courte (1 à 4 mots), précise et incontestable ;
 - ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
 - la réponse ne doit pas apparaître dans la question.
 Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
 Champ "person" : true si la réponse est le nom d'une personne.
-Champ "alts" : si la réponse est une personne, mets le nom de famille seul (avec sa particule usuelle, ex : "de Vinci" et "Vinci"), JAMAIS le prénom seul ; sinon les variantes, traductions ou abréviations réellement utilisées. Ne liste pas les simples fautes d'orthographe.
-Questions déjà posées (interdites) : ${questions.map(q => q.question).slice(-30).join(' | ') || 'aucune'}.
-Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"...","answer":"...","alts":["..."]}]}`;
+Champ "usual" : si la réponse est une personne connue sous un nom d'usage universel différent de son nom de famille, ce nom (ex : "Napoléon" pour Napoléon Bonaparte), sinon "".
+Champ "alts" : si la réponse est une personne, mets le nom de famille seul (avec sa particule usuelle, ex : "de Vinci", "da Vinci" et "Vinci"), JAMAIS le prénom seul ; sinon les variantes, traductions ou abréviations réellement utilisées. Ne liste pas les simples fautes d'orthographe.
+Questions déjà posées dans ce quiz (interdites) : ${questions.map(q => q.question).slice(-30).join(' | ') || 'aucune'}.
+Questions déjà posées lors de quiz précédents (interdites : ne repose aucune question portant sur le même fait) : ${history.recent.slice(0, 50).join(' | ') || 'aucune'}.
+Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","question":"...","answer":"...","alts":["..."]}]}`;
 
     try {
       const data = await groqJson(prompt);
@@ -6173,6 +6405,11 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"
         const key = normalizeLoose(question);
         if (questions.some(q => normalizeLoose(q.question) === key)) continue;
         if (batch.some(q => normalizeLoose(q.question) === key)) continue;
+
+        // Jamais deux fois la même question (ni le même fait) d'un quiz à l'autre
+        const qKey = `q:${key}`;
+        const aKey = `a:${normalizeLoose(item?.univers || '')}|${normalizeLoose(answer)}`;
+        if (history.keys.has(qKey) || history.keys.has(aKey)) continue;
 
         let univers = '';
         if (category === 'multivers') {
@@ -6194,6 +6431,9 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"
             const last = tokens[tokens.length - 1];
             if (!alts.some(a => significantTokens(a).includes(last))) alts.push(last);
           }
+
+          const usual = String(item?.usual || '').trim();
+          if (usual && usual.length <= 30) alts.push(usual);
         }
 
         batch.push({
@@ -6204,11 +6444,15 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"question":"
           question,
           answer,
           alts,
-          keypoints: Array.isArray(item?.keypoints) ? item.keypoints.map(String).slice(0, 4) : []
+          keypoints: Array.isArray(item?.keypoints) ? item.keypoints.map(String).slice(0, 4) : [],
+          histKeys: [
+            { key: qKey, label: question },
+            { key: aKey, label: '' }
+          ]
         });
       }
 
-      const verified = await verifyQuizQuestions(batch);
+      const verified = await verifyQuizQuestions(batch, level);
       for (const q of verified) {
         if (questions.length >= total) break;
         questions.push(q);
@@ -6292,8 +6536,56 @@ async function fetchJikanCharacters(page) {
   return out;
 }
 
-async function generateIdQuizQuestions(total) {
-  // Classement des personnages : on évite les tout premiers (trop évidents)
+function idLevelPages(level) {
+  // Pages de 50 personnages classés par popularité (AniList)
+  if (level === 'facile') return { from: 1, to: 2 };
+  if (level === 'eleve') return { from: 11, to: 30 };
+  return { from: 3, to: 10 };
+}
+
+// Toutes les écritures acceptables (variantes de transcription, prénom, surnoms, nom de famille unique)
+async function enrichIdQuestions(list) {
+  if (!CONFIG.groqKey || !list.length) return list;
+
+  try {
+    const items = list
+      .map(
+        (q, i) =>
+          `${i + 1}. ${q.answer}${q.hintText ? ` (${q.hintText})` : ''}${q.alts?.length ? ` — alias : ${q.alts.join(', ')}` : ''}`
+      )
+      .join('\n');
+
+    const data = await groqJson(
+      `Voici des personnages d'anime/manga :
+${items}
+
+Pour chacun, donne dans "accept" toutes les réponses acceptables dans un quiz d'identification :
+- toutes les orthographes, transcriptions et traductions de son nom qui EXISTENT réellement (ex. « Tohru » et « Tooru », « Dokja » et « Dok-ja ») ;
+- le prénom seul, le nom d'usage, les surnoms connus ;
+- le nom de famille seul UNIQUEMENT s'il identifie ce personnage de façon unique dans son œuvre (« Isagi », « Gojo » : oui ; « Uchiha », « Elric », « Zoldyck » : non, d'autres membres sont connus).
+N'invente rien : uniquement des écritures du MÊME personnage.
+Réponds en JSON : {"items":[{"n":1,"accept":["..."]}]}`,
+      3500,
+      0
+    );
+
+    for (const item of data?.items || []) {
+      const q = list[Number(item?.n) - 1];
+      if (q && Array.isArray(item.accept)) {
+        q.alts = [...new Set([...(q.alts || []), ...item.accept.map(String)])].slice(0, 14);
+      }
+    }
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : écritures des noms non enrichies.');
+  }
+
+  return list;
+}
+
+async function generateIdQuizQuestions(total, level = 'moyen') {
+  const history = await loadQuizHistory('id');
+  pruneQuizHistory('id').catch(() => {});
+
   const pool = [];
   const seen = new Set();
   const addAll = list => {
@@ -6303,12 +6595,17 @@ async function generateIdQuizQuestions(total) {
       pool.push(item);
     }
   };
+  const fresh = () => pool.filter(item => !history.keys.has(`c:${item.id}`));
 
-  const wanted = Math.ceil(total / 8) + 1;
-  const aniPages = new Set();
-  while (aniPages.size < wanted) aniPages.add(2 + Math.floor(Math.random() * 15));
+  const { from, to } = idLevelPages(level);
+  const pages = [];
+  for (let page = from; page <= to; page++) pages.push(page);
+  shuffleInPlace(pages);
 
-  for (const page of aniPages) {
+  let fetched = 0;
+  for (const page of pages) {
+    if (fresh().length >= total + 4 || fetched >= 6) break;
+    fetched++;
     try {
       addAll(await fetchAniListCharacters(page));
     } catch (error) {
@@ -6321,6 +6618,7 @@ async function generateIdQuizQuestions(total) {
   // Secours : Jikan (MyAnimeList)
   if (pool.length < total) {
     const jikanPages = new Set();
+    const wanted = Math.ceil(total / 8) + 1;
     while (jikanPages.size < wanted) jikanPages.add(3 + Math.floor(Math.random() * 28));
 
     for (const page of jikanPages) {
@@ -6334,12 +6632,17 @@ async function generateIdQuizQuestions(total) {
     }
   }
 
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
+  // Personnages jamais posés d'abord ; si on en manque, on complète avec les plus anciens
+  let chosen = shuffleInPlace(fresh());
+  if (chosen.length < total) {
+    const rest = shuffleInPlace(pool.filter(item => !chosen.includes(item)));
+    chosen = chosen.concat(rest);
   }
+  chosen = chosen.slice(0, total);
 
-  return pool.slice(0, total);
+  for (const item of chosen) item.histKeys = [{ key: `c:${item.id}`, label: item.answer }];
+
+  return enrichIdQuestions(chosen);
 }
 
 async function downloadQuizImage(url) {
@@ -6389,7 +6692,10 @@ async function finishAutoQuiz(session, { stopped = false } = {}) {
     }));
 
     const category = AUTO_QUIZ_CATEGORIES[session.category];
-    const info = category ? `${category.icon} ${category.label} • ${session.asked || 0} question${(session.asked || 0) > 1 ? 's' : ''}` : '';
+    const levelInfo = AUTO_QUIZ_LEVELS[session.level];
+    const info = category
+      ? `${category.icon} ${category.label}${levelInfo ? ` • ${levelInfo.icon} ${levelInfo.label}` : ''} • ${session.asked || 0} question${(session.asked || 0) > 1 ? 's' : ''}`
+      : '';
 
     await quizSend(jid, {
       text: buildQuizBoard({ title: 'RÉCAPITULATIF', rows, info }),
@@ -6439,6 +6745,7 @@ async function askNextAutoQuestion(session) {
     }
 
     session.asked = (session.asked || 0) + 1;
+    markQuizQuestionAsked(session.category, q).catch(() => {});
     session.current = q;
     session.answered = false;
 
@@ -6492,7 +6799,7 @@ async function startAutoQuiz(session) {
 
   try {
     await quizSend(jid, {
-      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n📋 ${session.total} questions\n\nPréparation des questions...`
+      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation des questions...`
     });
 
     if (!CONFIG.groqKey && session.category !== 'id') {
@@ -6501,8 +6808,8 @@ async function startAutoQuiz(session) {
 
     const questions =
       session.category === 'id'
-        ? await generateIdQuizQuestions(session.total)
-        : await generateTextQuizQuestions(session.category, session.total);
+        ? await generateIdQuizQuestions(session.total, session.level || 'moyen')
+        : await generateTextQuizQuestions(session.category, session.total, session.level || 'moyen');
 
     if (autoQuizzes.get(jid) !== session) return;
 
@@ -6555,12 +6862,32 @@ async function handleAutoQuizMessage(jid, message, text, sender) {
     if (!category) return false;
 
     session.category = category;
-    session.stage = 'count';
+    session.stage = 'level';
 
     const sent = await quizSend(jid, {
       text:
         `*╭─〔 ⌬ SITRI~QUIZ 〕*\n*│*\n` +
         `*├ ◈ ${AUTO_QUIZ_CATEGORIES[category].icon} ${AUTO_QUIZ_CATEGORIES[category].label}*\n` +
+        `*│*\n*├ ◈ Quel niveau ?*\n*├ ◈ 🟢 Facile • 🟡 Moyen • 🔴 Élevé*\n*│*\n` +
+        `*├ ◈ Réponds à ce message avec le niveau*\n*╰━━━━━━━━━━━━━━━━━━━━━*`
+    }, { quoted: message });
+    session.promptId = sent?.key?.id || null;
+    return true;
+  }
+
+  if (session.stage === 'level') {
+    if (!sameUser(sender, session.host)) return false;
+    const level = matchQuizLevel(text);
+    if (!level) return false;
+
+    session.level = level;
+    session.stage = 'count';
+
+    const info = AUTO_QUIZ_LEVELS[level];
+    const sent = await quizSend(jid, {
+      text:
+        `*╭─〔 ⌬ SITRI~QUIZ 〕*\n*│*\n` +
+        `*├ ◈ ${AUTO_QUIZ_CATEGORIES[session.category].icon} ${AUTO_QUIZ_CATEGORIES[session.category].label} • ${info.icon} ${info.label}*\n` +
         `*│*\n*├ ◈ Combien de questions ?*\n*├ ◈ ${AUTO_QUIZ_COUNTS.join(' • ')}*\n*│*\n` +
         `*├ ◈ Réponds à ce message avec le nombre*\n*╰━━━━━━━━━━━━━━━━━━━━━*`
     }, { quoted: message });
@@ -6679,7 +7006,7 @@ async function handleAutoQuizCommand(jid, message, command, args, ownerCommand) 
     autoQuizzes.set(jid, session);
 
     session.setupTimer = setTimeout(async () => {
-      if (autoQuizzes.get(jid) !== session || !['category', 'count'].includes(session.stage)) return;
+      if (autoQuizzes.get(jid) !== session || !['category', 'level', 'count'].includes(session.stage)) return;
       autoQuizzes.delete(jid);
       await quizSend(jid, { text: '⌛ Quiz annulé : pas de réponse.' }).catch(() => {});
     }, AUTO_QUIZ_SETUP_TIMEOUT_MS);
@@ -6838,14 +7165,12 @@ async function processCommand(message) {
     isOwner(message?.key?.remoteJidAlt);
 
   if (command === 'menu') {
-    await sendOfficialImage(jid, message);
-    await sendReply(jid, getMenu(), message);
+    await sendOfficialImageWithText(jid, getMenu(), message);
     return;
   }
 
   if (command === 'info') {
-    await sendOfficialImage(jid, message);
-    await sendReply(jid, getInfo(), message);
+    await sendOfficialImageWithText(jid, getInfo(), message);
     return;
   }
 

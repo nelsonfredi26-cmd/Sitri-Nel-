@@ -4720,19 +4720,26 @@ async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
         '--match-filter', 'duration>60 & duration<900'
       );
     } else {
-      // YouTube : exactement les réglages d'Erwin-Bot, sans cookies
+      // YouTube, sans cookies. Pas d'en-tête user-agent forcé : les liens des clients android/ios
+      // sont liés à leur propre user-agent, et un autre provoque l'erreur 403.
       args.push(
         '-f', 'bestaudio[ext=m4a]/bestaudio/best',
         '--no-check-certificate',
-        '--add-header',
-        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        '--add-header', 'referer:https://www.youtube.com/',
-        '--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'
+        '--add-header', 'referer:https://www.youtube.com/'
       );
       if (ffmpegPath) args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0');
     }
 
-    const clientProfiles = [[]];
+    // Plusieurs profils, du plus simple au plus large (l'erreur 403 se produit vite : on peut tous les essayer)
+    const jsArgs = ['--js-runtimes', 'node'];
+    const clientProfiles = soundcloud
+      ? [[]]
+      : [
+          ['--extractor-args', 'youtube:player_client=android_vr'],
+          ['--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'],
+          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,web_safari'],
+          [...jsArgs]
+        ];
     const ytdlpDeadline = Date.now() + 60000;
 
     let lastError = null;
@@ -5927,12 +5934,28 @@ function levenshtein(a, b) {
   return prev[n];
 }
 
+const QUIZ_VOWELS = new Set(['a', 'e', 'i', 'o', 'u', 'y']);
+
+// « sasuka » pour « sasuke » : une voyelle remplacée par une autre change le mot, ce n'est pas une faute de frappe
+function isVowelSwapOnly(a, b) {
+  if (a.length !== b.length) return false;
+  let diffs = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      if (!(QUIZ_VOWELS.has(a[i]) && QUIZ_VOWELS.has(b[i]))) return false;
+      diffs++;
+    }
+  }
+  return diffs > 0;
+}
+
 function fuzzyEqual(a, b) {
   if (a === b) return true;
   const len = Math.max(a.length, b.length);
-  if (len <= 4) return false;
-  const maxD = len <= 7 ? 1 : 2;
+  if (len <= 5) return false;
+  const maxD = len <= 8 ? 1 : 2;
   if (Math.abs(a.length - b.length) > maxD) return false;
+  if (isVowelSwapOnly(a, b)) return false;
   return levenshtein(a, b) <= maxD;
 }
 
@@ -5961,6 +5984,16 @@ function isQuizAnswerCorrect(submitted, question) {
 
     // Tous les mots attendus sont retrouvés (ordre libre, fautes légères)
     if (candTokens.every(ct => subTokens.some(st => fuzzyEqual(st, ct)))) return true;
+
+    // Les mots déjà présents dans la question n'ont pas à être répétés
+    // (ex. « Quel souffle utilise Shinobu ? » : « insecte » suffit pour « Souffle de l'insecte »)
+    if (question.type === 'text' && question.question) {
+      const inQuestion = new Set(significantTokens(question.question));
+      const needed = candTokens.filter(ct => !inQuestion.has(ct));
+      if (needed.length && needed.length < candTokens.length && needed.every(ct => subTokens.some(st => fuzzyEqual(st, ct)))) {
+        return true;
+      }
+    }
 
     // Personnage (ID) : le prénom seul suffit ; le nom de famille seul est refusé (plusieurs personnages
     // le portent), sauf pour les noms à 3 mots ou plus où le dernier mot est le nom d'usage (ex. Monkey D. Luffy)
@@ -6010,15 +6043,20 @@ async function judgeQuizAnswer(question, playerText) {
       extra.push(`Idées essentielles : ${question.keypoints.join(' ; ')}`);
     }
 
+    const questionText =
+      question.question || 'Quel est le nom du personnage montré sur l\'image ?';
+
     const data = await groqJson(
       `Tu es juge d'un quiz entre fans, attentif mais rigoureux. Lis bien la réponse du joueur.
-Question : ${question.question}
+Question : ${questionText}
 Réponse attendue : ${question.answer}
 ${extra.length ? `${extra.join('\n')}\n` : ''}Réponse du joueur : ${playerText}
 
 Règles :
-- Accepte la même réponse écrite autrement : fautes d'orthographe, nom officiel ou traduction en VO, VF, VOSTFR, anglais ou romaji (ex. « Vide infini », « Vide incommensurable » et « Infinite Void » désignent la même technique), abréviation courante, formulation plus courte.
-- Personnage d'une œuvre : accepte le prénom ou le nom d'usage s'il identifie ce personnage de façon unique ; REFUSE un nom de famille seul partagé par plusieurs personnages connus (ex. « Uchiha » pour Sasuke).
+- Accepte la même réponse écrite autrement : nom officiel, traduction ou orthographe qui existent réellement en VO, VF, VOSTFR, anglais ou romaji (ex. « Vide infini », « Vide incommensurable » et « Infinite Void » désignent la même technique ; « Najenda » et « Nadezhda Najenda » ; « Yairon » et « Lairon » si ce sont deux transcriptions existantes), abréviation courante, formulation plus courte.
+- Si la question contient déjà le mot générique (souffle, technique, forme, titan, épée...), le mot distinctif seul suffit (ex. « insecte » pour « Souffle de l'insecte », « originel » pour « Titan originel »).
+- Personnage d'une œuvre : accepte le prénom, le nom de famille ou le nom d'usage seul quand il désigne ce personnage de façon unique parmi les personnages connus de l'œuvre (ex. « Gojo », « Isagi », « Uzui » sont acceptés). REFUSE le nom de famille seul quand d'autres membres connus de la famille le portent (ex. « Uchiha » pour Sasuke, « Elric », « Zoldyck »).
+- Une faute de frappe évidente (lettre oubliée ou en trop, lettres inversées, accent) est acceptée. Une lettre remplacée par une autre qui change le mot (par exemple une voyelle par une autre) est REFUSÉE, sauf si cette écriture existe réellement comme transcription.
 - Personne réelle : accepte le nom de famille ou le nom complet, REFUSE le prénom seul.
 - Question d'explication : accepte si l'idée essentielle est présente, même avec d'autres mots ou de façon approximative.
 - REFUSE si c'est hors sujet, faux, trop vague, ou si cela désigne autre chose.
@@ -6102,8 +6140,10 @@ Champ "type" :
 - "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
 Champ "alts" : toutes les façons acceptables de répondre :
 - traductions officielles ou courantes en VO, VF, VOSTFR, anglais et romaji (ex. pour une technique : « Vide infini », « Vide incommensurable », « Infinite Void », « Muryō Kūsho ») ;
-- personnage : prénom seul, surnoms ; le nom de famille seul UNIQUEMENT s'il ne désigne qu'un seul personnage important de l'œuvre (ex : « Gojo » pour Satoru Gojo est accepté ; « Uchiha » pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
-- ne liste pas les simples fautes d'orthographe (elles sont déjà tolérées).
+- personnage : prénom seul, surnoms, ET le nom de famille seul quand il désigne un seul personnage connu de l'œuvre (ex : « Gojo », « Isagi », « Uzui » sont acceptés ; « Uchiha » pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
+- transcriptions et orthographes qui existent réellement (ex : « Najenda » et « Nadezhda Najenda », « Yairon » et « Lairon ») ;
+- forme courte avec le seul mot distinctif quand la question contient déjà le mot générique (ex : question sur le souffle de Shinobu → alts « Insecte », « De l'insecte » ; question sur le titan de Ymir → « Originel », « Fondateur ») ;
+- ne liste pas les simples fautes de frappe (elles sont déjà tolérées).
 Univers déjà utilisés (interdits) : ${usedTopics.join(', ') || 'aucun'}.
 Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
         : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
@@ -6565,7 +6605,7 @@ async function handleAutoQuizMessage(jid, message, text, sender) {
 
     // Réponses non reconnues d'emblée (traductions VO/VF/VOSTFR, formulations différentes) :
     // l'arbitre IA lit et analyse chaque réponse
-    if (q.type === 'text' && trimmed.length >= 3 && (session.judging || 0) < 4) {
+    if ((q.type === 'text' || q.type === 'image') && trimmed.length >= 3 && (session.judging || 0) < 4) {
       if (session.judgeCacheFor !== q) {
         session.judgeCacheFor = q;
         session.judgeCache = new Set();

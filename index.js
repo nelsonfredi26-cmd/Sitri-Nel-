@@ -140,6 +140,9 @@ let botNumber = '';
 let connectionStatus = 'Non connecté';
 let isShuttingDown = false;
 let isBotSleeping = false;
+let isKaydenOnly = false;
+let botFlagsLoaded = false;
+let botFlagsLastTry = 0;
 
 const PROCESS_STARTED_AT = Date.now();
 const processedMessages = new Set();
@@ -168,7 +171,14 @@ function getCurrentMood() {
 // Informations sur le créateur (KAY≈DEN) : une ligne par information.
 // Elles peuvent aussi être ajoutées par la variable Railway CREATOR_INFO (une information par ligne).
 const CREATOR_INFO_LINES = [
-  // Exemple : 'Il aime les animés et la programmation.'
+  'Il s’appelle Kayden Nelson (KAY≈DEN) ; c’est un homme.',
+  'Il est flemmard, et il l’assume.',
+  'Il porte des lunettes (un binoclard).',
+  'Il mesure 1m81.',
+  'Ses passions : les animés, les webtoons, le développement d’IA et d’applications (APK).',
+  'Son fruit préféré : la banane.',
+  'Son repas préféré : les frites.',
+  'Il est célibataire : quand on te demande des infos sur lui, amène ce point avec humour et une transition naturelle, sans insister.'
 ];
 
 function getCreatorInfoText() {
@@ -340,6 +350,10 @@ async function initDatabase(force = false) {
           label TEXT NOT NULL DEFAULT '',
           created_at INTEGER NOT NULL,
           PRIMARY KEY (category, key)
+        )`,
+      `CREATE TABLE IF NOT EXISTS bot_flags (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
         )`
     ];
 
@@ -5183,6 +5197,213 @@ function explainAIFailure(error) {
   );
 }
 
+// ------------------------------------------------------------
+// HORLOGE INTERNATIONALE, DATE ET MÉTÉO
+// ------------------------------------------------------------
+
+const CLOCK_DEFAULT = { label: 'au Bénin', tz: 'Africa/Porto-Novo', geo: 'Cotonou' };
+
+const CLOCK_PLACES = [
+  { names: ['benin', 'cotonou', 'porto novo', 'porto-novo', 'parakou'], label: 'au Bénin', tz: 'Africa/Porto-Novo', geo: 'Cotonou' },
+  { names: ['france', 'paris'], label: 'en France', tz: 'Europe/Paris', geo: 'Paris' },
+  { names: ['cote d\'ivoire', 'abidjan', 'yamoussoukro'], label: 'en Côte d’Ivoire', tz: 'Africa/Abidjan', geo: 'Abidjan' },
+  { names: ['cameroun', 'douala', 'yaounde'], label: 'au Cameroun', tz: 'Africa/Douala', geo: 'Douala' },
+  { names: ['senegal', 'dakar'], label: 'au Sénégal', tz: 'Africa/Dakar', geo: 'Dakar' },
+  { names: ['nigeria', 'lagos', 'abuja'], label: 'au Nigeria', tz: 'Africa/Lagos', geo: 'Lagos' },
+  { names: ['togo', 'lome'], label: 'au Togo', tz: 'Africa/Lome', geo: 'Lomé' },
+  { names: ['ghana', 'accra'], label: 'au Ghana', tz: 'Africa/Accra', geo: 'Accra' },
+  { names: ['mali', 'bamako'], label: 'au Mali', tz: 'Africa/Bamako', geo: 'Bamako' },
+  { names: ['burkina', 'burkina faso', 'ouagadougou'], label: 'au Burkina Faso', tz: 'Africa/Ouagadougou', geo: 'Ouagadougou' },
+  { names: ['niger', 'niamey'], label: 'au Niger', tz: 'Africa/Niamey', geo: 'Niamey' },
+  { names: ['guinee', 'conakry'], label: 'en Guinée', tz: 'Africa/Conakry', geo: 'Conakry' },
+  { names: ['gabon', 'libreville'], label: 'au Gabon', tz: 'Africa/Libreville', geo: 'Libreville' },
+  { names: ['congo', 'brazzaville'], label: 'au Congo', tz: 'Africa/Brazzaville', geo: 'Brazzaville' },
+  { names: ['rdc', 'kinshasa', 'republique democratique du congo'], label: 'en RDC', tz: 'Africa/Kinshasa', geo: 'Kinshasa' },
+  { names: ['maroc', 'casablanca', 'rabat'], label: 'au Maroc', tz: 'Africa/Casablanca', geo: 'Casablanca' },
+  { names: ['algerie', 'alger'], label: 'en Algérie', tz: 'Africa/Algiers', geo: 'Alger' },
+  { names: ['tunisie', 'tunis'], label: 'en Tunisie', tz: 'Africa/Tunis', geo: 'Tunis' },
+  { names: ['egypte', 'le caire', 'caire'], label: 'en Égypte', tz: 'Africa/Cairo', geo: 'Le Caire' },
+  { names: ['madagascar', 'antananarivo'], label: 'à Madagascar', tz: 'Indian/Antananarivo', geo: 'Antananarivo' },
+  { names: ['afrique du sud', 'johannesburg', 'le cap'], label: 'en Afrique du Sud', tz: 'Africa/Johannesburg', geo: 'Johannesburg' },
+  { names: ['belgique', 'bruxelles'], label: 'en Belgique', tz: 'Europe/Brussels', geo: 'Bruxelles' },
+  { names: ['suisse', 'geneve', 'zurich'], label: 'en Suisse', tz: 'Europe/Zurich', geo: 'Zurich' },
+  { names: ['allemagne', 'berlin'], label: 'en Allemagne', tz: 'Europe/Berlin', geo: 'Berlin' },
+  { names: ['espagne', 'madrid'], label: 'en Espagne', tz: 'Europe/Madrid', geo: 'Madrid' },
+  { names: ['italie', 'rome'], label: 'en Italie', tz: 'Europe/Rome', geo: 'Rome' },
+  { names: ['royaume-uni', 'royaume uni', 'angleterre', 'londres', 'uk'], label: 'au Royaume-Uni', tz: 'Europe/London', geo: 'Londres' },
+  { names: ['russie', 'moscou'], label: 'en Russie', tz: 'Europe/Moscow', geo: 'Moscou' },
+  { names: ['turquie', 'istanbul'], label: 'en Turquie', tz: 'Europe/Istanbul', geo: 'Istanbul' },
+  { names: ['canada', 'montreal', 'toronto'], label: 'au Canada', tz: 'America/Toronto', geo: 'Toronto' },
+  { names: ['etats-unis', 'etats unis', 'usa', 'new york', 'amerique'], label: 'aux États-Unis (New York)', tz: 'America/New_York', geo: 'New York' },
+  { names: ['bresil', 'sao paulo'], label: 'au Brésil', tz: 'America/Sao_Paulo', geo: 'São Paulo' },
+  { names: ['japon', 'tokyo'], label: 'au Japon', tz: 'Asia/Tokyo', geo: 'Tokyo' },
+  { names: ['chine', 'pekin', 'shanghai'], label: 'en Chine', tz: 'Asia/Shanghai', geo: 'Shanghai' },
+  { names: ['coree', 'coree du sud', 'seoul'], label: 'en Corée du Sud', tz: 'Asia/Seoul', geo: 'Séoul' },
+  { names: ['inde', 'new delhi', 'delhi', 'mumbai'], label: 'en Inde', tz: 'Asia/Kolkata', geo: 'New Delhi' },
+  { names: ['dubai', 'emirats', 'emirats arabes unis'], label: 'à Dubaï', tz: 'Asia/Dubai', geo: 'Dubaï' },
+  { names: ['australie', 'sydney'], label: 'en Australie', tz: 'Australia/Sydney', geo: 'Sydney' }
+];
+
+function normalizeClockText(value = '') {
+  return String(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’`]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const CLOCK_WEATHER_RE = /(quel temps|meteo|temperature|fait[- ]il (chaud|froid|beau)|il fait (chaud|froid|beau))/;
+const CLOCK_TIME_RE =
+  /(quelle heure|l'heure (qu'il|actuelle|exacte|maintenant|est)|heure actuelle|quel jour (sommes|est[- ]on|on est|nous sommes)|on est quel jour|on est le combien|quelle est la date|la date (d'aujourd|actuelle|du jour)|quelle date)/;
+
+function extractClockPlace(n) {
+  const cleaned = n
+    .replace(/[?!.,;]+/g, ' ')
+    .replace(/\b(actuellement|maintenant|en ce moment|aujourd'hui|stp|svp|s'il te plait|la bas|exactement)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const matches = [
+    ...cleaned.matchAll(/\b(?:au|aux|en|a|dans|de|du|pour|chez)\s+(?:la |le |les |l')?([a-z' -]{2,40})/g)
+  ];
+  if (!matches.length) return '';
+
+  const last = matches[matches.length - 1][1].trim();
+  return last.split(/\s+(?:et|ou|puis)\s+/)[0].trim();
+}
+
+async function geocodeClockPlace(name) {
+  try {
+    const res = await axios.get('https://geocoding-api.open-meteo.com/v1/search', {
+      params: { name, count: 1, language: 'fr', format: 'json' },
+      timeout: 8000
+    });
+    const r = res.data?.results?.[0];
+    if (!r) return null;
+    return {
+      label: `à ${r.name}${r.country ? ` (${r.country})` : ''}`,
+      tz: r.timezone,
+      geo: r.name,
+      lat: r.latitude,
+      lon: r.longitude
+    };
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Horloge : lieu introuvable.');
+    return null;
+  }
+}
+
+async function resolveClockPlace(rawName) {
+  if (!rawName) return { ...CLOCK_DEFAULT, isDefault: true };
+
+  const n = normalizeClockText(rawName).replace(/^(la |le |les |l')/, '');
+  const hit = CLOCK_PLACES.find(place => place.names.includes(n));
+  if (hit) return hit;
+
+  const found = await geocodeClockPlace(rawName);
+  return found?.tz ? found : null;
+}
+
+function formatClockAnswer(place) {
+  const now = new Date();
+  const fmt = options => new Intl.DateTimeFormat('fr-FR', { timeZone: place.tz, ...options });
+
+  const time = fmt({ hour: '2-digit', minute: '2-digit', hour12: false }).format(now);
+  const date = fmt({ weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(now);
+  const offset =
+    fmt({ timeZoneName: 'shortOffset' }).formatToParts(now).find(part => part.type === 'timeZoneName')?.value || '';
+
+  const lines = [
+    `🕐 Il est *${time}* ${place.label}`,
+    `📅 ${date.charAt(0).toUpperCase()}${date.slice(1)}`,
+    `🌍 Fuseau : ${place.tz.replace(/_/g, ' ')}${offset ? ` (${offset})` : ''}`
+  ];
+  if (place.isDefault) lines.push('', 'Demande-moi une autre ville ou un autre pays si tu veux son heure.');
+  return lines.join('\n');
+}
+
+const WEATHER_CODES = {
+  0: ['☀️', 'Ciel dégagé'],
+  1: ['🌤️', 'Plutôt dégagé'],
+  2: ['⛅', 'Partiellement nuageux'],
+  3: ['☁️', 'Couvert'],
+  45: ['🌫️', 'Brouillard'],
+  48: ['🌫️', 'Brouillard givrant'],
+  51: ['🌦️', 'Bruine légère'],
+  53: ['🌦️', 'Bruine'],
+  55: ['🌦️', 'Bruine forte'],
+  61: ['🌧️', 'Pluie légère'],
+  63: ['🌧️', 'Pluie'],
+  65: ['🌧️', 'Forte pluie'],
+  71: ['🌨️', 'Neige légère'],
+  73: ['🌨️', 'Neige'],
+  75: ['🌨️', 'Forte neige'],
+  80: ['🌦️', 'Averses légères'],
+  81: ['🌧️', 'Averses'],
+  82: ['⛈️', 'Fortes averses'],
+  95: ['⛈️', 'Orage'],
+  96: ['⛈️', 'Orage avec grêle'],
+  99: ['⛈️', 'Orage violent avec grêle']
+};
+
+async function buildWeatherAnswer(place) {
+  let lat = place.lat;
+  let lon = place.lon;
+
+  if (lat === undefined || lon === undefined) {
+    const geo = await geocodeClockPlace(place.geo || place.label);
+    if (!geo) throw new Error('Lieu introuvable pour la météo.');
+    lat = geo.lat;
+    lon = geo.lon;
+  }
+
+  const res = await axios.get('https://api.open-meteo.com/v1/forecast', {
+    params: {
+      latitude: lat,
+      longitude: lon,
+      current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m',
+      timezone: 'auto'
+    },
+    timeout: 10000
+  });
+
+  const c = res.data?.current;
+  if (!c) throw new Error('Météo indisponible.');
+
+  const [icon, text] = WEATHER_CODES[c.weather_code] || ['🌡️', 'Conditions variables'];
+  return [
+    `${icon} Météo ${place.label}`,
+    `🌡️ ${Math.round(c.temperature_2m)} °C (ressenti ${Math.round(c.apparent_temperature)} °C)`,
+    `☁️ ${text}`,
+    `💧 Humidité : ${Math.round(c.relative_humidity_2m)} %`,
+    `💨 Vent : ${Math.round(c.wind_speed_10m)} km/h`
+  ].join('\n');
+}
+
+// Renvoie un texte si le message demande l'heure, la date ou la météo, sinon null
+async function tryAnswerClockOrWeather(text) {
+  const n = normalizeClockText(text);
+  if (!n || n.split(' ').length > 16) return null;
+
+  const wantsWeather = CLOCK_WEATHER_RE.test(n);
+  const wantsTime = !wantsWeather && CLOCK_TIME_RE.test(n);
+  if (!wantsWeather && !wantsTime) return null;
+
+  const place = await resolveClockPlace(extractClockPlace(n));
+  if (!place) return '🌍 Je ne trouve pas ce lieu. Essaie avec le nom d’un pays ou d’une grande ville.';
+
+  if (wantsTime) return formatClockAnswer(place);
+
+  try {
+    return await buildWeatherAnswer(place);
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Météo indisponible.');
+    return '⚠️ Je n’arrive pas à récupérer la météo pour le moment.';
+  }
+}
+
 async function handleAICommand(jid, message, sender, command, args) {
   if (!['chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police'].includes(command)) {
     return false;
@@ -5226,6 +5447,18 @@ async function handleAICommand(jid, message, sender, command, args) {
       message
     );
     return true;
+  }
+
+  if (command === 'chat') {
+    try {
+      const live = await tryAnswerClockOrWeather(args);
+      if (live) {
+        await sendReply(jid, live, message);
+        return true;
+      }
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Horloge/météo : erreur.');
+    }
   }
 
   if (!CONFIG.groqKey) {
@@ -5938,6 +6171,7 @@ async function handleQuizPointsCommand(jid, message, command, args, ownerCommand
 const AUTO_QUIZ_CATEGORIES = {
   multivers: { label: 'Multivers', icon: '🌌', desc: 'questions sur les animés' },
   id: { label: 'ID', icon: '🖼️', desc: 'identifie le personnage sur l’image' },
+  idv: { label: 'IDV', icon: '🎴', desc: 'identifie l’univers sur l’affiche' },
   cg: { label: 'CG', icon: '🧠', desc: 'culture générale' }
 };
 const AUTO_QUIZ_COUNTS = [10, 20, 30];
@@ -6077,7 +6311,7 @@ function isQuizAnswerCorrect(submitted, question) {
 
     // Personnage (ID) : le prénom seul suffit ; le nom de famille seul est refusé (plusieurs personnages
     // le portent), sauf pour les noms à 3 mots ou plus où le dernier mot est le nom d'usage (ex. Monkey D. Luffy)
-    if (question.type === 'image' && subTokens.length === 1 && subTokens[0].length >= 3 && cand === normalizeLoose(question.answer)) {
+    if (question.type === 'image' && question.kind !== 'poster' && subTokens.length === 1 && subTokens[0].length >= 3 && cand === normalizeLoose(question.answer)) {
       const rawTokens = normalizeLoose(question.answer).split(' ').filter(Boolean);
       const accepted = [rawTokens[0]];
       if (rawTokens.length >= 3) accepted.push(rawTokens[rawTokens.length - 1]);
@@ -6124,7 +6358,10 @@ async function judgeQuizAnswer(question, playerText) {
     }
 
     const questionText =
-      question.question || 'Quel est le nom du personnage montré sur l\'image ?';
+      question.question ||
+      (question.kind === 'poster'
+        ? 'Quel est le titre de l\'animé (l\'univers) montré sur l\'affiche ?'
+        : 'Quel est le nom du personnage montré sur l\'image ?');
 
     const data = await groqJson(
       `Tu es juge d'un quiz entre fans, attentif mais rigoureux. Lis bien la réponse du joueur.
@@ -6137,7 +6374,7 @@ Règles :
 - L'orthographe doit être exacte : une lettre en moins, en trop ou remplacée par une autre est REFUSÉE. Majuscules, accents, tirets, espaces et apostrophes ne comptent pas.
 - ACCEPTE toute orthographe, transcription ou traduction qui EXISTE réellement pour cette réponse (VO, VF, VOSTFR, anglais, romaji, coréen romanisé...) : ex. « Tohru » et « Tooru », « Dokja » et « Dok-ja », « Najenda » et « Nadezhda Najenda », « Vide infini » / « Vide incommensurable » / « Infinite Void ». Vérifie qu'elle existe vraiment : si oui, ACCEPTE ; si c'est une simple faute, REFUSE.
 - Si la question contient déjà le mot générique (souffle, technique, forme, titan, épée...), le mot distinctif seul suffit (ex. « insecte » pour « Souffle de l'insecte », « originel » pour « Titan originel »).
-- Personnage d'une œuvre : accepte le prénom, le nom de famille ou le nom d'usage seul quand il désigne ce personnage de façon unique parmi les personnages connus de l'œuvre (ex. « Gojo », « Isagi », « Uzui »). REFUSE le nom de famille seul quand d'autres membres connus de la famille le portent (ex. « Uchiha » pour Sasuke, « Elric », « Zoldyck »).
+- Personnage d'une œuvre : accepte le prénom, le nom de famille ou le nom d'usage seul quand il désigne ce personnage de façon unique parmi les personnages connus de l'œuvre (ex. « Gojo », « Isagi », « Uzui », « Urahara »). REFUSE le nom de famille seul quand d'autres membres connus de la famille le portent (ex. « Uchiha » pour Sasuke, « Elric », « Zoldyck »).
 - Personne réelle : accepte le nom de famille, le nom complet ou le nom d'usage universel (« Napoléon » pour Napoléon Bonaparte ; « de Vinci » ou « da Vinci » pour Léonard de Vinci) ; REFUSE un prénom seul qui n'identifie pas la personne (ex. « Léonard »).
 - Question d'explication : accepte si l'idée essentielle est présente, même avec d'autres mots ou de façon approximative.
 - REFUSE si c'est hors sujet, faux, trop vague ou si cela désigne autre chose.
@@ -6187,7 +6424,7 @@ Réponds en JSON : {"items":[{"n":1,"answer":"..."}]}`,
     const verdict = await groqJson(
       `Tu es relecteur exigeant d'un quiz. Pour chaque ligne :
 - "same" : true si les deux réponses désignent la même chose (même écrites autrement : VO/VF, transcription, forme courte) ;
-- "ok" : true seulement si la réponse proposée est EXACTE selon l'œuvre originale ou les faits établis, et si la question est claire, non ambiguë, compréhensible seule et correctement formulée en français${banal}.
+- "ok" : true seulement si la réponse proposée est EXACTE selon l'œuvre originale ou les faits établis ; si tout ce que la question affirme (liens de parenté, rôles, événements, chronologie) est vrai et si la situation décrite existe vraiment dans l'œuvre ; si une seule réponse est attendue (pas de question à double volet) ; et si la question est claire, non ambiguë, compréhensible seule et correctement formulée en français${banal}.
 Au moindre doute sur l'exactitude, mets ok = false. Si la réponse indépendante est "?", juge avec tes propres connaissances et sois très prudent.
 
 ${rows}
@@ -6361,6 +6598,8 @@ Niveau : ${quizLevelInstruction('multivers', level)} ;
 Fiabilité (très important) :
 - UNE seule question par univers : chaque question porte sur un anime/manga DIFFÉRENT ;
 - ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, change de sujet ; vérifie bien QUI fait QUOI (ne confonds jamais les personnages, leurs rôles, leurs organisations) ;
+- UNE seule réponse attendue : jamais de question à double volet (« qui et pourquoi », « cite deux… », « quel est X et quel est Y ») ;
+- logique et exactitude : tout ce que la question affirme (liens de parenté, rôles, événements, chronologie) doit être vrai dans l'œuvre, et la situation décrite doit réellement exister (ex. Nezuko est la SŒUR de Tanjiro, pas son frère) ; relis chaque question avant de la garder ;
 - la réponse ne doit pas apparaître dans la question.
 
 Champ "type" :
@@ -6369,7 +6608,7 @@ Champ "type" :
 - "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
 Champ "alts" : toutes les façons acceptables de répondre :
 - traductions officielles ou courantes en VO, VF, VOSTFR, anglais et romaji (ex. pour une technique : « Vide infini », « Vide incommensurable », « Infinite Void », « Muryō Kūsho ») ;
-- personnage : prénom seul, surnoms, ET le nom de famille seul quand il désigne un seul personnage connu de l'œuvre (ex : « Gojo », « Isagi », « Uzui » sont acceptés ; « Uchiha » pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
+- personnage : prénom seul, surnoms, ET le nom de famille seul quand il désigne un seul personnage connu de l'œuvre (ex : « Gojo », « Isagi », « Uzui », « Urahara » sont acceptés ; « Uchiha » pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
 - transcriptions et orthographes qui existent réellement (ex : « Najenda » et « Nadezhda Najenda », « Yairon » et « Lairon ») ;
 - forme courte avec le seul mot distinctif quand la question contient déjà le mot générique (ex : question sur le souffle de Shinobu → alts « Insecte », « De l'insecte » ; question sur le titan de Ymir → « Originel », « Fondateur ») ;
 - ne liste pas les simples fautes de frappe (elles sont déjà tolérées).
@@ -6536,6 +6775,120 @@ async function fetchJikanCharacters(page) {
   return out;
 }
 
+const ANILIST_MEDIA_QUERY = `query ($page: Int, $perPage: Int) {
+  Page(page: $page, perPage: $perPage) {
+    media(type: ANIME, sort: POPULARITY_DESC, isAdult: false, format_in: [TV, MOVIE, ONA]) {
+      id
+      title { romaji english }
+      synonyms
+      coverImage { extraLarge large }
+    }
+  }
+}`;
+
+// On écarte les suites et saisons : l'univers doit être identifiable par son titre principal
+const POSTER_SEQUEL_RE = /(season|saison|2nd|3rd|\dth|part\s*\d|cour|final|shippuden|\bii\b|\biii\b|\b[2-9]\b\s*$)/i;
+
+async function fetchAniListPosters(page) {
+  const res = await axios.post(
+    'https://graphql.anilist.co',
+    { query: ANILIST_MEDIA_QUERY, variables: { page, perPage: 50 } },
+    { timeout: 15000, headers: { 'Content-Type': 'application/json', Accept: 'application/json' } }
+  );
+
+  const out = [];
+  for (const m of res.data?.data?.Page?.media || []) {
+    const imageUrl = m?.coverImage?.extraLarge || m?.coverImage?.large || '';
+    const title = String(m?.title?.english || m?.title?.romaji || '').trim();
+    if (!m?.id || !imageUrl || !title) continue;
+    if (POSTER_SEQUEL_RE.test(title) || POSTER_SEQUEL_RE.test(String(m?.title?.romaji || ''))) continue;
+
+    const alts = [m.title?.romaji, m.title?.english, ...(Array.isArray(m.synonyms) ? m.synonyms : [])]
+      .filter(Boolean)
+      .map(String)
+      .filter(name => name !== title)
+      .slice(0, 8);
+
+    out.push({ type: 'image', kind: 'poster', id: `m${m.id}`, imageUrl, answer: title, alts, hintText: '' });
+  }
+  return out;
+}
+
+// Titres acceptés pour chaque affiche : VF / VOSTFR / anglais / romaji / abréviations qui existent vraiment
+async function enrichPosterQuestions(list) {
+  if (!CONFIG.groqKey || !list.length) return list;
+
+  try {
+    const items = list
+      .map((q, i) => `${i + 1}. ${q.answer}${q.alts?.length ? ` — autres titres : ${q.alts.join(' / ')}` : ''}`)
+      .join('\n');
+
+    const data = await groqJson(
+      `Voici des animés :
+${items}
+
+Pour chacun, donne dans "accept" tous les titres sous lesquels on le connaît réellement : titre français (VF ou VOSTFR), titre anglais, titre japonais romanisé, abréviations courantes (ex. SNK, JJK, HxH), transcriptions existantes.
+N'invente rien : uniquement des titres qui existent vraiment pour CET animé.
+Réponds en JSON : {"items":[{"n":1,"accept":["..."]}]}`,
+      3500,
+      0
+    );
+
+    for (const item of data?.items || []) {
+      const q = list[Number(item?.n) - 1];
+      if (q && Array.isArray(item.accept)) {
+        q.alts = [...new Set([...(q.alts || []), ...item.accept.map(String)])].slice(0, 16);
+      }
+    }
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : titres des affiches non enrichis.');
+  }
+
+  return list;
+}
+
+async function generateIdvQuizQuestions(total, level = 'moyen') {
+  const history = await loadQuizHistory('idv');
+  pruneQuizHistory('idv').catch(() => {});
+
+  const pool = [];
+  const seen = new Set();
+  const fresh = () => pool.filter(item => !history.keys.has(`m:${item.id}`));
+
+  const { from, to } = idLevelPages(level);
+  const pages = [];
+  for (let page = from; page <= to; page++) pages.push(page);
+  shuffleInPlace(pages);
+
+  let fetched = 0;
+  for (const page of pages) {
+    if (fresh().length >= total + 4 || fetched >= 6) break;
+    fetched++;
+    try {
+      for (const item of await fetchAniListPosters(page)) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        pool.push(item);
+      }
+    } catch (error) {
+      lastQuizGenerationError = `AniList : ${String(error?.response?.status || error?.message || error).slice(0, 120)}`;
+      logger.warn({ error: error?.message, page }, 'Sitri~Quiz : AniList indisponible (affiches).');
+    }
+    await sleep(700);
+  }
+
+  let chosen = shuffleInPlace(fresh());
+  if (chosen.length < total) {
+    const rest = shuffleInPlace(pool.filter(item => !chosen.includes(item)));
+    chosen = chosen.concat(rest);
+  }
+  chosen = chosen.slice(0, total);
+
+  for (const item of chosen) item.histKeys = [{ key: `m:${item.id}`, label: item.answer }];
+
+  return enrichPosterQuestions(chosen);
+}
+
 function idLevelPages(level) {
   // Pages de 50 personnages classés par popularité (AniList)
   if (level === 'facile') return { from: 1, to: 2 };
@@ -6562,7 +6915,7 @@ ${items}
 Pour chacun, donne dans "accept" toutes les réponses acceptables dans un quiz d'identification :
 - toutes les orthographes, transcriptions et traductions de son nom qui EXISTENT réellement (ex. « Tohru » et « Tooru », « Dokja » et « Dok-ja ») ;
 - le prénom seul, le nom d'usage, les surnoms connus ;
-- le nom de famille seul UNIQUEMENT s'il identifie ce personnage de façon unique dans son œuvre (« Isagi », « Gojo » : oui ; « Uchiha », « Elric », « Zoldyck » : non, d'autres membres sont connus).
+- le nom de famille seul UNIQUEMENT s'il identifie ce personnage de façon unique dans son œuvre (« Isagi », « Gojo », « Uzui », « Urahara » : oui, ces personnages sont surtout connus par leur nom de famille et leur prénom passe aussi ; « Uchiha », « Elric », « Zoldyck » : non, d'autres membres sont connus).
 N'invente rien : uniquement des écritures du MÊME personnage.
 Réponds en JSON : {"items":[{"n":1,"accept":["..."]}]}`,
       3500,
@@ -6731,7 +7084,7 @@ async function askNextAutoQuestion(session) {
         const image = await downloadQuizImage(q.imageUrl);
         await quizSend(jid, {
           image,
-          caption: `🖼️ *Question ${number}/${session.questions.length}* — Qui est ce personnage ?\n\n⏱️ ${seconds} secondes`
+          caption: `${q.kind === 'poster' ? '🎴' : '🖼️'} *Question ${number}/${session.questions.length}* — ${q.kind === 'poster' ? 'Quel est cet univers (anime) ?' : 'Qui est ce personnage ?'}\n\n⏱️ ${seconds} secondes`
         });
       } else {
         const lines = [`❓ *Question ${number}/${session.questions.length}* — ${category.icon} ${category.label}`, '', q.question];
@@ -6756,7 +7109,7 @@ async function askNextAutoQuestion(session) {
         const hint = q.hintText
           ? `💡 Indice : ça vient de *${q.hintText}*`
           : first
-            ? `💡 Indice : le nom commence par *${first[0].toUpperCase()}*`
+            ? `💡 Indice : ${q.kind === 'poster' ? 'le titre' : 'le nom'} commence par *${first[0].toUpperCase()}*`
             : '';
         if (hint) await quizSend(jid, { text: hint }).catch(() => {});
       }, Math.round(AUTO_QUIZ_TIME_MS / 2));
@@ -6802,14 +7155,16 @@ async function startAutoQuiz(session) {
       text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation des questions...`
     });
 
-    if (!CONFIG.groqKey && session.category !== 'id') {
+    if (!CONFIG.groqKey && !['id', 'idv'].includes(session.category)) {
       throw new Error('GROQ_API_KEY absent');
     }
 
     const questions =
       session.category === 'id'
         ? await generateIdQuizQuestions(session.total, session.level || 'moyen')
-        : await generateTextQuizQuestions(session.category, session.total, session.level || 'moyen');
+        : session.category === 'idv'
+          ? await generateIdvQuizQuestions(session.total, session.level || 'moyen')
+          : await generateTextQuizQuestions(session.category, session.total, session.level || 'moyen');
 
     if (autoQuizzes.get(jid) !== session) return;
 
@@ -6845,6 +7200,7 @@ function matchQuizCategory(text) {
   if (!n) return null;
   if (n === 'multivers' || n === 'multiverse') return 'multivers';
   if (n === 'id' || n === 'identification') return 'id';
+  if (n === 'idv' || n === 'id verse' || n === 'id univers' || n === 'id verses') return 'idv';
   if (n === 'cg' || n === 'culture generale' || n === 'culture g') return 'cg';
   return null;
 }
@@ -7053,6 +7409,41 @@ async function handleAutoQuizCommand(jid, message, command, args, ownerCommand) 
 // 26. ROUTEUR PRINCIPAL
 // ------------------------------------------------------------
 
+// ------------------------------------------------------------
+// MODE KAYDEN : seul le propriétaire utilise le bot (Xkayon / Xkayoff)
+// ------------------------------------------------------------
+
+async function ensureBotFlagsLoaded() {
+  if (botFlagsLoaded) return;
+  if (Date.now() - botFlagsLastTry < 30000) return;
+  botFlagsLastTry = Date.now();
+
+  try {
+    const res = await executeDbWithRetry({
+      sql: "SELECT value FROM bot_flags WHERE key = 'kayden_only'",
+      args: []
+    });
+    isKaydenOnly = String(res.rows?.[0]?.value || '') === '1';
+    botFlagsLoaded = true;
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Mode Kayden : lecture impossible.');
+  }
+}
+
+async function setKaydenOnly(enabled) {
+  isKaydenOnly = enabled;
+  botFlagsLoaded = true;
+  try {
+    await executeDbWithRetry({
+      sql: `INSERT INTO bot_flags (key, value) VALUES ('kayden_only', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [enabled ? '1' : '0']
+    });
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Mode Kayden : sauvegarde impossible.');
+  }
+}
+
 const KNOWN_COMMANDS = new Set([
   'chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police', 'syp', 'spy', 'synopsis', 'sypnosis', 'info',
   'daily', 'coins', 'p', 'rank', 'profil',
@@ -7060,7 +7451,7 @@ const KNOWN_COMMANDS = new Set([
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models',
-  'start', 'recap', 'tab', 'end'
+  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff'
 ]);
 
 const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
@@ -7228,6 +7619,21 @@ async function processCommand(message) {
       process.exit(1);
     }, 1000);
 
+    return;
+  }
+
+  if (command === 'kayon' || command === 'kayoff') {
+    if (!ownerCommand) return;
+
+    const enable = command === 'kayon';
+    await setKaydenOnly(enable);
+    await sendReply(
+      jid,
+      enable
+        ? '🔒 𝗠𝗢𝗗𝗘 𝗞𝗔𝗬𝗗𝗘𝗡 𝗔𝗖𝗧𝗜𝗩𝗘́\nJe n’obéis plus qu’à toi, dans tous les groupes et en privé. Xkayoff pour me rendre aux autres.'
+        : '🔓 𝗠𝗢𝗗𝗘 𝗞𝗔𝗬𝗗𝗘𝗡 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́\nTout le monde peut de nouveau me parler.',
+      message
+    );
     return;
   }
 
@@ -7724,6 +8130,10 @@ async function startBot() {
 
       for (const message of event.messages) {
         if (!message?.message) continue;
+
+        // Mode Kayden : tous les messages des autres sont ignorés, partout
+        await ensureBotFlagsLoaded();
+        if (isKaydenOnly && !isOwnerMessage(message)) continue;
 
         const quizReaction = unwrapContent(message)?.reactionMessage;
         if (quizReaction) {

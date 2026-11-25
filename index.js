@@ -2792,6 +2792,200 @@ function buildFallbackMiniCardPng({ username, level, xp, currentLevelXp, nextLev
   ]);
 }
 
+// ───────── Carte « Ranker » (fenêtre de statut) ─────────
+const RANKER_TIERS = [
+  { name: 'Legend', letter: 'SS', color: '#fb7185' },
+  { name: 'Elite', letter: 'S', color: '#c084fc' },
+  { name: 'Diamond', letter: 'A', color: '#38bdf8' },
+  { name: 'Gold', letter: 'B', color: '#fbbf24' },
+  { name: 'Silver', letter: 'C', color: '#cbd5e1' },
+  { name: 'Bronze', letter: 'D', color: '#d97706' },
+  { name: 'Novice', letter: 'E', color: '#94a3b8' }
+];
+
+function cardSafeText(value, fallback = 'Joueur', max = 18) {
+  const cleaned = String(value || '')
+    .replace(/[^\u0020-\u007E\u00A0-\u00FF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max)
+    .trim();
+  return cleaned || fallback;
+}
+
+function pangoEscape(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+let rankerFontPath = null;
+function ensureRankerFont(fontB64) {
+  if (rankerFontPath && fs.existsSync(rankerFontPath)) return rankerFontPath;
+  const target = path.join(os.tmpdir(), 'sitri-nel-tektur-v1.ttf');
+  if (!fs.existsSync(target)) fs.writeFileSync(target, Buffer.from(fontB64, 'base64'));
+  rankerFontPath = target;
+  return target;
+}
+
+async function renderRankerCard(data, sharpFn, fontB64) {
+  const W = 1000;
+  const H = 560;
+  const fontfile = ensureRankerFont(fontB64);
+
+  const xp = Math.max(0, Number(data.xp) || 0);
+  const level = Math.max(1, Number(data.level) || 1);
+  const coins = Math.max(0, Number(data.coins) || 0);
+  const currentLevelXp = Number(data.currentLevelXp) || 0;
+  const nextLevelXp = Math.max(Number(data.nextLevelXp) || 100, currentLevelXp + 1);
+  const ratio = Math.min(Math.max((xp - currentLevelXp) / (nextLevelXp - currentLevelXp), 0), 1);
+
+  const rankName = String(data.rankLabel || 'Novice').replace(/[^A-Za-z]/g, '') || 'Novice';
+  const tier = RANKER_TIERS.find(t => t.name.toLowerCase() === rankName.toLowerCase()) || RANKER_TIERS[RANKER_TIERS.length - 1];
+  const name = cardSafeText(data.username, 'Joueur', 18).toUpperCase();
+  const position = Number(data.position) > 0 ? `#${data.position} / ${Math.max(Number(data.totalUsers) || 1, 1)}` : 'NON CLASSE';
+
+  // ── Décor (sans texte) ──
+  const barX = 400, barY = 392, barW = 540, barH = 26;
+  const fillW = Math.max(Math.round(barW * ratio), ratio > 0 ? 18 : 0);
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#040814"/><stop offset="0.55" stop-color="#0a1330"/><stop offset="1" stop-color="#050b1c"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0"/><stop offset="0.5" stop-color="#38bdf8" stop-opacity="0.9"/><stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.45" r="0.75">
+      <stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.55"/>
+    </radialGradient>
+    <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#38bdf8" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="7"/></filter>
+  </defs>
+
+  <rect width="${W}" height="${H}" fill="url(#bg)"/>
+  <rect width="${W}" height="${H}" fill="url(#grid)"/>
+  <rect width="${W}" height="${H}" fill="url(#vig)"/>
+
+  <rect x="18" y="18" width="${W - 36}" height="${H - 36}" rx="20" fill="none" stroke="#38bdf8" stroke-width="5" opacity="0.55" filter="url(#glow)"/>
+  <rect x="18" y="18" width="${W - 36}" height="${H - 36}" rx="20" fill="none" stroke="#38bdf8" stroke-width="2.5"/>
+  <rect x="32" y="32" width="${W - 64}" height="${H - 64}" rx="14" fill="none" stroke="#38bdf8" stroke-opacity="0.28" stroke-width="1.2"/>
+
+  <g stroke="#7dd3fc" stroke-width="5" fill="none" stroke-linecap="round">
+    <path d="M18 70V40a22 22 0 0 1 22-22h30"/><path d="M${W - 18} 70V40a22 22 0 0 0-22-22h-30"/>
+    <path d="M18 ${H - 70}v30a22 22 0 0 0 22 22h30"/><path d="M${W - 18} ${H - 70}v30a22 22 0 0 1-22 22h-30"/>
+  </g>
+
+  <rect x="60" y="100" width="${W - 120}" height="2" fill="url(#line)"/>
+
+  <circle cx="215" cy="262" r="150" fill="#38bdf8" fill-opacity="0.07"/>
+  <circle cx="215" cy="262" r="132" fill="none" stroke="url(#ring)" stroke-width="9" opacity="0.6" filter="url(#glow)"/>
+  <circle cx="215" cy="262" r="130" fill="none" stroke="url(#ring)" stroke-width="6"/>
+
+  <polygon points="215,408 251,429 251,469 215,490 179,469 179,429" fill="#0b1226" stroke="${tier.color}" stroke-width="4"/>
+  <polygon points="215,408 251,429 251,469 215,490 179,469 179,429" fill="none" stroke="${tier.color}" stroke-width="9" opacity="0.35" filter="url(#glow)"/>
+
+  <g fill="#0f172a" fill-opacity="0.85" stroke="#38bdf8" stroke-opacity="0.55" stroke-width="2">
+    <rect x="400" y="226" width="170" height="104" rx="12"/>
+    <rect x="585" y="226" width="170" height="104" rx="12"/>
+    <rect x="770" y="226" width="170" height="104" rx="12"/>
+  </g>
+
+  <rect x="${barX}" y="${barY}" width="${barW}" height="${barH}" rx="13" fill="#0f172a" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="2"/>
+  ${fillW > 0 ? `<rect x="${barX}" y="${barY}" width="${fillW}" height="${barH}" rx="13" fill="url(#bar)"/>` : ''}
+  <rect x="${barX}" y="${barY}" width="${fillW}" height="${Math.round(barH / 2)}" rx="13" fill="#fff" fill-opacity="0.12"/>
+</svg>`;
+
+  const layers = [];
+
+  // Avatar rond (photo de profil, sinon initiale)
+  const size = 232;
+  let avatarPng = null;
+  if (data.avatarBuffer) {
+    try {
+      const mask = Buffer.from(`<svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2}" fill="#fff"/></svg>`);
+      avatarPng = await sharpFn(data.avatarBuffer)
+        .resize(size, size, { fit: 'cover' })
+        .ensureAlpha()
+        .composite([{ input: mask, blend: 'dest-in' }])
+        .png()
+        .toBuffer();
+    } catch {
+      avatarPng = null;
+    }
+  }
+  if (!avatarPng) {
+    const bgCircle = Buffer.from(
+      `<svg width="${size}" height="${size}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#581c87"/></linearGradient></defs><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2}" fill="url(#g)"/></svg>`
+    );
+    avatarPng = await sharpFn(bgCircle).png().toBuffer();
+  }
+  layers.push({ input: avatarPng, left: 215 - size / 2, top: 262 - size / 2 });
+
+  // Texte : une image par morceau (police intégrée, aucun accent perdu)
+  const text = async (markup, { size: px = 24, color = '#ffffff', width, left, top, centerX, centerY, rightX, spacing } = {}) => {
+    const span = `<span foreground="${color}">${markup}</span>`;
+    const { data: buf, info } = await sharpFn({
+      text: { text: span, font: `SitriTektur ${px}`, fontfile, rgba: true, dpi: 72, ...(width ? { width } : {}), ...(spacing ? { spacing } : {}) }
+    })
+      .png()
+      .toBuffer({ resolveWithObject: true });
+
+    let x = left ?? 0;
+    let y = top ?? 0;
+    if (centerX !== undefined) x = Math.round(centerX - info.width / 2);
+    if (centerY !== undefined) y = Math.round(centerY - info.height / 2);
+    if (rightX !== undefined) x = Math.round(rightX - info.width);
+    layers.push({ input: buf, left: Math.max(0, x), top: Math.max(0, y) });
+  };
+
+  const initial = cardSafeText(data.username, 'J', 1).toUpperCase();
+  if (!data.avatarBuffer || !avatarPng) {
+    await text(pangoEscape(initial), { size: 110, color: '#e2e8f0', centerX: 215, centerY: 262 });
+  }
+
+  await text('[ STATUS ]', { size: 34, color: '#38bdf8', left: 62, top: 48 });
+  await text('SITRI-NEL  •  RANKER', { size: 22, color: '#94a3b8', rightX: W - 62, top: 58 });
+
+  await text(pangoEscape(name), { size: 54, color: '#f8fafc', left: 400, top: 112 });
+  await text(`CLASSE ${tier.letter}  •  ${pangoEscape(tier.name.toUpperCase())}`, { size: 26, color: tier.color, left: 402, top: 178 });
+
+  await text(tier.letter, { size: tier.letter.length > 1 ? 36 : 46, color: tier.color, centerX: 215, centerY: 449 });
+  await text('RANG', { size: 18, color: '#94a3b8', centerX: 215, top: 496 });
+
+  const boxes = [
+    { x: 400, label: 'NIVEAU', value: String(level), color: '#f8fafc' },
+    { x: 585, label: 'XP', value: String(xp), color: '#38bdf8' },
+    { x: 770, label: 'XCOINS', value: String(coins), color: '#fbbf24' }
+  ];
+  for (const box of boxes) {
+    await text(box.label, { size: 18, color: '#94a3b8', centerX: box.x + 85, top: 238 });
+    const px = box.value.length > 6 ? 30 : box.value.length > 4 ? 38 : 50;
+    await text(pangoEscape(box.value), { size: px, color: box.color, centerX: box.x + 85, centerY: 292 });
+  }
+
+  await text('PROGRESSION', { size: 18, color: '#94a3b8', left: 402, top: 360 });
+  await text(`${Math.round(ratio * 100)} %`, { size: 18, color: '#e2e8f0', rightX: 940, top: 360 });
+  await text(`XP  ${xp} / ${nextLevelXp}`, { size: 20, color: '#e2e8f0', left: 402, top: 428 });
+
+  await text('CLASSEMENT', { size: 20, color: '#94a3b8', left: 402, top: 474 });
+  await text(pangoEscape(position), { size: 30, color: '#c084fc', rightX: 940, top: 466 });
+
+  const png = await sharpFn(Buffer.from(svg)).composite(layers).png().toBuffer();
+  return png;
+}
+
+// Police Tektur (SIL OFL 1.1), réduite aux caractères latins et renommée pour un rendu identique partout
+const RANKER_FONT_B64 = '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REZMVAAaY3lybAAaZ3JlawAabGF0bgAeABQAAAAQAAJDQVQgACpOTEQgAEYAAP//AAoAAwAEAAUABgAHAAgACQAKAAsADAAA//8ACwABAAMABAAFAAYABwAIAAkACgALAAwAAP//AAwAAAACAAMABAAFAAYABwAIAAkACgALAAwADWxpZ2EAUGxvY2wAVmxvY2wAXHBudW0AYnNzMDEAaHNzMDIAcnNzMDMAfHNzMDQAhnNzMDUAkHN1YnMAmnN1cHMAoHRudW0Apnplcm8ArAAAAAEABQAAAAEAAAAAAAEAAwAAAAEACQAGAAEACwAAAQAABgABAAwAAAEBAAYAAQANAAABAgAGAAEADgAAAQMABgABAA8AAAEEAAAAAQAHAAAAAQAGAAAAAQAIAAAAAQAKABAAIgBYAGYAegCwAMoBAAEOARwBNAFmAYgBugHQAfICBgAGAAAAAQAIAAEASgABAAgAAgAGABYAAQASAAEAAQASAAEAAAABAAEAMAABAAEAMAABAAAAAgABAAAAAQAIAAEAFABeAAEAAAABAAgAAQAGAF0AAQABAKMABgAAAAEACAABAEAAAgAKABwAAQAEAAEAWQABAAAAAQAAAAQAAQAEAAEAWgABAAAAAQAAAAQAAQAAAAEACAACAAoAAgBkAGUAAQACABAALgAEAAAAAQAIAAEAJgACAAoAFAABAAQAYgACABAAAgAGAAwAYwACABAAYwACAGQAAQACAA8AWQABAAAAAQAIAAEAIgAUAAEAAAABAAgAAQAUAB4AAQAAAAEACAABAAYACgACAAEAswC8AAAAAQAAAAEACAACABoACgC0ALUAtgC3ALgAuQC6ALsAvACzAAIAAgC+AMYAAADcANwACQABAAAAAQAIAAIADgAEANsA3ADdAN4AAQAEALMAvQDHANEAAQAAAAEACAACABYACAADAQIBAwEEAQUBBgEHAQgAAQAIAAIAPwBBAEMARQBHAEkASwABAAAAAQAIAAIAJAAEAAYADAAcAQkAAQAAAAEACAACAA4ABAAHAA0AHQEKAAEABAAFAAsAGwBNAAEAAAABAAgAAQAGAAEAAQABABQAAQAAAAEACAABAAYAAQABAAEAEgABAAEACAACAAAAFAACAAAAJAACd2R0aAEGAAB3Z2h0AQcAAQAEABAAAQAAAAIBEABkAAAAAQABAAABCQH0AAA=';
+
 async function generateProfileVisualCard({
   username,
   avatarBuffer,
@@ -2805,6 +2999,19 @@ async function generateProfileVisualCard({
   totalUsers,
   mode = 'profil'
 }) {
+  // Carte « Ranker » (fenêtre de statut) : sharp + police intégrée, aucune dépendance supplémentaire
+  try {
+    const sharpMod = await import('sharp');
+    const sharpFn = sharpMod.default || sharpMod;
+    return await renderRankerCard(
+      { username, avatarBuffer, level, xp, currentLevelXp, nextLevelXp, coins, rankLabel, position, totalUsers },
+      sharpFn,
+      RANKER_FONT_B64
+    );
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Carte Ranker impossible, carte de secours utilisée.');
+  }
+
   if (!createCanvasFn) {
     return buildFallbackMiniCardPng({
       username,
@@ -4713,10 +4920,21 @@ setTimeout(() => {
 // Cookies YouTube : fichier cookies.txt en base64 (YOUTUBE_COOKIES_BASE64),
 // ou texte collé tel quel (YOUTUBE_COOKIES) : format Netscape ou "nom=valeur; nom2=valeur2"
 function buildYoutubeCookiesFile() {
-  const b64 = cleanEnv(process.env.YOUTUBE_COOKIES_BASE64);
-  let raw = b64
-    ? Buffer.from(b64, 'base64').toString('utf8')
-    : String(process.env.YOUTUBE_COOKIES || '').trim();
+  let raw = '';
+
+  // 1. Fichier youtube_cookies.txt à la racine du projet (comme Erwin-Bot)
+  try {
+    const local = path.resolve('./youtube_cookies.txt');
+    if (fs.existsSync(local) && fs.statSync(local).size > 50) raw = fs.readFileSync(local, 'utf8');
+  } catch {
+    raw = '';
+  }
+
+  // 2. Variable YOUTUBE_COOKIES_BASE64 (comme Erwin-Bot), ou YOUTUBE_COOKIES en texte brut
+  if (!raw) {
+    const b64 = cleanEnv(process.env.YOUTUBE_COOKIES_BASE64);
+    raw = b64 ? Buffer.from(b64, 'base64').toString('utf8') : String(process.env.YOUTUBE_COOKIES || '').trim();
+  }
   if (!raw) return '';
 
   if (!raw.includes('\n') && raw.includes('\\n')) raw = raw.replace(/\\n/g, '\n');
@@ -4809,15 +5027,40 @@ async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
       if (ffmpegPath) args.push('-x', '--audio-format', 'm4a', '--audio-quality', '0');
     }
 
-    // Plusieurs profils, du plus simple au plus large (l'erreur 403 se produit vite : on peut tous les essayer)
+    // Cookies YouTube (méthode d'Erwin-Bot) : utilisés en premier s'ils existent
+    const cookiesContent = soundcloud ? '' : buildYoutubeCookiesFile();
+    if (cookiesContent) {
+      cookiesPath = path.join(dir, `${base}_cookies.txt`);
+      fs.writeFileSync(cookiesPath, cookiesContent);
+    }
+
+    // Plusieurs profils, du plus simple au plus large.
+    // « anonymous » : sans cookies. Si YouTube répond « Sign in » à l'un d'eux, les autres échoueront aussi.
     const jsArgs = ['--js-runtimes', 'node'];
+    const cookieArgs = cookiesPath ? ['--cookies', cookiesPath] : [];
     const clientProfiles = soundcloud
-      ? [[]]
+      ? [{ extra: [], anonymous: true }]
       : [
-          ['--extractor-args', 'youtube:player_client=android_vr'],
-          ['--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'],
-          [...jsArgs, '--extractor-args', 'youtube:player_client=tv,web_safari'],
-          [...jsArgs]
+          ...(cookiesPath
+            ? [
+                {
+                  extra: [...cookieArgs, '--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'],
+                  anonymous: false
+                },
+                { extra: [...jsArgs, ...cookieArgs], anonymous: false },
+                {
+                  extra: [...jsArgs, ...cookieArgs, '--extractor-args', 'youtube:player_client=tv,web_safari'],
+                  anonymous: false
+                }
+              ]
+            : []),
+          { extra: ['--extractor-args', 'youtube:player_client=android_vr'], anonymous: true },
+          {
+            extra: ['--extractor-args', 'youtube:player_client=android_vr,web_creator,ios,android'],
+            anonymous: true
+          },
+          { extra: [...jsArgs, '--extractor-args', 'youtube:player_client=tv,web_safari'], anonymous: true },
+          { extra: [...jsArgs], anonymous: true }
         ];
     const ytdlpDeadline = Date.now() + 60000;
 
@@ -4830,7 +5073,7 @@ async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
       profileIndex += 1;
       if (Date.now() > ytdlpDeadline) break;
       try {
-        await runBinary(bin, [...args, ...profile], { timeout: 45000 });
+        await runBinary(bin, [...args, ...profile.extra], { timeout: 45000 });
         succeeded = true;
         break;
       } catch (error) {
@@ -4850,6 +5093,9 @@ async function downloadAudioWithYtdlp(videoUrl, { soundcloud = false } = {}) {
             if (f.startsWith(base) && !f.endsWith('_cookies.txt')) fs.unlinkSync(path.join(dir, f));
           }
         } catch {}
+
+        // Adresse du serveur bloquée par YouTube : les autres profils sans cookies échoueront pareil
+        if (profile.anonymous && /Sign in to confirm/i.test(detail)) break;
       }
     }
 
@@ -4982,7 +5228,11 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
     const sc = await downloadAudioWithYtdlp(`scsearch1:${query}`, { soundcloud: true });
     if (sc) {
       if (debugOwner) {
-        await sendReply(jid, `🛠️ YouTube a échoué : ${youtubeFailure}`.slice(0, 700), message);
+        await sendReply(
+          jid,
+          `🛠️ YouTube a échoué : ${youtubeFailure}${/Sign in/i.test(youtubeFailure) ? '\n\n🍪 YouTube bloque l’adresse du serveur : il faut des cookies (variable YOUTUBE_COOKIES_BASE64 ou fichier youtube_cookies.txt), comme Erwin-Bot.' : ''}`.slice(0, 900),
+          message
+        );
       }
       await sock.sendMessage(
         jid,
@@ -5403,6 +5653,286 @@ async function tryAnswerClockOrWeather(text) {
     return '⚠️ Je n’arrive pas à récupérer la météo pour le moment.';
   }
 }
+
+// ------------------------------------------------------------
+// XRESUME (résumé du groupe) ET XSOURCE (d'où vient cette image ?)
+// ------------------------------------------------------------
+
+const groupChatBuffer = new Map();
+const insightCooldowns = new Map();
+const INSIGHT_COOLDOWN_MS = 20000;
+
+function recordGroupLine(jid, message, sender, text) {
+  if (!isGroupJid(jid)) return;
+
+  const t = String(text || '').trim();
+  if (t.length < 2) return;
+
+  if (
+    message?.key?.fromMe &&
+    (t.startsWith('⌬') || t.includes('SITRI-NEL') || t.includes('𖤍') || isQuizBotEcho(message, t))
+  ) {
+    return;
+  }
+
+  const list = groupChatBuffer.get(jid) || [];
+  list.push({
+    name: String(getDisplayName(message, sender) || 'Membre').replace(/[+\d]{8,}/g, 'Membre').slice(0, 24),
+    text: t.slice(0, 280),
+    ts: Date.now()
+  });
+  if (list.length > 300) list.splice(0, list.length - 300);
+  groupChatBuffer.set(jid, list);
+}
+
+function insightOnCooldown(jid, sender, key) {
+  const id = `${key}:${jid}:${sender}`;
+  const last = insightCooldowns.get(id) || 0;
+  if (Date.now() - last < INSIGHT_COOLDOWN_MS) return true;
+  insightCooldowns.set(id, Date.now());
+  if (insightCooldowns.size > 500) insightCooldowns.delete(insightCooldowns.keys().next().value);
+  return false;
+}
+
+async function groqChat(messages, { model = CONFIG.groqModel, maxTokens = 800, temperature = 0.4, timeout = 40000 } = {}) {
+  const res = await axios.post(
+    'https://api.groq.com/openai/v1/chat/completions',
+    { model, messages, temperature, max_tokens: maxTokens },
+    { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout }
+  );
+  return String(res.data?.choices?.[0]?.message?.content || '').trim();
+}
+
+function formatClockHm(ts) {
+  return new Intl.DateTimeFormat('fr-FR', {
+    timeZone: CLOCK_DEFAULT.tz,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(new Date(ts));
+}
+
+async function handleResumeCommand(jid, message, sender, args) {
+  if (!isGroupJid(jid)) {
+    await sendReply(jid, '📝 Xresume fonctionne dans un groupe : je résume ce qui s’y est dit.', message);
+    return;
+  }
+  if (!CONFIG.groqKey) {
+    await sendReply(jid, '⚠️ Le résumé a besoin de la clé Groq, qui est absente.', message);
+    return;
+  }
+  if (insightOnCooldown(jid, sender, 'resume')) return;
+
+  const wanted = Math.min(Math.max(parseInt(String(args || '').trim(), 10) || 100, 20), 250);
+  const lines = (groupChatBuffer.get(jid) || []).slice(-wanted);
+
+  if (lines.length < 8) {
+    await sendReply(
+      jid,
+      '📝 Je n’ai pas encore assez de messages à résumer : je ne retiens que ce que j’ai vu passer depuis mon dernier démarrage.',
+      message
+    );
+    return;
+  }
+
+  const transcript = lines.map(l => `${l.name} : ${l.text}`).join('\n');
+
+  try {
+    const summary = await groqChat(
+      [
+        {
+          role: 'system',
+          content:
+            "Tu es Sitri-Nel, un bot WhatsApp décontracté. Tu résumes des conversations de groupe en français, sans rien inventer."
+        },
+        {
+          role: 'user',
+          content: `Voici les ${lines.length} derniers messages d'un groupe WhatsApp (du plus ancien au plus récent), au format « Nom : message ».
+
+${transcript}
+
+Fais un résumé pour quelqu'un qui revient après une absence, avec un ton naturel et décontracté :
+• Sujets principaux (2 à 5 puces courtes)
+• Infos ou décisions importantes (seulement s'il y en a)
+• Moments marquants ou blagues (1 ou 2, seulement si pertinent)
+• Qui a le plus parlé (3 noms maximum)
+Règles : n'invente rien ; paraphrase, ne recopie pas de messages entiers ; n'écris aucun numéro de téléphone ; pas de titres, uniquement des puces « • » ; reste sous 1200 caractères.`
+        }
+      ],
+      { maxTokens: 700, temperature: 0.4 }
+    );
+
+    if (!summary) throw new Error('Résumé vide.');
+
+    await sendReply(
+      jid,
+      `📝 *RÉSUMÉ DU GROUPE*\n_${lines.length} messages • de ${formatClockHm(lines[0].ts)} à ${formatClockHm(lines[lines.length - 1].ts)} (heure du Bénin)_\n\n${summary.slice(0, 1500)}\n\n${SIGNATURE}`,
+      message
+    );
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Xresume : échec.');
+    await sendReply(jid, '⚠️ Je n’arrive pas à produire le résumé pour le moment. Réessaie dans un instant.', message);
+  }
+}
+
+// --- Xsource : identification d'une image (capture d'anime, fanart, texte)
+
+function formatMmSs(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+async function searchTraceMoe(jpegBuffer) {
+  const headers = { 'Content-Type': 'image/jpeg' };
+  const key = cleanEnv(process.env.TRACE_MOE_KEY);
+  if (key) headers['x-trace-key'] = key;
+
+  const res = await axios.post('https://api.trace.moe/search?anilistInfo&cutBorders', jpegBuffer, {
+    headers,
+    timeout: 25000,
+    maxBodyLength: Infinity
+  });
+
+  const top = res.data?.result?.[0];
+  if (!top) return null;
+
+  const title = top.anilist?.title || {};
+  return {
+    similarity: Number(top.similarity) || 0,
+    title: String(title.english || title.romaji || title.native || '').trim(),
+    episode: top.episode ?? null,
+    from: top.from ?? null
+  };
+}
+
+const SOURCE_VISION_PROMPT = `Analyse cette image envoyée dans un groupe WhatsApp. Réponds uniquement en JSON :
+{"type":"capture_anime|fanart|manga|texte|autre","titre":"","personnages":[],"description":"","texte":"","explication":"","certitude":0}
+- "type" : capture_anime = image tirée d'un anime ; fanart = dessin de fan ; manga = page de manga/webtoon ; texte = image surtout composée de texte (message, article, capture d'écran...) ; autre sinon.
+- "titre" : titre de l'anime/manga/œuvre si tu le reconnais avec confiance, sinon "".
+- "personnages" : noms des personnages que tu reconnais, sinon [].
+- "description" : 1 à 2 phrases en français décrivant l'image.
+- "texte" : transcription fidèle du texte visible (vide s'il n'y en a pas).
+- "explication" : si l'image contient du texte, explique son contenu en français simple en 2 à 4 phrases ; sinon "".
+- "certitude" : nombre de 0 à 100.
+N'invente rien : si tu n'es pas sûr de l'œuvre, laisse "titre" vide. Pour un fanart, indique que c'est un fanart.`;
+
+async function analyzeImageWithVision(jpegBuffer) {
+  const model = cleanEnv(process.env.GROQ_VISION_MODEL) || 'meta-llama/llama-4-scout-17b-16e-instruct';
+  const raw = await groqChat(
+    [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: SOURCE_VISION_PROMPT },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpegBuffer.toString('base64')}` } }
+        ]
+      }
+    ],
+    { model, maxTokens: 900, temperature: 0.2, timeout: 45000 }
+  );
+
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('Réponse de vision illisible.');
+  return JSON.parse(raw.slice(start, end + 1));
+}
+
+function buildSourceReply(trace, vision) {
+  const lines = [];
+  const strong = trace && trace.title && trace.similarity >= 0.9;
+
+  if (strong) {
+    lines.push('📺 *Capture d’anime reconnue*');
+    lines.push(`• Anime : *${trace.title}*`);
+    lines.push(
+      `• Épisode : ${trace.episode ?? 'inconnu'}${trace.from !== null ? ` (vers ${formatMmSs(trace.from)})` : ''}`
+    );
+    lines.push(`• Fiabilité : ${Math.round(trace.similarity * 100)} %`);
+    if (vision?.description) lines.push('', `🖼️ ${String(vision.description).slice(0, 300)}`);
+  } else if (vision) {
+    const labels = {
+      capture_anime: '📺 *Capture d’anime*',
+      fanart: '🎨 *Fanart* (dessin de fan)',
+      manga: '📖 *Page de manga / webtoon*',
+      texte: '📝 *Image contenant du texte*',
+      autre: '🖼️ *Image*'
+    };
+    lines.push(labels[vision.type] || labels.autre);
+
+    const sure = Number(vision.certitude) >= 60;
+    if (vision.titre) lines.push(`• Œuvre : *${vision.titre}*${sure ? '' : ' (pas certain)'}`);
+    if (Array.isArray(vision.personnages) && vision.personnages.length) {
+      lines.push(`• Personnage(s) : ${vision.personnages.slice(0, 4).join(', ')}`);
+    }
+    if (vision.description) lines.push('', String(vision.description).slice(0, 300));
+    if (vision.texte) lines.push('', `📝 *Texte :* ${String(vision.texte).slice(0, 500)}`);
+    if (vision.explication) lines.push('', `🧠 *Explication :* ${String(vision.explication).slice(0, 600)}`);
+
+    if (trace && trace.title && trace.similarity >= 0.8) {
+      lines.push('', `💡 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
+    }
+  } else if (trace && trace.title && trace.similarity >= 0.8) {
+    lines.push(`📺 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
+  } else {
+    lines.push('🤔 Je n’ai pas réussi à identifier cette image.');
+  }
+
+  lines.push('', SIGNATURE);
+  return lines.join('\n');
+}
+
+async function handleSourceCommand(jid, message, sender) {
+  if (insightOnCooldown(jid, sender, 'source')) return;
+
+  let media = null;
+  try {
+    media = await downloadTargetMediaBuffer(message, 'image');
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Xsource : image illisible.');
+  }
+
+  if (!media?.buffer) {
+    await sendReply(
+      jid,
+      '🔎 Réponds à une image avec Xsource (ou envoie l’image avec Xsource en légende), et je cherche d’où elle vient.',
+      message
+    );
+    return;
+  }
+
+  await sendReply(jid, '🔎 Analyse de l’image en cours...', message);
+
+  let jpeg;
+  try {
+    const sharpMod = await import('sharp');
+    const sharpFn = sharpMod.default || sharpMod;
+    jpeg = await sharpFn(media.buffer)
+      .rotate()
+      .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Xsource : conversion impossible.');
+    await sendReply(jid, '⚠️ Je n’arrive pas à lire cette image.', message);
+    return;
+  }
+
+  const [trace, vision] = await Promise.all([
+    searchTraceMoe(jpeg).catch(error => {
+      logger.warn({ error: error?.response?.status || error?.message }, 'Xsource : trace.moe indisponible.');
+      return null;
+    }),
+    CONFIG.groqKey
+      ? analyzeImageWithVision(jpeg).catch(error => {
+          logger.warn({ error: error?.response?.data?.error?.message || error?.message }, 'Xsource : vision indisponible.');
+          return null;
+        })
+      : null
+  ]);
+
+  await sendReply(jid, buildSourceReply(trace, vision), message);
+}
+
 
 async function handleAICommand(jid, message, sender, command, args) {
   if (!['chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police'].includes(command)) {
@@ -6175,7 +6705,7 @@ const AUTO_QUIZ_CATEGORIES = {
   cg: { label: 'CG', icon: '🧠', desc: 'culture générale' }
 };
 const AUTO_QUIZ_COUNTS = [10, 20, 30];
-const AUTO_QUIZ_TIME_MS = 15000;
+const AUTO_QUIZ_TIME_MS = 20000;
 const AUTO_QUIZ_SETUP_TIMEOUT_MS = 3 * 60 * 1000;
 
 const autoQuizzes = new Map();
@@ -7451,7 +7981,7 @@ const KNOWN_COMMANDS = new Set([
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models',
-  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff'
+  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff', 'resume', 'source'
 ]);
 
 const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
@@ -7470,6 +8000,10 @@ async function processCommand(message) {
   const earlyParsed = parseCommand(text);
   const earlyCommand = earlyParsed ? COMMAND_ALIASES[earlyParsed.command] || earlyParsed.command : null;
   const isKnownEarly = Boolean(earlyCommand && KNOWN_COMMANDS.has(earlyCommand));
+
+  if (!isKnownEarly) {
+    recordGroupLine(jid, message, sender, text);
+  }
 
   if (!isKnownEarly) {
     try {
@@ -7554,6 +8088,16 @@ async function processCommand(message) {
     isOwner(message?.key?.participant) ||
     isOwner(message?.key?.participantPn) ||
     isOwner(message?.key?.remoteJidAlt);
+
+  if (command === 'resume') {
+    await handleResumeCommand(jid, message, sender, args);
+    return;
+  }
+
+  if (command === 'source') {
+    await handleSourceCommand(jid, message, sender);
+    return;
+  }
 
   if (command === 'menu') {
     await sendOfficialImageWithText(jid, getMenu(), message);

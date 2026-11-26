@@ -904,6 +904,52 @@ function styleText(value = '') {
 }
 
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+// 13 bis. PARE-FEU ANTI-BAN (XFIREWALL ON / OFF)
+// ------------------------------------------------------------
+
+const firewallConfig = {
+  enabled: true,
+  minDelay: 1200,
+  maxDelay: 3000,
+  userCooldown: 3000,
+  maxMsgsPerMinute: 20
+};
+
+const firewallUserCooldowns = new Map();
+let firewallMsgCountMinute = 0;
+setInterval(() => {
+  firewallMsgCountMinute = 0;
+}, 60000);
+
+function isFirewallSpam(sender) {
+  if (!firewallConfig.enabled || !sender || isOwner(sender)) return false;
+  const now = Date.now();
+  const lastCmd = firewallUserCooldowns.get(sender) || 0;
+  if (now - lastCmd < firewallConfig.userCooldown) return true;
+  firewallUserCooldowns.set(sender, now);
+  return false;
+}
+
+async function applyFirewallDelay(socketInstance, jid) {
+  if (!firewallConfig.enabled || !socketInstance || !jid) return;
+  if (firewallMsgCountMinute >= firewallConfig.maxMsgsPerMinute) {
+    await sleep(5000);
+  }
+  try {
+    await socketInstance.presenceSubscribe(jid);
+    await socketInstance.sendPresenceUpdate('composing', jid);
+  } catch {}
+  const delay =
+    Math.floor(Math.random() * (firewallConfig.maxDelay - firewallConfig.minDelay + 1)) +
+    firewallConfig.minDelay;
+  await sleep(delay);
+  try {
+    await socketInstance.sendPresenceUpdate('paused', jid);
+  } catch {}
+  firewallMsgCountMinute++;
+}
+
 // 14. ENVOI DE MESSAGES
 // ------------------------------------------------------------
 
@@ -6015,16 +6061,76 @@ async function synthesizeFemaleFrenchAudio(text) {
   return Buffer.concat(buffers);
 }
 
+async function convertMp3BufferToOggOpus(mp3Buffer) {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const run = promisify(execFile);
+
+  let ffmpegBin = 'ffmpeg';
+  try {
+    const ffmpegStatic = await import('ffmpeg-static');
+    if (ffmpegStatic.default) ffmpegBin = ffmpegStatic.default;
+  } catch {}
+
+  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inPath = path.join(os.tmpdir(), `xvoix_in_${stamp}.mp3`);
+  const outPath = path.join(os.tmpdir(), `xvoix_out_${stamp}.ogg`);
+
+  try {
+    await fs.promises.writeFile(inPath, mp3Buffer);
+    await run(
+      ffmpegBin,
+      [
+        '-y',
+        '-i',
+        inPath,
+        '-c:a',
+        'libopus',
+        '-b:a',
+        '48k',
+        '-vbr',
+        'on',
+        '-compression_level',
+        '10',
+        '-application',
+        'voip',
+        outPath
+      ],
+      { timeout: 25000 }
+    );
+    const ogg = await fs.promises.readFile(outPath);
+    return ogg.length ? ogg : null;
+  } finally {
+    fs.promises.unlink(inPath).catch(() => {});
+    fs.promises.unlink(outPath).catch(() => {});
+  }
+}
+
 async function sendVoiceReply(jid, text, quoted = null) {
   try {
-    const audioBuffer = await synthesizeFemaleFrenchAudio(text);
-    if (!audioBuffer || !audioBuffer.length) {
+    const mp3Buffer = await synthesizeFemaleFrenchAudio(text);
+    if (!mp3Buffer || !mp3Buffer.length) {
       return sendReply(jid, text, quoted);
     }
+
+    const oggBuffer = await convertMp3BufferToOggOpus(mp3Buffer);
+    if (oggBuffer) {
+      await sock.sendMessage(
+        jid,
+        {
+          audio: oggBuffer,
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        },
+        quoted ? { quoted } : {}
+      );
+      return;
+    }
+
     await sock.sendMessage(
       jid,
       {
-        audio: audioBuffer,
+        audio: mp3Buffer,
         mimetype: 'audio/mpeg',
         ptt: true
       },
@@ -7238,16 +7344,17 @@ function shuffleInPlace(list) {
 
 async function generateTextQuizQuestions(category, total, level = 'moyen') {
   const questions = [];
+  const fallbackPool = [];
   const usedTopics = [];
   let attempts = 0;
 
   const history = await loadQuizHistory(category);
   pruneQuizHistory(category).catch(() => {});
 
-  while (questions.length < total && attempts < 7) {
+  while (questions.length < total && attempts < 14) {
     attempts++;
-    // Petite marge : la relecture peut écarter quelques questions
-    const need = Math.min(12, total - questions.length + 2);
+    const remaining = total - questions.length;
+    const need = Math.min(5, remaining + 1);
 
     const prompt =
       category === 'multivers'
@@ -7259,27 +7366,21 @@ Ton et formulation :
 - la question doit être complète, claire et compréhensible seule, sans sous-entendu ni référence floue ; cite les noms et la situation utiles.
 
 Niveau : ${quizLevelInstruction('multivers', level)} ;
-- environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), par exemple « Pourquoi Kenjaku a-t-il organisé le jeu meurtrier, selon Tengen ? », l'autre moitié de questions factuelles précises.
+- environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), l'autre moitié de questions factuelles précises.
 
 Fiabilité (très important) :
-- UNE seule question par univers : chaque question porte sur un anime/manga DIFFÉRENT ;
-- ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, change de sujet ; vérifie bien QUI fait QUOI (ne confonds jamais les personnages, leurs rôles, leurs organisations) ;
-- UNE seule réponse attendue : jamais de question à double volet (« qui et pourquoi », « cite deux… », « quel est X et quel est Y ») ;
-- logique et exactitude : tout ce que la question affirme (liens de parenté, rôles, événements, chronologie) doit être vrai dans l'œuvre, et la situation décrite doit réellement exister (ex. Nezuko est la SŒUR de Tanjiro, pas son frère) ; relis chaque question avant de la garder ;
+- UNE seule question par univers dans ce lot : chaque question porte sur un anime/manga DIFFÉRENT ;
+- ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, change de sujet ;
+- UNE seule réponse attendue : jamais de question à double volet ;
 - la réponse ne doit pas apparaître dans la question.
 
 Champ "type" :
 - "nom" : la réponse est un nom propre (personnage, technique, lieu...) ;
 - "court" : réponse de 1 à 4 mots qui n'est pas un nom propre ;
 - "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
-Champ "alts" : toutes les façons acceptables de répondre :
-- traductions officielles ou courantes en VO, VF, VOSTFR, anglais et romaji (ex. pour une technique : « Vide infini », « Vide incommensurable », « Infinite Void », « Muryō Kūsho ») ;
-- personnage : prénom seul, surnoms, ET le nom de famille seul quand il désigne un seul personnage connu de l'œuvre (ex : « Gojo », « Isagi », « Uzui », « Urahara » sont acceptés ; « Uchiha » pour Sasuke est INTERDIT car d'autres Uchiha sont connus) ;
-- transcriptions et orthographes qui existent réellement (ex : « Najenda » et « Nadezhda Najenda », « Yairon » et « Lairon ») ;
-- forme courte avec le seul mot distinctif quand la question contient déjà le mot générique (ex : question sur le souffle de Shinobu → alts « Insecte », « De l'insecte » ; question sur le titan de Ymir → « Originel », « Fondateur ») ;
-- ne liste pas les simples fautes de frappe (elles sont déjà tolérées).
-Univers déjà utilisés dans ce quiz (interdits) : ${usedTopics.join(', ') || 'aucun'}.
-Questions déjà posées lors de quiz précédents (interdites : ne repose aucune question portant sur le même fait) : ${history.recent.slice(0, 50).join(' | ') || 'aucune'}.
+Champ "alts" : toutes les façons acceptables de répondre (VO, VF, VOSTFR, anglais, romaji, prénom seul ou nom de famille unique).
+Univers déjà utilisés dans ce quiz : ${usedTopics.slice(-20).join(', ') || 'aucun'}.
+Questions déjà posées (interdites) : ${[...questions.map(q => q.question), ...history.recent].slice(0, 40).join(' | ') || 'aucune'}.
 Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
         : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
 Règles :
@@ -7291,14 +7392,13 @@ Règles :
 - la réponse ne doit pas apparaître dans la question.
 Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
 Champ "person" : true si la réponse est le nom d'une personne.
-Champ "usual" : si la réponse est une personne connue sous un nom d'usage universel différent de son nom de famille, ce nom (ex : "Napoléon" pour Napoléon Bonaparte), sinon "".
-Champ "alts" : si la réponse est une personne, mets le nom de famille seul (avec sa particule usuelle, ex : "de Vinci", "da Vinci" et "Vinci"), JAMAIS le prénom seul ; sinon les variantes, traductions ou abréviations réellement utilisées. Ne liste pas les simples fautes d'orthographe.
-Questions déjà posées dans ce quiz (interdites) : ${questions.map(q => q.question).slice(-30).join(' | ') || 'aucune'}.
-Questions déjà posées lors de quiz précédents (interdites : ne repose aucune question portant sur le même fait) : ${history.recent.slice(0, 50).join(' | ') || 'aucune'}.
+Champ "usual" : nom d'usage universel si différent du nom de famille (ex : "Napoléon"), sinon "".
+Champ "alts" : variantes, traductions ou nom de famille seul si personne (jamais le prénom seul).
+Questions déjà posées (interdites) : ${[...questions.map(q => q.question), ...history.recent].slice(0, 40).join(' | ') || 'aucune'}.
 Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","question":"...","answer":"...","alts":["..."]}]}`;
 
     try {
-      const data = await groqJson(prompt);
+      const data = await groqJson(prompt, 2500, 0.65);
       const list = Array.isArray(data.questions) ? data.questions : [];
       const batch = [];
 
@@ -7310,8 +7410,8 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
         const key = normalizeLoose(question);
         if (questions.some(q => normalizeLoose(q.question) === key)) continue;
         if (batch.some(q => normalizeLoose(q.question) === key)) continue;
+        if (fallbackPool.some(q => normalizeLoose(q.question) === key)) continue;
 
-        // Jamais deux fois la même question (ni le même fait) d'un quiz à l'autre
         const qKey = `q:${key}`;
         const aKey = `a:${normalizeLoose(item?.univers || '')}|${normalizeLoose(answer)}`;
         if (history.keys.has(qKey) || history.keys.has(aKey)) continue;
@@ -7320,15 +7420,14 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
         if (category === 'multivers') {
           univers = String(item?.univers || '').trim();
           const topic = normalizeLoose(univers);
-          if (topic && usedTopics.includes(topic)) continue;
-          if (topic) usedTopics.push(topic);
+          if (topic && usedTopics.includes(topic) && attempts <= 8) continue;
+          if (topic && !usedTopics.includes(topic)) usedTopics.push(topic);
         }
 
         const answerType = ['nom', 'court', 'explication'].includes(item?.type) ? item.type : 'court';
         let alts = Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 12) : [];
         const person = category === 'cg' && item?.person === true;
 
-        // Culture générale : nom de famille accepté, prénom seul refusé
         if (person) {
           const tokens = significantTokens(answer);
           if (tokens.length >= 2) {
@@ -7336,12 +7435,11 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
             const last = tokens[tokens.length - 1];
             if (!alts.some(a => significantTokens(a).includes(last))) alts.push(last);
           }
-
           const usual = String(item?.usual || '').trim();
           if (usual && usual.length <= 30) alts.push(usual);
         }
 
-        batch.push({
+        const formattedQ = {
           type: 'text',
           answerType,
           person,
@@ -7354,7 +7452,10 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
             { key: qKey, label: question },
             { key: aKey, label: '' }
           ]
-        });
+        };
+
+        batch.push(formattedQ);
+        fallbackPool.push(formattedQ);
       }
 
       const verified = await verifyQuizQuestions(batch, level);
@@ -7368,7 +7469,14 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
     }
   }
 
-  return questions;
+  for (const q of fallbackPool) {
+    if (questions.length >= total) break;
+    if (!questions.some(existing => normalizeLoose(existing.question) === normalizeLoose(q.question))) {
+      questions.push(q);
+    }
+  }
+
+  return questions.slice(0, total);
 }
 
 let lastQuizGenerationError = '';
@@ -7685,6 +7793,30 @@ function clearAutoQuizTimers(session) {
       session[key] = null;
     }
   }
+}
+
+const QUIZ_PODIUM_REWARDS = [
+  { rank: '🥇 1er', coins: 200, xp: 20 },
+  { rank: '🥈 2e', coins: 100, xp: 10 },
+  { rank: '🥉 3e', coins: 50, xp: 5 }
+];
+
+async function distributeQuizRewards(ranking) {
+  const linesOut = [];
+  for (let i = 0; i < ranking.length; i++) {
+    const player = ranking[i];
+    const tag = `@${getNumber(player.jid)}`;
+    if (i < 3) {
+      const reward = QUIZ_PODIUM_REWARDS[i];
+      await addRewards(player.jid, reward.coins, reward.xp).catch(() => {});
+      linesOut.push(
+        `*├ ◈ ${reward.rank} : ${tag} (${player.points}p)*\n*│   ↳ +${reward.coins} XCoins 💰 | +${reward.xp} XP ⭐*`
+      );
+    } else {
+      linesOut.push(`*├ ◈ ▫️ ${i + 1}e : ${tag} (${player.points}p)*`);
+    }
+  }
+  return linesOut;
 }
 
 async function finishAutoQuiz(session, { stopped = false } = {}) {
@@ -8216,6 +8348,30 @@ async function processCommand(message) {
   const { args } = parsed;
   const command = COMMAND_ALIASES[parsed.command] || parsed.command;
 
+  if (command === 'firewall') {
+    if (!ownerCommand) {
+      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
+      return;
+    }
+    const sub = String(args || '').trim().toLowerCase();
+    if (sub === 'on') {
+      firewallConfig.enabled = true;
+      await sendReply(jid, '🛡️ *Pare-feu Anti-Ban ACTIVÉ*\nDélais humains et anti-spam actifs.', message);
+    } else if (sub === 'off') {
+      firewallConfig.enabled = false;
+      await sendReply(jid, '⚠️ *Pare-feu Anti-Ban DÉSACTIVÉ*\nAttention au risque de bannissement.', message);
+    } else {
+      await sendReply(
+        jid,
+        `🛡️ *Statut Pare-feu :* ${firewallConfig.enabled ? 'ACTIVÉ ✅' : 'DÉSACTIVÉ ❌'}\nUtilisation : *Xfirewall on* ou *Xfirewall off*`,
+        message
+      );
+    }
+    return;
+  }
+
+  if (isFirewallSpam(sender)) return;
+
   if (!KNOWN_COMMANDS.has(command)) {
     logger.info({ command }, 'Commande inconnue ignorée');
     return;
@@ -8720,7 +8876,8 @@ async function startBot() {
 
     const rawSend = socket.sendMessage.bind(socket);
 
-    socket.sendMessage = (jid, content, options) => {
+    socket.sendMessage = async (jid, content, options) => {
+      await applyFirewallDelay(socket, jid);
       if (content && typeof content === 'object') {
         const next = { ...content };
 

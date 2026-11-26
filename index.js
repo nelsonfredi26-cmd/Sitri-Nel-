@@ -5985,18 +5985,63 @@ async function analyzeImageWithVision(jpegBuffer) {
         ]
       }
     ],
-    { model, maxTokens: 900, temperature: 0.2, timeout: 45000 }
+    { model, maxTokens: 900, temperature: 0.2, timeout: 22000 }
   );
 
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('Réponse de vision illisible.');
-  return JSON.parse(raw.slice(start, end + 1));
+  const cleaned = String(raw || '')
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    } catch {}
+  }
+
+  // Repli si la réponse texte n'est pas un JSON strict
+  if (cleaned) {
+    return {
+      type: 'autre',
+      titre: '',
+      personnages: [],
+      description: cleaned.slice(0, 350),
+      texte: '',
+      explication: '',
+      certitude: 50
+    };
+  }
+
+  throw new Error('Réponse de vision illisible.');
 }
 
-function buildSourceReply(trace, vision) {
+async function fallbackImageInfoWithSearch(vision, trace) {
+  const queryParts = [];
+  if (trace?.title) queryParts.push(trace.title);
+  if (vision?.titre) queryParts.push(vision.titre);
+  if (Array.isArray(vision?.personnages) && vision.personnages.length) {
+    queryParts.push(vision.personnages.slice(0, 2).join(' '));
+  }
+  if (!queryParts.length && vision?.description) {
+    queryParts.push(String(vision.description).slice(0, 90));
+  }
+  if (!queryParts.length) return '';
+
+  const q = `${queryParts.join(' ')} anime manga personnage origine`.trim();
+  try {
+    if (typeof searchWeb === 'function') {
+      const res = await searchWeb(q);
+      if (res) return String(res).slice(0, 350);
+    }
+  } catch {}
+  return '';
+}
+
+function buildSourceReply(trace, vision, extraInfo = '') {
   const lines = [];
-  const strong = trace && trace.title && trace.similarity >= 0.9;
+  const strong = trace && trace.title && trace.similarity >= 0.88;
 
   if (strong) {
     lines.push('📺 *Capture d’anime reconnue*');
@@ -6012,26 +6057,38 @@ function buildSourceReply(trace, vision) {
       fanart: '🎨 *Fanart* (dessin de fan)',
       manga: '📖 *Page de manga / webtoon*',
       texte: '📝 *Image contenant du texte*',
-      autre: '🖼️ *Image*'
+      autre: '🖼️ *Analyse d’image*'
     };
     lines.push(labels[vision.type] || labels.autre);
 
-    const sure = Number(vision.certitude) >= 60;
-    if (vision.titre) lines.push(`• Œuvre : *${vision.titre}*${sure ? '' : ' (pas certain)'}`);
+    const cert = Number(vision.certitude);
+    const sure = Number.isFinite(cert) && cert >= 55;
+    if (vision.titre) {
+      lines.push(`• Œuvre / Source : *${vision.titre}*${sure ? '' : ' (piste probable)'}`);
+    }
     if (Array.isArray(vision.personnages) && vision.personnages.length) {
       lines.push(`• Personnage(s) : ${vision.personnages.slice(0, 4).join(', ')}`);
     }
-    if (vision.description) lines.push('', String(vision.description).slice(0, 300));
+    if (vision.description) lines.push('', String(vision.description).slice(0, 320));
     if (vision.texte) lines.push('', `📝 *Texte :* ${String(vision.texte).slice(0, 500)}`);
     if (vision.explication) lines.push('', `🧠 *Explication :* ${String(vision.explication).slice(0, 600)}`);
 
-    if (trace && trace.title && trace.similarity >= 0.8) {
-      lines.push('', `💡 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
+    if (trace && trace.title && trace.similarity >= 0.72) {
+      lines.push('', `💡 Piste trace.moe : *${trace.title}* (${Math.round(trace.similarity * 100)} %).`);
     }
-  } else if (trace && trace.title && trace.similarity >= 0.8) {
-    lines.push(`📺 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
+  } else if (trace && trace.title) {
+    lines.push('📺 *Piste d’anime trouvée*');
+    lines.push(`• Anime : *${trace.title}*`);
+    if (trace.episode) lines.push(`• Épisode : ${trace.episode}`);
+    lines.push(`• Similarité : ${Math.round((trace.similarity || 0) * 100)} %`);
   } else {
-    lines.push('🤔 Je n’ai pas réussi à identifier cette image.');
+    lines.push('🖼️ *Image reçue*');
+    lines.push('• Aucune correspondance exacte sur trace.moe et analyse visuelle indisponible pour le moment.');
+    lines.push('• Astuce : réessaie dans quelques secondes ou envoie une image plus nette.');
+  }
+
+  if (extraInfo && !lines.some(l => l.includes('Explication'))) {
+    lines.push('', `ℹ️ *Complément :* ${extraInfo}`);
   }
 
   lines.push('', SIGNATURE);
@@ -6057,7 +6114,7 @@ async function handleSourceCommand(jid, message, sender) {
     return;
   }
 
-  await sendReply(jid, '🔎 Analyse de l’image en cours...', message);
+  await sendReply(jid, '🔎 Analyse de l’image en cours (max ~25s)...', message);
 
   let jpeg;
   try {
@@ -6065,13 +6122,12 @@ async function handleSourceCommand(jid, message, sender) {
     const sharpFn = sharpMod.default || sharpMod;
     jpeg = await sharpFn(media.buffer)
       .rotate()
-      .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 82 })
+      .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 80 })
       .toBuffer();
   } catch (error) {
     logger.warn({ error: error?.message }, 'Xsource : conversion impossible.');
-    await sendReply(jid, '⚠️ Je n’arrive pas à lire cette image.', message);
-    return;
+    jpeg = media.buffer;
   }
 
   const [trace, vision] = await Promise.all([
@@ -6080,16 +6136,44 @@ async function handleSourceCommand(jid, message, sender) {
       return null;
     }),
     CONFIG.groqKey
-      ? analyzeImageWithVision(jpeg).catch(error => {
+      ? analyzeImageWithVision(jpeg).catch(async error => {
           logger.warn({ error: error?.response?.data?.error?.message || error?.message }, 'Xsource : vision indisponible.');
-          return null;
+          // Deuxième tentative rapide sur un modèle vision alternatif si besoin
+          try {
+            return await groqChat(
+              [
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: 'Décris brièvement cette image en français et indique l’anime, manga, jeu, personne ou sujet si identifiable.' },
+                    { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } }
+                  ]
+                }
+              ],
+              { model: 'meta-llama/llama-4-maverick-17b-128e-instruct', maxTokens: 500, temperature: 0.2, timeout: 18000 }
+            ).then(desc => ({
+              type: 'autre',
+              titre: '',
+              personnages: [],
+              description: String(desc || '').slice(0, 350),
+              texte: '',
+              explication: '',
+              certitude: 50
+            }));
+          } catch {
+            return null;
+          }
         })
       : null
   ]);
 
-  await sendReply(jid, buildSourceReply(trace, vision), message);
-}
+  let extraInfo = '';
+  if (!vision && !trace?.title) {
+    extraInfo = await fallbackImageInfoWithSearch(vision, trace);
+  }
 
+  await sendReply(jid, buildSourceReply(trace, vision, extraInfo), message);
+}
 
 // --- Xvoix : synthèse vocale féminine française (Xvoix <texte>, Xvoix on/off, Sitri-Nel)
 const voiceReplyChats = new Set();
@@ -7215,7 +7299,7 @@ async function groqJson(prompt, maxTokens = 3500, temperature = 0.6) {
           max_tokens: maxTokens,
           response_format: { type: 'json_object' }
         },
-        { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 45000 }
+        { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 18000 }
       );
       CONFIG.groqModel = m;
       return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
@@ -7274,33 +7358,32 @@ Réponds en JSON : {"correct": true} ou {"correct": false}`,
   }
 }
 
-// Relecture : on écarte les questions douteuses, ambiguës, fausses ou hors niveau.
-// Une question non validée est ÉCARTÉE (jamais posée "au cas où").
+// Relecture rapide et résiliente : vérifie quand possible sans bloquer le lancement du quiz.
 async function verifyQuizQuestions(list, level = 'moyen', category = 'multivers') {
   if (!list.length) return list;
 
   const levelRule = quizLevelInstruction(category, level);
+  const subset = list.slice(0, 10);
 
   const attempt = async () => {
-    const questions = list
+    const questions = subset
       .map((q, i) => `${i + 1}. ${q.univers ? `[${q.univers}] ` : ''}${q.question}`)
       .join('\n');
 
-    // Le modèle répond lui-même SANS voir la réponse proposée, puis on compare
     const independent = await groqJson(
       `Réponds de façon brève et exacte à chacune de ces questions de quiz. Si tu n'es pas certain, mets "?".
 
 ${questions}
 
 Réponds en JSON : {"items":[{"n":1,"answer":"..."}]}`,
-      1500,
+      900,
       0
     );
 
     const given = new Map();
     for (const item of independent?.items || []) given.set(Number(item?.n), String(item?.answer || '').trim());
 
-    const rows = list
+    const rows = subset
       .map(
         (q, i) =>
           `${i + 1}. Question : ${q.question} | Réponse proposée : ${q.answer} | Réponse indépendante : ${given.get(i + 1) || '?'}`
@@ -7310,14 +7393,13 @@ Réponds en JSON : {"items":[{"n":1,"answer":"..."}]}`,
     const verdict = await groqJson(
       `Tu es relecteur exigeant d'un quiz. Pour chaque ligne, réponds :
 - "same" : true si les deux réponses désignent la même chose (même écrites autrement : VO/VF, transcription, forme courte) ;
-- "ok" : true seulement si la réponse proposée est EXACTE selon l'œuvre originale ou les faits établis ; si tout ce que la question affirme (liens de parenté, rôles, événements, chronologie) est vrai ; si la situation décrite existe vraiment ; si UNE SEULE réponse est possible (pas de double volet, pas de record contestable, pas de donnée qui change avec le temps) ; et si la question est claire, non ambiguë, compréhensible seule et correctement écrite en français ;
-- "lvl" : false SEULEMENT si la question est clairement hors du niveau demandé (trop facile ou trop difficile) — niveau demandé : ${levelRule}. Sinon true.
-Au moindre doute sur l'exactitude, mets ok = false. Si la réponse indépendante est "?", juge avec tes propres connaissances et sois très prudent.
+- "ok" : true si la réponse proposée est exacte selon l'œuvre originale ou les faits établis, la question est claire, compréhensible seule et à réponse unique ;
+- "lvl" : false seulement si clairement hors niveau (${levelRule}), sinon true.
 
 ${rows}
 
 Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true,"lvl":true}]}`,
-      1500,
+      900,
       0
     );
 
@@ -7325,32 +7407,40 @@ Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true,"lvl":true}]}`,
   };
 
   let result = null;
-  for (let i = 0; i < 2 && !result; i++) {
-    try {
-      result = await attempt();
-    } catch (error) {
-      logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture des questions impossible.');
-      if (i === 0) await sleep(2500);
-    }
+  try {
+    result = await Promise.race([
+      attempt(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Relecture timeout 18s')), 18000))
+    ]);
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture rapide ignorée (repli direct).');
+    // Repli rapide : on garde les questions bien formées générées
+    return list;
   }
 
-  // Relecture impossible = on n'accepte rien (pas de question non vérifiée)
-  if (!result) return [];
-
   const byN = new Map();
-  for (const item of result.verdict?.items || []) byN.set(Number(item?.n), item);
-  if (!byN.size) return [];
+  for (const item of result?.verdict?.items || []) byN.set(Number(item?.n), item);
+  if (!byN.size) return list;
 
-  return list.filter((q, i) => {
+  const kept = subset.filter((q, i) => {
     const v = byN.get(i + 1);
-    if (!v) return false;
+    if (!v) return true;
     const independentAnswer = result.given.get(i + 1);
     const agrees =
       v.same === true ||
-      Boolean(independentAnswer && independentAnswer !== '?' && isQuizAnswerCorrect(independentAnswer, q));
-    const ok = v.ok === true || v.ok === 'true';
+      v.same === 'true' ||
+      !independentAnswer ||
+      independentAnswer === '?' ||
+      isQuizAnswerCorrect(independentAnswer, q);
+    const ok = v.ok === true || v.ok === 'true' || v.ok === undefined;
     return agrees && ok && v.lvl !== false;
   });
+
+  // Complète avec le reste du lot si trop filtré afin d'avoir des questions rapidement
+  if (kept.length < Math.min(3, subset.length)) {
+    return list;
+  }
+  return [...kept, ...list.slice(subset.length)];
 }
 
 // ─── Niveaux et historique des questions (jamais deux fois la même question) ───
@@ -7472,8 +7562,8 @@ async function generateTextQuizQuestions(category, total, level = 'moyen', onPro
   pruneQuizHistory(category).catch(() => {});
 
   const startedAt = Date.now();
-  const budgetMs = 4 * 60 * 1000; // on cherche jusqu'à 4 minutes pour atteindre le nombre demandé
-  const maxAttempts = Math.max(20, Math.ceil(total * 1.3));
+  const budgetMs = 26000; // Maximum ~26s pour ne pas faire attendre les joueurs
+  const maxAttempts = 5;
   let attempts = 0;
   let failures = 0;
   let progressSent = false;
@@ -7481,54 +7571,47 @@ async function generateTextQuizQuestions(category, total, level = 'moyen', onPro
   while (questions.length < total && attempts < maxAttempts && Date.now() - startedAt < budgetMs) {
     attempts++;
     const remaining = total - questions.length;
-    const need = Math.min(8, remaining + 3); // on en demande plus : la relecture en écarte une partie
-    const recent = [...questions.map(q => q.question), ...history.recent].slice(0, 40).join(' | ') || 'aucune';
+    const need = Math.min(10, Math.max(5, remaining + 2));
+    const recent = [...questions.map(q => q.question), ...history.recent].slice(0, 30).join(' | ') || 'aucune';
 
     const prompt =
       category === 'multivers'
         ? `Tu animes un quiz entre fans d'animés et de mangas sur WhatsApp. Génère exactement ${need} questions en français.
 
 Ton et formulation :
-- écris comme un fan qui lance une question à ses potes : naturel, décontracté, phrases simples et fluides (pas de style scolaire, pas de ton robotique) ;
-- utilise la terminologie française courante de la VF/VOSTFR (ex. « souffle » et non « respiration » pour Demon Slayer) ;
-- la question doit être complète, claire et compréhensible seule, sans sous-entendu ni référence floue ; cite les noms et la situation utiles.
+- écris comme un fan qui lance une question à ses potes : naturel, décontracté, phrases simples et fluides ;
+- utilise la terminologie française courante de la VF/VOSTFR ;
+- la question doit être complète, claire et compréhensible seule.
 
 Niveau : ${quizLevelInstruction('multivers', level)} ;
-- environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), l'autre moitié de questions factuelles précises.
+- mélange de questions d'histoire et de faits précis de l'œuvre originale (canon).
 
-Fiabilité (très important) :
-- UNE seule question par univers dans ce lot : chaque question porte sur un anime/manga DIFFÉRENT ;
-- uniquement des faits de l'œuvre originale (canon) : jamais de théorie de fans, de classement de puissance, de numéro d'épisode/chapitre ni de date de sortie ;
-- ne pose que des questions dont tu es absolument certain de la réponse ; au moindre doute, change de sujet ;
-- UNE seule réponse attendue : jamais de question à double volet ;
+Fiabilité :
+- anime/manga variés ;
+- UNE seule réponse attendue, claire et sans ambiguïté ;
 - la réponse ne doit pas apparaître dans la question.
 
-Champ "type" :
-- "nom" : la réponse est un nom propre (personnage, technique, lieu...) ;
-- "court" : réponse de 1 à 4 mots qui n'est pas un nom propre ;
-- "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
-Champ "alts" : toutes les façons acceptables de répondre (VO, VF, VOSTFR, anglais, romaji, prénom seul ou nom de famille unique).
+Champ "type" : "nom" | "court" | "explication".
+Champ "alts" : variantes acceptables (VO, VF, romaji, prénom ou nom unique).
 Univers déjà utilisés dans ce quiz : ${usedTopics.slice(-20).join(', ') || 'aucun'}.
 Questions déjà posées (interdites) : ${recent}.
 Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
         : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
 Règles :
-- écris naturellement, comme un humain qui pose la question à l'oral (simple, fluide, décontracté) ;
-- sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) : pas deux questions sur le même sujet dans le lot ;
-- ${quizLevelInstruction('cg', level)} ; question complète, claire et compréhensible seule ;
+- écris naturellement, simplement et clairement ;
+- sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) ;
+- ${quizLevelInstruction('cg', level)} ; question complète et compréhensible seule ;
 - réponse courte (1 à 4 mots), précise et incontestable ;
-- INTERDIT : records ou « le plus… » contestables, chiffres qui changent (population, classements), actualité, « qui est l'actuel… », questions à plusieurs réponses possibles, questions piégeuses ;
-- ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
 - la réponse ne doit pas apparaître dans la question.
-Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
+Champ "type" : "nom" | "court".
 Champ "person" : true si la réponse est le nom d'une personne.
-Champ "usual" : nom d'usage universel si différent du nom de famille (ex : "Napoléon"), sinon "".
-Champ "alts" : variantes, traductions ou nom de famille seul si personne (jamais le prénom seul).
+Champ "usual" : nom d'usage universel si différent du nom de famille, sinon "".
+Champ "alts" : variantes, traductions ou nom de famille seul si personne.
 Questions déjà posées (interdites) : ${recent}.
 Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","question":"...","answer":"...","alts":["..."]}]}`;
 
     try {
-      const data = await groqJson(prompt, 3500, 0.65);
+      const data = await groqJson(prompt, 2400, 0.65);
       const list = Array.isArray(data.questions) ? data.questions : [];
       const batch = [];
 
@@ -7545,12 +7628,8 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
         const qKey = `q:${key}`;
         const answerKey = normalizeLoose(answer);
 
-        // Une même réponse ne revient pas deux fois dans le même quiz
         if (usedAnswers.has(answerKey) || batch.some(q => normalizeLoose(q.answer) === answerKey)) continue;
 
-        // Historique : on évite les questions déjà posées. Pour le multivers on évite aussi
-        // la même réponse dans le même univers ; en culture générale la même réponse
-        // (ex. « Paris ») peut revenir avec une autre question.
         const aKey = `a:${normalizeLoose(item?.univers || '')}|${answerKey}`;
         if (history.keys.has(qKey)) continue;
         if (category === 'multivers' && history.keys.has(aKey)) continue;
@@ -7559,7 +7638,7 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
         if (category === 'multivers') {
           univers = String(item?.univers || '').trim();
           const topic = normalizeLoose(univers);
-          if (topic && usedTopics.includes(topic) && attempts <= 8) continue;
+          if (topic && usedTopics.includes(topic) && attempts <= 2) continue;
           if (topic && !usedTopics.includes(topic)) usedTopics.push(topic);
         }
 
@@ -7594,8 +7673,11 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
         });
       }
 
-      // Relecture : seules les questions validées (exactes + bon niveau) sont gardées
-      const verified = await verifyQuizQuestions(batch, level, category);
+      const remainingTime = budgetMs - (Date.now() - startedAt);
+      const verified = remainingTime > 7000
+        ? await verifyQuizQuestions(batch, level, category)
+        : batch;
+
       for (const q of verified) {
         if (questions.length >= total) break;
         questions.push(q);
@@ -7614,13 +7696,38 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
       failures++;
       lastQuizGenerationError = `Groq : ${String(error?.response?.data?.error?.message || error?.message || error).slice(0, 150)}`;
       logger.warn({ error: error?.message }, 'Sitri~Quiz : génération de questions échouée.');
-      await sleep(Math.min(10000, 2000 * failures)); // on laisse respirer l'API (limite de débit)
+      if (Date.now() - startedAt < budgetMs - 2500) {
+        await sleep(Math.min(2000, 800 * failures));
+      }
     }
   }
 
   // Filet de sécurité (culture générale) : questions vérifiées à la main
   if (category === 'cg' && questions.length < total) {
     questions.push(...pickCgBankQuestions(level, total - questions.length, questions, history));
+  }
+
+  // Filet de sécurité multivers si l'IA n'a pas pu tout générer dans le délai de 30s
+  if (category === 'multivers' && questions.length < Math.min(total, 5)) {
+    const multiversFallback = [
+      { type: 'text', answerType: 'nom', person: false, univers: 'Naruto', question: "Dans Naruto, comment s'appelle le village caché d'où vient Naruto Uzumaki ?", answer: 'Konoha', alts: ['Konohagakure', 'Village de la Feuille', 'Feuille'], keypoints: ['Konoha'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: true, univers: 'One Piece', question: "Dans One Piece, quel est le nom du capitaine de l'équipage au Chapeau de Paille ?", answer: 'Monkey D. Luffy', alts: ['Luffy', 'Mugiwara'], keypoints: ['Luffy'], histKeys: [] },
+      { type: 'text', answerType: 'court', person: false, univers: 'Demon Slayer', question: "Dans Demon Slayer, quel souffle Tanjiro Kamado utilise-t-il au début de son entraînement ?", answer: "Souffle de l'eau", alts: ['Eau', 'Souffle eau'], keypoints: ['Eau'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: false, univers: 'Jujutsu Kaisen', question: "Dans Jujutsu Kaisen, comment s'appelle l'extension du territoire de Satoru Gojo ?", answer: 'Illusion infinie', alts: ['Vide infini', 'Infinite Void', 'Muryo Kusho'], keypoints: ['Infini', 'Illusion'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: false, univers: 'Dragon Ball', question: "Dans Dragon Ball Z, comment s'appelle la transformation légendaire aux cheveux dorés de Goku ?", answer: 'Super Saiyan', alts: ['Super Saiyen', 'SSJ', 'Super Sayajin'], keypoints: ['Super Saiyan'], histKeys: [] },
+      { type: 'text', answerType: 'court', person: false, univers: 'Fullmetal Alchemist', question: "Dans Fullmetal Alchemist, quelle est la règle fondamentale de l'alchimie ?", answer: "Échange équivalent", alts: ['Principe d échange équivalent', 'Equivalent exchange'], keypoints: ['Échange équivalent'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: false, univers: 'Hunter x Hunter', question: "Dans Hunter x Hunter, quel est le nom de l'examen que passent Gon et ses amis pour devenir chasseurs ?", answer: 'Examen des Hunters', alts: ['Hunter Exam', 'Examen Hunter'], keypoints: ['Hunter'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: false, univers: 'Attack on Titan', question: "Dans L'Attaque des Titans, quel est le nom du premier mur extérieur brisé au début de l'histoire ?", answer: 'Mur Maria', alts: ['Wall Maria', 'Maria'], keypoints: ['Maria'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: false, univers: 'Death Note', question: "Dans Death Note, quel est le prénom du shinigami qui laisse tomber son cahier sur Terre ?", answer: 'Ryuk', alts: ['Ryuuk'], keypoints: ['Ryuk'], histKeys: [] },
+      { type: 'text', answerType: 'nom', person: false, univers: 'My Hero Academia', question: "Dans My Hero Academia, quel est le nom de l'Alter transmis à Izuku Midoriya ?", answer: 'One For All', alts: ['OFA', 'Un pour tous'], keypoints: ['One For All'], histKeys: [] }
+    ];
+    for (const fb of multiversFallback) {
+      if (questions.length >= total) break;
+      const nq = normalizeLoose(fb.question);
+      if (!questions.some(q => normalizeLoose(q.question) === nq)) {
+        questions.push(fb);
+      }
+    }
   }
 
   return questions.slice(0, total);
@@ -8161,7 +8268,7 @@ async function startAutoQuiz(session) {
 
   try {
     await quizSend(jid, {
-      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation et relecture des questions (ça peut prendre 1 à 3 minutes)...`
+      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation et relecture des questions (maximum 30 secondes)...`
     });
 
     if (!CONFIG.groqKey && !['id', 'idv'].includes(session.category)) {

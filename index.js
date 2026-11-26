@@ -910,112 +910,44 @@ function styleText(value = '') {
 
 const firewallConfig = {
   enabled: true,
-  minDelay: 1000,        // pause minimale avant chaque envoi (ms)
-  maxDelay: 2500,        // pause maximale aléatoire (ms)
-  perCharMs: 18,         // temps de "frappe" ajouté par caractère
-  maxTypingMs: 4500,     // plafond du temps de "frappe"
-  chatMinGapMs: 1200,    // écart minimal entre 2 messages dans la même discussion
-  userCooldown: 3000,    // anti-spam : 1 commande / 3 s par personne
-  maxMsgsPerMinute: 18,  // au-delà, le bot ralentit
-  maxMsgsPerHour: 400,   // au-delà, le bot ralentit
-  burstPauseMs: 8000     // pause de ralentissement
+  minDelay: 1200,
+  maxDelay: 3000,
+  userCooldown: 3000,
+  maxMsgsPerMinute: 20
 };
 
 const firewallUserCooldowns = new Map();
-const firewallChatLastSend = new Map();
-let firewallMinuteCount = 0;
-let firewallHourCount = 0;
-let firewallBlockedCount = 0;
-
+let firewallMsgCountMinute = 0;
 setInterval(() => {
-  firewallMinuteCount = 0;
+  firewallMsgCountMinute = 0;
 }, 60000);
 
-setInterval(() => {
-  firewallHourCount = 0;
-}, 60 * 60000);
-
-setInterval(() => {
-  const limit = Date.now() - 10 * 60000;
-  for (const [key, at] of firewallUserCooldowns) if (at < limit) firewallUserCooldowns.delete(key);
-  for (const [key, at] of firewallChatLastSend) if (at < limit) firewallChatLastSend.delete(key);
-}, 10 * 60000);
-
-// Anti-spam entrant : ignore les personnes qui enchaînent les commandes trop vite
 function isFirewallSpam(sender) {
   if (!firewallConfig.enabled || !sender || isOwner(sender)) return false;
   const now = Date.now();
   const lastCmd = firewallUserCooldowns.get(sender) || 0;
-  if (now - lastCmd < firewallConfig.userCooldown) {
-    firewallBlockedCount++;
-    return true;
-  }
+  if (now - lastCmd < firewallConfig.userCooldown) return true;
   firewallUserCooldowns.set(sender, now);
   return false;
 }
 
-// Envoi "humain" : pas de rafale, indicateur "écrit..." proportionnel à la longueur, ralentissement si trop de messages
-async function applyFirewallDelay(socketInstance, jid, content) {
-  if (!firewallConfig.enabled || !socketInstance || !jid || jid === 'status@broadcast') return;
-
-  if (
-    firewallMinuteCount >= firewallConfig.maxMsgsPerMinute ||
-    firewallHourCount >= firewallConfig.maxMsgsPerHour
-  ) {
-    await sleep(firewallConfig.burstPauseMs);
+async function applyFirewallDelay(socketInstance, jid) {
+  if (!firewallConfig.enabled || !socketInstance || !jid) return;
+  if (firewallMsgCountMinute >= firewallConfig.maxMsgsPerMinute) {
+    await sleep(5000);
   }
-
-  const sinceLast = Date.now() - (firewallChatLastSend.get(jid) || 0);
-  if (sinceLast < firewallConfig.chatMinGapMs) {
-    await sleep(firewallConfig.chatMinGapMs - sinceLast);
-  }
-
-  const textLength = String(content?.text || content?.caption || '').length;
-  const base =
-    Math.floor(Math.random() * (firewallConfig.maxDelay - firewallConfig.minDelay + 1)) +
-    firewallConfig.minDelay;
-  const delay = Math.min(firewallConfig.maxTypingMs, base + textLength * firewallConfig.perCharMs);
-
   try {
     await socketInstance.presenceSubscribe(jid);
     await socketInstance.sendPresenceUpdate('composing', jid);
   } catch {}
-
+  const delay =
+    Math.floor(Math.random() * (firewallConfig.maxDelay - firewallConfig.minDelay + 1)) +
+    firewallConfig.minDelay;
   await sleep(delay);
-
   try {
     await socketInstance.sendPresenceUpdate('paused', jid);
   } catch {}
-
-  firewallChatLastSend.set(jid, Date.now());
-  firewallMinuteCount++;
-  firewallHourCount++;
-}
-
-function firewallStatusText() {
-  return (
-    `🛡️ *Pare-feu Anti-Ban : ${firewallConfig.enabled ? 'ACTIVÉ ✅' : 'DÉSACTIVÉ ❌'}*\n\n` +
-    `• Pause « humaine » avant chaque message : ${firewallConfig.minDelay / 1000}–${firewallConfig.maxDelay / 1000} s + frappe\n` +
-    `• Écart minimal par discussion : ${firewallConfig.chatMinGapMs / 1000} s\n` +
-    `• Anti-spam commandes : 1 toutes les ${firewallConfig.userCooldown / 1000} s par personne\n` +
-    `• Ralentissement auto : ${firewallConfig.maxMsgsPerMinute}/min ou ${firewallConfig.maxMsgsPerHour}/h\n` +
-    `• Messages / minute (en cours) : ${firewallMinuteCount} • par heure : ${firewallHourCount}\n` +
-    `• Commandes ignorées pour spam : ${firewallBlockedCount}\n\n` +
-    `Utilisation : *Xfirewall on* / *Xfirewall off* / *Xfirewall status*`
-  );
-}
-
-async function setFirewallEnabled(enabled) {
-  firewallConfig.enabled = Boolean(enabled);
-  try {
-    await executeDbWithRetry({
-      sql: `INSERT INTO bot_flags (key, value) VALUES ('firewall', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      args: [enabled ? '1' : '0']
-    });
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Pare-feu : sauvegarde impossible.');
-  }
+  firewallMsgCountMinute++;
 }
 
 // 14. ENVOI DE MESSAGES
@@ -1113,12 +1045,11 @@ function getMenu() {
 ╭─〔 𝟬𝟭 ⌬ 𝗖𝗢𝗚𝗡𝗜𝗧𝗜𝗩𝗘 〕
 │
 ├ ◈ 𝚇𝚌𝚑𝚊𝚝 𝚘𝚗 / 𝚘𝚏𝚏
-├ ◈ 𝚇𝚊𝚜𝚔 / 𝚇𝚊𝚒
+├ ◈ 𝚇𝚊𝚜𝚔
+├ ◈ 𝚇𝚊𝚒
 ├ ◈ 𝚇𝚊𝚗𝚒𝚖𝚎
 ├ ◈ 𝚇𝚜𝚢𝚙 (𝚜𝚢𝚗𝚘𝚙𝚜𝚒𝚜)
 ├ ◈ 𝚇𝚙𝚘𝚕𝚒𝚌𝚎
-├ ◈ 𝚇𝚛𝚎𝚜𝚞𝚖𝚎
-├ ◈ 𝚇𝚜𝚘𝚞𝚛𝚌𝚎
 ├ ◈ 𝚇𝚒𝚗𝚏𝚘
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
@@ -1127,28 +1058,25 @@ function getMenu() {
 │
 ├ ◈ 𝚇𝚍𝚊𝚒𝚕𝚢
 ├ ◈ 𝚇𝚌𝚘𝚒𝚗𝚜
-├ ◈ 𝚇𝚙 / 𝚇𝚡𝚙
+├ ◈ 𝚇𝚙
 ├ ◈ 𝚇𝚛𝚊𝚗𝚔
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
 
 ╭─〔 𝟬𝟯 ⌬ 𝗘𝗡𝗧𝗘𝗥𝗧𝗔𝗜𝗡𝗠𝗘𝗡𝗧 〕
 │
-├ ◈ 𝚇𝚚𝚞𝚒𝚣 (𝚂𝚒𝚝𝚛𝚒~𝚀𝚞𝚒𝚣)
-├ ◈ 𝚇𝚚𝚏𝚕𝚊𝚜𝚑 / 𝚇𝚛𝚎𝚙𝚘𝚗𝚜𝚎
-├ ◈ 𝚇𝚜𝚝𝚊𝚛𝚝 / 𝚇𝚛𝚎𝚌𝚊𝚙 / 𝚇𝚝𝚊𝚋 / 𝚇𝚎𝚗𝚍
-│
+╰ ◈ 𝚇𝚚𝚞𝚒𝚣
 ╰━━━━━━━━━━━━━━━━━━━━━
 
 ╭─〔 𝟬𝟰 ⌬ 𝗠𝗨𝗟𝗧𝗜𝗠𝗘𝗗𝗜𝗔 〕
 │
 ├ ◈ 𝚇𝚒𝚖𝚐
 ├ ◈ 𝚇𝚜 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛)
-├ ◈ 𝚇𝚟 / 𝚇𝚛𝚎𝚟𝚎𝚊𝚕 (𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
+├ ◈ 𝚇𝚟 (𝚟𝚞𝚎 𝚞𝚗𝚒𝚚𝚞𝚎)
 ├ ◈ 𝚇𝚒 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛 ➜ 𝚒𝚖𝚊𝚐𝚎)
 ├ ◈ 𝚇𝚙𝚕𝚊𝚢
 ├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
-├ ◈ 𝚇𝚟𝚘𝚒𝚡 (𝚝𝚎𝚡𝚝𝚎 / 𝚘𝚗 / 𝚘𝚏𝚏)
+├ ◈ 𝚇𝚟𝚘𝚒𝚡 (𝚘𝚗/𝚘𝚏𝚏)
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
 
@@ -1159,20 +1087,19 @@ function getMenu() {
 
 ╭─〔 𝟬𝟲 ⌬ 𝗡𝗘𝗧𝗪𝗢𝗥𝗞 〕
 │
-├ ◈ 𝚇𝚝𝚊𝚐 / 𝚇𝚝𝚊𝚐𝚊𝚕𝚕
-├ ◈ 𝚇𝚑𝚝𝚊𝚐 / 𝚇𝚑𝚒𝚍𝚎𝚝𝚊𝚐
+├ ◈ 𝚇𝚝𝚊𝚐𝚊𝚕𝚕
+├ ◈ 𝚇𝚑𝚝𝚊𝚐
 ├ ◈ 𝚇𝚊𝚗𝚗𝚘𝚗𝚌𝚎
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
 
 ╭─〔 𝟬𝟳 ⌬ 𝗖𝗢𝗡𝗧𝗥𝗢𝗟 〕
 │
-├ ◈ 𝚇𝚔𝚒𝚌𝚔 / 𝚇𝚋𝚊𝚗
+├ ◈ 𝚇𝚔𝚒𝚌𝚔
 ├ ◈ 𝚇𝚊𝚍𝚍
 ├ ◈ 𝚇𝚌𝚕𝚎𝚊𝚛
-├ ◈ 𝚇𝚘𝚗 / 𝚇𝚘𝚏𝚏
-├ ◈ 𝚇𝚔𝚊𝚢𝚘𝚗 / 𝚇𝚔𝚊𝚢𝚘𝚏𝚏
-├ ◈ 𝚇𝚏𝚒𝚛𝚎𝚠𝚊𝚕𝚕 (𝚘𝚗/𝚘𝚏𝚏)
+├ ◈ 𝚇𝚘𝚗
+├ ◈ 𝚇𝚘𝚏𝚏
 ├ ◈ 𝚇𝚛𝚎𝚜𝚝𝚊𝚛𝚝
 ├ ◈ 𝚇𝚘𝚗𝚕𝚢𝚊𝚍𝚖𝚒𝚗
 │
@@ -1181,7 +1108,6 @@ function getMenu() {
 ╭─〔 𝟬𝟴 ⌬ 𝗦𝗬𝗦𝗧𝗘𝗠 〕
 │
 ├ ◈ 𝚇𝚞𝚙𝚝
-├ ◈ 𝚇𝚖𝚘𝚍𝚎𝚕𝚜
 ├ ◈ 𝚇𝚖𝚎𝚗𝚞
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
@@ -3511,7 +3437,7 @@ async function answerQuiz(chatJid, userJid, answer) {
   });
 
   if (!existing.rows.length) {
-    return { success: false, message: 'Aucun quiz rapide actif. Lance Xqflash pour commencer.' };
+    return { success: false, message: 'Aucun quiz actif. Lance Xquiz pour commencer.' };
   }
 
   const quiz = existing.rows[0];
@@ -3524,7 +3450,7 @@ async function answerQuiz(chatJid, userJid, answer) {
 
     return {
       success: false,
-      message: `⌛ Le temps du quiz est écoulé ! La bonne réponse était : ${quiz.answer}.\nLance un nouveau Xqflash.`
+      message: `⌛ Le temps du quiz est écoulé ! La bonne réponse était : ${quiz.answer}.\nLance un nouveau Xquiz.`
     };
   }
 
@@ -5440,6 +5366,10 @@ async function handlePlayOrVideoCommand(jid, message, command, args) {
   return true;
 }
 
+async function multimediaNotIntegrated(jid, message, command) {
+  return handlePlayOrVideoCommand(jid, message, command, '');
+}
+
 // ------------------------------------------------------------
 // 24. ROUTEUR : ANALYSE DES COMMANDES
 // ------------------------------------------------------------
@@ -5517,15 +5447,7 @@ async function handleEconomyCommand(jid, message, sender, command) {
 }
 
 async function handleQuizCommand(jid, message, sender, command, args) {
-  if (command === 'qflash') {
-    if (autoQuizzes.has(jid)) {
-      await sendReply(
-        jid,
-        '🧠 Un Sitri~Quiz est déjà en cours ici. Termine-le avec Xend avant de lancer Xqflash.',
-        message
-      );
-      return true;
-    }
+  if (command === 'quiz') {
     const result = await startQuiz(jid, args);
     await sendReply(jid, getResultText(result, '🧠 Réponds avec Xreponse suivi de ta réponse.'), message);
     return true;
@@ -5985,63 +5907,18 @@ async function analyzeImageWithVision(jpegBuffer) {
         ]
       }
     ],
-    { model, maxTokens: 900, temperature: 0.2, timeout: 22000 }
+    { model, maxTokens: 900, temperature: 0.2, timeout: 45000 }
   );
 
-  const cleaned = String(raw || '')
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
-
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    try {
-      return JSON.parse(cleaned.slice(start, end + 1));
-    } catch {}
-  }
-
-  // Repli si la réponse texte n'est pas un JSON strict
-  if (cleaned) {
-    return {
-      type: 'autre',
-      titre: '',
-      personnages: [],
-      description: cleaned.slice(0, 350),
-      texte: '',
-      explication: '',
-      certitude: 50
-    };
-  }
-
-  throw new Error('Réponse de vision illisible.');
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('Réponse de vision illisible.');
+  return JSON.parse(raw.slice(start, end + 1));
 }
 
-async function fallbackImageInfoWithSearch(vision, trace) {
-  const queryParts = [];
-  if (trace?.title) queryParts.push(trace.title);
-  if (vision?.titre) queryParts.push(vision.titre);
-  if (Array.isArray(vision?.personnages) && vision.personnages.length) {
-    queryParts.push(vision.personnages.slice(0, 2).join(' '));
-  }
-  if (!queryParts.length && vision?.description) {
-    queryParts.push(String(vision.description).slice(0, 90));
-  }
-  if (!queryParts.length) return '';
-
-  const q = `${queryParts.join(' ')} anime manga personnage origine`.trim();
-  try {
-    if (typeof searchWeb === 'function') {
-      const res = await searchWeb(q);
-      if (res) return String(res).slice(0, 350);
-    }
-  } catch {}
-  return '';
-}
-
-function buildSourceReply(trace, vision, extraInfo = '') {
+function buildSourceReply(trace, vision) {
   const lines = [];
-  const strong = trace && trace.title && trace.similarity >= 0.88;
+  const strong = trace && trace.title && trace.similarity >= 0.9;
 
   if (strong) {
     lines.push('📺 *Capture d’anime reconnue*');
@@ -6057,38 +5934,26 @@ function buildSourceReply(trace, vision, extraInfo = '') {
       fanart: '🎨 *Fanart* (dessin de fan)',
       manga: '📖 *Page de manga / webtoon*',
       texte: '📝 *Image contenant du texte*',
-      autre: '🖼️ *Analyse d’image*'
+      autre: '🖼️ *Image*'
     };
     lines.push(labels[vision.type] || labels.autre);
 
-    const cert = Number(vision.certitude);
-    const sure = Number.isFinite(cert) && cert >= 55;
-    if (vision.titre) {
-      lines.push(`• Œuvre / Source : *${vision.titre}*${sure ? '' : ' (piste probable)'}`);
-    }
+    const sure = Number(vision.certitude) >= 60;
+    if (vision.titre) lines.push(`• Œuvre : *${vision.titre}*${sure ? '' : ' (pas certain)'}`);
     if (Array.isArray(vision.personnages) && vision.personnages.length) {
       lines.push(`• Personnage(s) : ${vision.personnages.slice(0, 4).join(', ')}`);
     }
-    if (vision.description) lines.push('', String(vision.description).slice(0, 320));
+    if (vision.description) lines.push('', String(vision.description).slice(0, 300));
     if (vision.texte) lines.push('', `📝 *Texte :* ${String(vision.texte).slice(0, 500)}`);
     if (vision.explication) lines.push('', `🧠 *Explication :* ${String(vision.explication).slice(0, 600)}`);
 
-    if (trace && trace.title && trace.similarity >= 0.72) {
-      lines.push('', `💡 Piste trace.moe : *${trace.title}* (${Math.round(trace.similarity * 100)} %).`);
+    if (trace && trace.title && trace.similarity >= 0.8) {
+      lines.push('', `💡 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
     }
-  } else if (trace && trace.title) {
-    lines.push('📺 *Piste d’anime trouvée*');
-    lines.push(`• Anime : *${trace.title}*`);
-    if (trace.episode) lines.push(`• Épisode : ${trace.episode}`);
-    lines.push(`• Similarité : ${Math.round((trace.similarity || 0) * 100)} %`);
+  } else if (trace && trace.title && trace.similarity >= 0.8) {
+    lines.push(`📺 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
   } else {
-    lines.push('🖼️ *Image reçue*');
-    lines.push('• Aucune correspondance exacte sur trace.moe et analyse visuelle indisponible pour le moment.');
-    lines.push('• Astuce : réessaie dans quelques secondes ou envoie une image plus nette.');
-  }
-
-  if (extraInfo && !lines.some(l => l.includes('Explication'))) {
-    lines.push('', `ℹ️ *Complément :* ${extraInfo}`);
+    lines.push('🤔 Je n’ai pas réussi à identifier cette image.');
   }
 
   lines.push('', SIGNATURE);
@@ -6114,7 +5979,7 @@ async function handleSourceCommand(jid, message, sender) {
     return;
   }
 
-  await sendReply(jid, '🔎 Analyse de l’image en cours (max ~25s)...', message);
+  await sendReply(jid, '🔎 Analyse de l’image en cours...', message);
 
   let jpeg;
   try {
@@ -6122,12 +5987,13 @@ async function handleSourceCommand(jid, message, sender) {
     const sharpFn = sharpMod.default || sharpMod;
     jpeg = await sharpFn(media.buffer)
       .rotate()
-      .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 80 })
+      .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 82 })
       .toBuffer();
   } catch (error) {
     logger.warn({ error: error?.message }, 'Xsource : conversion impossible.');
-    jpeg = media.buffer;
+    await sendReply(jid, '⚠️ Je n’arrive pas à lire cette image.', message);
+    return;
   }
 
   const [trace, vision] = await Promise.all([
@@ -6136,87 +6002,19 @@ async function handleSourceCommand(jid, message, sender) {
       return null;
     }),
     CONFIG.groqKey
-      ? analyzeImageWithVision(jpeg).catch(async error => {
+      ? analyzeImageWithVision(jpeg).catch(error => {
           logger.warn({ error: error?.response?.data?.error?.message || error?.message }, 'Xsource : vision indisponible.');
-          // Deuxième tentative rapide sur un modèle vision alternatif si besoin
-          try {
-            return await groqChat(
-              [
-                {
-                  role: 'user',
-                  content: [
-                    { type: 'text', text: 'Décris brièvement cette image en français et indique l’anime, manga, jeu, personne ou sujet si identifiable.' },
-                    { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } }
-                  ]
-                }
-              ],
-              { model: 'meta-llama/llama-4-maverick-17b-128e-instruct', maxTokens: 500, temperature: 0.2, timeout: 18000 }
-            ).then(desc => ({
-              type: 'autre',
-              titre: '',
-              personnages: [],
-              description: String(desc || '').slice(0, 350),
-              texte: '',
-              explication: '',
-              certitude: 50
-            }));
-          } catch {
-            return null;
-          }
+          return null;
         })
       : null
   ]);
 
-  let extraInfo = '';
-  if (!vision && !trace?.title) {
-    extraInfo = await fallbackImageInfoWithSearch(vision, trace);
-  }
-
-  await sendReply(jid, buildSourceReply(trace, vision, extraInfo), message);
+  await sendReply(jid, buildSourceReply(trace, vision), message);
 }
+
 
 // --- Xvoix : synthèse vocale féminine française (Xvoix <texte>, Xvoix on/off, Sitri-Nel)
 const voiceReplyChats = new Set();
-
-async function isVoiceReplyEnabled(jid) {
-  if (voiceReplyChats.has(jid)) return true;
-  try {
-    const res = await executeDbWithRetry({
-      sql: 'SELECT value FROM bot_flags WHERE key = ?',
-      args: [`voice_${jid}`]
-    });
-    if (String(res.rows?.[0]?.value || '') === '1') {
-      if (voiceReplyChats.size >= 500) {
-        const oldest = voiceReplyChats.values().next().value;
-        voiceReplyChats.delete(oldest);
-      }
-      await setVoiceReplyEnabled(jid, true);
-      return true;
-    }
-  } catch {}
-  return false;
-}
-
-async function setVoiceReplyEnabled(jid, enabled) {
-  if (enabled) {
-    if (voiceReplyChats.size >= 500) {
-      const oldest = voiceReplyChats.values().next().value;
-      voiceReplyChats.delete(oldest);
-    }
-    voiceReplyChats.add(jid);
-  } else {
-    await setVoiceReplyEnabled(jid, false);
-  }
-  try {
-    await executeDbWithRetry({
-      sql: `INSERT INTO bot_flags (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      args: [`voice_${jid}`, enabled ? '1' : '0']
-    });
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Mode vocal : sauvegarde impossible.');
-  }
-}
 
 function splitVoiceChunks(text, maxLen = 190) {
   const clean = String(text || '')
@@ -6523,6 +6321,11 @@ async function handleMediaCommand(jid, message, command, args) {
 
   if (command === 'syp') {
     await handleSynopsisCommand(jid, message, getMessageSender(message), args);
+    return true;
+  }
+
+  if (command === 'play' || command === 'video') {
+    await multimediaNotIntegrated(jid, message, command);
     return true;
   }
 
@@ -7299,7 +7102,7 @@ async function groqJson(prompt, maxTokens = 3500, temperature = 0.6) {
           max_tokens: maxTokens,
           response_format: { type: 'json_object' }
         },
-        { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 18000 }
+        { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 45000 }
       );
       CONFIG.groqModel = m;
       return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
@@ -7358,15 +7161,14 @@ Réponds en JSON : {"correct": true} ou {"correct": false}`,
   }
 }
 
-// Relecture rapide et résiliente : vérifie quand possible sans bloquer le lancement du quiz.
-async function verifyQuizQuestions(list, level = 'moyen', category = 'multivers') {
+// Relecture : on écarte les questions douteuses, ambiguës ou factuellement fausses
+async function verifyQuizQuestions(list, level = 'moyen') {
   if (!list.length) return list;
 
-  const levelRule = quizLevelInstruction(category, level);
-  const subset = list.slice(0, 10);
-
+  // Le modèle répond lui-même aux questions SANS voir la réponse proposée, puis on compare :
+  // les questions où les réponses divergent, ou qui sont douteuses, sont écartées.
   const attempt = async () => {
-    const questions = subset
+    const questions = list
       .map((q, i) => `${i + 1}. ${q.univers ? `[${q.univers}] ` : ''}${q.question}`)
       .join('\n');
 
@@ -7376,30 +7178,31 @@ async function verifyQuizQuestions(list, level = 'moyen', category = 'multivers'
 ${questions}
 
 Réponds en JSON : {"items":[{"n":1,"answer":"..."}]}`,
-      900,
+      1500,
       0
     );
 
     const given = new Map();
     for (const item of independent?.items || []) given.set(Number(item?.n), String(item?.answer || '').trim());
 
-    const rows = subset
+    const rows = list
       .map(
         (q, i) =>
           `${i + 1}. Question : ${q.question} | Réponse proposée : ${q.answer} | Réponse indépendante : ${given.get(i + 1) || '?'}`
       )
       .join('\n');
 
+    const banal = level === 'facile' ? '' : ', et pas trop banale';
     const verdict = await groqJson(
-      `Tu es relecteur exigeant d'un quiz. Pour chaque ligne, réponds :
+      `Tu es relecteur exigeant d'un quiz. Pour chaque ligne :
 - "same" : true si les deux réponses désignent la même chose (même écrites autrement : VO/VF, transcription, forme courte) ;
-- "ok" : true si la réponse proposée est exacte selon l'œuvre originale ou les faits établis, la question est claire, compréhensible seule et à réponse unique ;
-- "lvl" : false seulement si clairement hors niveau (${levelRule}), sinon true.
+- "ok" : true seulement si la réponse proposée est EXACTE selon l'œuvre originale ou les faits établis ; si tout ce que la question affirme (liens de parenté, rôles, événements, chronologie) est vrai et si la situation décrite existe vraiment dans l'œuvre ; si une seule réponse est attendue (pas de question à double volet) ; et si la question est claire, non ambiguë, compréhensible seule et correctement formulée en français${banal}.
+Au moindre doute sur l'exactitude, mets ok = false. Si la réponse indépendante est "?", juge avec tes propres connaissances et sois très prudent.
 
 ${rows}
 
-Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true,"lvl":true}]}`,
-      900,
+Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true}]}`,
+      1500,
       0
     );
 
@@ -7407,40 +7210,29 @@ Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true,"lvl":true}]}`,
   };
 
   let result = null;
-  try {
-    result = await Promise.race([
-      attempt(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Relecture timeout 18s')), 18000))
-    ]);
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture rapide ignorée (repli direct).');
-    // Repli rapide : on garde les questions bien formées générées
-    return list;
+  for (let i = 0; i < 2 && !result; i++) {
+    try {
+      result = await attempt();
+    } catch (error) {
+      logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture des questions impossible.');
+      if (i === 0) await sleep(2500);
+    }
   }
+  if (!result) return list;
 
   const byN = new Map();
-  for (const item of result?.verdict?.items || []) byN.set(Number(item?.n), item);
+  for (const item of result.verdict?.items || []) byN.set(Number(item?.n), item);
   if (!byN.size) return list;
 
-  const kept = subset.filter((q, i) => {
+  return list.filter((q, i) => {
     const v = byN.get(i + 1);
     if (!v) return true;
     const independentAnswer = result.given.get(i + 1);
     const agrees =
       v.same === true ||
-      v.same === 'true' ||
-      !independentAnswer ||
-      independentAnswer === '?' ||
-      isQuizAnswerCorrect(independentAnswer, q);
-    const ok = v.ok === true || v.ok === 'true' || v.ok === undefined;
-    return agrees && ok && v.lvl !== false;
+      Boolean(independentAnswer && independentAnswer !== '?' && isQuizAnswerCorrect(independentAnswer, q));
+    return agrees && v.ok !== false;
   });
-
-  // Complète avec le reste du lot si trop filtré afin d'avoir des questions rapidement
-  if (kept.length < Math.min(3, subset.length)) {
-    return list;
-  }
-  return [...kept, ...list.slice(subset.length)];
 }
 
 // ─── Niveaux et historique des questions (jamais deux fois la même question) ───
@@ -7463,21 +7255,17 @@ function matchQuizLevel(text) {
 function quizLevelInstruction(category, level) {
   if (category === 'multivers') {
     if (level === 'facile') {
-      return "niveau FACILE : un fan qui a regardé l'anime répond sans réfléchir (personnage principal, village/lieu célèbre, technique ou événement emblématique, début de l'histoire). Exemple de difficulté (ne le reprends pas) : « Dans Naruto, comment s'appelle le village caché d'où vient Naruto ? »";
+      return "niveau FACILE : questions accessibles à tout fan qui a regardé l'anime (personnages principaux, événements marquants, techniques célèbres), toujours claires et précises";
     }
     if (level === 'eleve') {
-      return "niveau ÉLEVÉ : fan confirmé ; détails précis d'un arc, personnage secondaire, cause ou conséquence d'un événement, règle du système de pouvoirs. Difficile mais toujours canonique, vérifiable et équitable. Exemple de difficulté (ne le reprends pas) : « Dans Hunter x Hunter, quel type de Nen maîtrise Gon ? »";
+      return "niveau ÉLEVÉ : fan confirmé ; détails précis d'arcs, personnages secondaires, causes et conséquences, subtilités de l'histoire ; difficile mais toujours factuel, vérifiable et équitable";
     }
-    return "niveau MOYEN : niveau fan ; jamais une question que quelqu'un ayant vu quelques épisodes saurait (pas de « qui est le héros de… »), mais rien d'impossible ; noms de techniques, causes, personnages secondaires importants, déroulement d'arcs. Exemple de difficulté (ne le reprends pas) : « Dans Demon Slayer, quel souffle Tanjiro utilise-t-il au début de son entraînement ? »";
+    return "niveau MOYEN : niveau fan ; jamais de question que quelqu'un ayant vu quelques épisodes saurait (pas de « qui est le héros de… »), mais rien d'impossible ; détails d'arcs précis, noms de techniques, causes, personnages secondaires";
   }
 
-  if (level === 'facile') {
-    return "niveau FACILE : culture de base que presque tout le monde connaît (capitales de pays très célèbres, planètes, animaux, couleurs, formes, drapeaux, grands monuments). Exemple de difficulté (ne le reprends pas) : « Quelle planète est la plus proche du Soleil ? »";
-  }
-  if (level === 'eleve') {
-    return "niveau ÉLEVÉ : pour passionnés de culture générale ; histoire précise, littérature, sciences, géographie moins connue, mais réponse unique et incontestable. Exemple de difficulté (ne le reprends pas) : « Quel traité de 1648 a mis fin à la guerre de Trente Ans ? »";
-  }
-  return "niveau MOYEN : niveau lycée / curieux ; il faut avoir un peu appris ou lu pour répondre (capitales moins évidentes, dates majeures, auteurs, découvertes). Exemple de difficulté (ne le reprends pas) : « Quelle est la capitale de l'Australie ? »";
+  if (level === 'facile') return 'niveau FACILE : culture générale de base, connue de la plupart des gens';
+  if (level === 'eleve') return 'niveau ÉLEVÉ : questions pointues pour passionnés de culture générale, précises et vérifiables';
+  return 'niveau MOYEN : ni trop facile, ni très difficile';
 }
 
 const quizHistoryCache = new Map();
@@ -7554,64 +7342,63 @@ function shuffleInPlace(list) {
   return list;
 }
 
-async function generateTextQuizQuestions(category, total, level = 'moyen', onProgress = null) {
+async function generateTextQuizQuestions(category, total, level = 'moyen') {
   const questions = [];
+  const fallbackPool = [];
   const usedTopics = [];
-  const usedAnswers = new Set();
+  let attempts = 0;
+
   const history = await loadQuizHistory(category);
   pruneQuizHistory(category).catch(() => {});
 
-  const startedAt = Date.now();
-  const budgetMs = 26000; // Maximum ~26s pour ne pas faire attendre les joueurs
-  const maxAttempts = 5;
-  let attempts = 0;
-  let failures = 0;
-  let progressSent = false;
-
-  while (questions.length < total && attempts < maxAttempts && Date.now() - startedAt < budgetMs) {
+  while (questions.length < total && attempts < 14) {
     attempts++;
     const remaining = total - questions.length;
-    const need = Math.min(10, Math.max(5, remaining + 2));
-    const recent = [...questions.map(q => q.question), ...history.recent].slice(0, 30).join(' | ') || 'aucune';
+    const need = Math.min(5, remaining + 1);
 
     const prompt =
       category === 'multivers'
         ? `Tu animes un quiz entre fans d'animés et de mangas sur WhatsApp. Génère exactement ${need} questions en français.
 
 Ton et formulation :
-- écris comme un fan qui lance une question à ses potes : naturel, décontracté, phrases simples et fluides ;
-- utilise la terminologie française courante de la VF/VOSTFR ;
-- la question doit être complète, claire et compréhensible seule.
+- écris comme un fan qui lance une question à ses potes : naturel, décontracté, phrases simples et fluides (pas de style scolaire, pas de ton robotique) ;
+- utilise la terminologie française courante de la VF/VOSTFR (ex. « souffle » et non « respiration » pour Demon Slayer) ;
+- la question doit être complète, claire et compréhensible seule, sans sous-entendu ni référence floue ; cite les noms et la situation utiles.
 
 Niveau : ${quizLevelInstruction('multivers', level)} ;
-- mélange de questions d'histoire et de faits précis de l'œuvre originale (canon).
+- environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), l'autre moitié de questions factuelles précises.
 
-Fiabilité :
-- anime/manga variés ;
-- UNE seule réponse attendue, claire et sans ambiguïté ;
+Fiabilité (très important) :
+- UNE seule question par univers dans ce lot : chaque question porte sur un anime/manga DIFFÉRENT ;
+- ne pose que des questions dont tu es absolument certain de la réponse selon l'œuvre originale ; au moindre doute, change de sujet ;
+- UNE seule réponse attendue : jamais de question à double volet ;
 - la réponse ne doit pas apparaître dans la question.
 
-Champ "type" : "nom" | "court" | "explication".
-Champ "alts" : variantes acceptables (VO, VF, romaji, prénom ou nom unique).
+Champ "type" :
+- "nom" : la réponse est un nom propre (personnage, technique, lieu...) ;
+- "court" : réponse de 1 à 4 mots qui n'est pas un nom propre ;
+- "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
+Champ "alts" : toutes les façons acceptables de répondre (VO, VF, VOSTFR, anglais, romaji, prénom seul ou nom de famille unique).
 Univers déjà utilisés dans ce quiz : ${usedTopics.slice(-20).join(', ') || 'aucun'}.
-Questions déjà posées (interdites) : ${recent}.
+Questions déjà posées (interdites) : ${[...questions.map(q => q.question), ...history.recent].slice(0, 40).join(' | ') || 'aucune'}.
 Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
         : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
 Règles :
-- écris naturellement, simplement et clairement ;
+- écris naturellement, comme un humain qui pose la question à l'oral (simple, fluide, décontracté) ;
 - sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) ;
-- ${quizLevelInstruction('cg', level)} ; question complète et compréhensible seule ;
+- ${quizLevelInstruction('cg', level)}, question complète, claire et compréhensible seule ;
 - réponse courte (1 à 4 mots), précise et incontestable ;
+- ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
 - la réponse ne doit pas apparaître dans la question.
-Champ "type" : "nom" | "court".
+Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
 Champ "person" : true si la réponse est le nom d'une personne.
-Champ "usual" : nom d'usage universel si différent du nom de famille, sinon "".
-Champ "alts" : variantes, traductions ou nom de famille seul si personne.
-Questions déjà posées (interdites) : ${recent}.
+Champ "usual" : nom d'usage universel si différent du nom de famille (ex : "Napoléon"), sinon "".
+Champ "alts" : variantes, traductions ou nom de famille seul si personne (jamais le prénom seul).
+Questions déjà posées (interdites) : ${[...questions.map(q => q.question), ...history.recent].slice(0, 40).join(' | ') || 'aucune'}.
 Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","question":"...","answer":"...","alts":["..."]}]}`;
 
     try {
-      const data = await groqJson(prompt, 2400, 0.65);
+      const data = await groqJson(prompt, 2500, 0.65);
       const list = Array.isArray(data.questions) ? data.questions : [];
       const batch = [];
 
@@ -7619,26 +7406,21 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
         const question = String(item?.question || '').trim();
         const answer = String(item?.answer || '').trim();
         if (!question || !answer || answer.length > 140) continue;
-        if (answer.length > 3 && normalizeLoose(question).includes(normalizeLoose(answer))) continue;
 
         const key = normalizeLoose(question);
         if (questions.some(q => normalizeLoose(q.question) === key)) continue;
         if (batch.some(q => normalizeLoose(q.question) === key)) continue;
+        if (fallbackPool.some(q => normalizeLoose(q.question) === key)) continue;
 
         const qKey = `q:${key}`;
-        const answerKey = normalizeLoose(answer);
-
-        if (usedAnswers.has(answerKey) || batch.some(q => normalizeLoose(q.answer) === answerKey)) continue;
-
-        const aKey = `a:${normalizeLoose(item?.univers || '')}|${answerKey}`;
-        if (history.keys.has(qKey)) continue;
-        if (category === 'multivers' && history.keys.has(aKey)) continue;
+        const aKey = `a:${normalizeLoose(item?.univers || '')}|${normalizeLoose(answer)}`;
+        if (history.keys.has(qKey) || history.keys.has(aKey)) continue;
 
         let univers = '';
         if (category === 'multivers') {
           univers = String(item?.univers || '').trim();
           const topic = normalizeLoose(univers);
-          if (topic && usedTopics.includes(topic) && attempts <= 2) continue;
+          if (topic && usedTopics.includes(topic) && attempts <= 8) continue;
           if (topic && !usedTopics.includes(topic)) usedTopics.push(topic);
         }
 
@@ -7657,7 +7439,7 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
           if (usual && usual.length <= 30) alts.push(usual);
         }
 
-        batch.push({
+        const formattedQ = {
           type: 'text',
           answerType,
           person,
@@ -7670,131 +7452,31 @@ Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","
             { key: qKey, label: question },
             { key: aKey, label: '' }
           ]
-        });
+        };
+
+        batch.push(formattedQ);
+        fallbackPool.push(formattedQ);
       }
 
-      const remainingTime = budgetMs - (Date.now() - startedAt);
-      const verified = remainingTime > 7000
-        ? await verifyQuizQuestions(batch, level, category)
-        : batch;
-
+      const verified = await verifyQuizQuestions(batch, level);
       for (const q of verified) {
         if (questions.length >= total) break;
         questions.push(q);
-        usedAnswers.add(normalizeLoose(q.answer));
-      }
-
-      failures = 0;
-
-      if (!progressSent && onProgress && questions.length >= Math.ceil(total / 2) && questions.length < total) {
-        progressSent = true;
-        try {
-          onProgress(questions.length, total);
-        } catch {}
       }
     } catch (error) {
-      failures++;
       lastQuizGenerationError = `Groq : ${String(error?.response?.data?.error?.message || error?.message || error).slice(0, 150)}`;
       logger.warn({ error: error?.message }, 'Sitri~Quiz : génération de questions échouée.');
-      if (Date.now() - startedAt < budgetMs - 2500) {
-        await sleep(Math.min(2000, 800 * failures));
-      }
     }
   }
 
-  // Filet de sécurité (culture générale) : questions vérifiées à la main
-  if (category === 'cg' && questions.length < total) {
-    questions.push(...pickCgBankQuestions(level, total - questions.length, questions, history));
-  }
-
-  // Filet de sécurité multivers si l'IA n'a pas pu tout générer dans le délai de 30s
-  if (category === 'multivers' && questions.length < Math.min(total, 5)) {
-    const multiversFallback = [
-      { type: 'text', answerType: 'nom', person: false, univers: 'Naruto', question: "Dans Naruto, comment s'appelle le village caché d'où vient Naruto Uzumaki ?", answer: 'Konoha', alts: ['Konohagakure', 'Village de la Feuille', 'Feuille'], keypoints: ['Konoha'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: true, univers: 'One Piece', question: "Dans One Piece, quel est le nom du capitaine de l'équipage au Chapeau de Paille ?", answer: 'Monkey D. Luffy', alts: ['Luffy', 'Mugiwara'], keypoints: ['Luffy'], histKeys: [] },
-      { type: 'text', answerType: 'court', person: false, univers: 'Demon Slayer', question: "Dans Demon Slayer, quel souffle Tanjiro Kamado utilise-t-il au début de son entraînement ?", answer: "Souffle de l'eau", alts: ['Eau', 'Souffle eau'], keypoints: ['Eau'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: false, univers: 'Jujutsu Kaisen', question: "Dans Jujutsu Kaisen, comment s'appelle l'extension du territoire de Satoru Gojo ?", answer: 'Illusion infinie', alts: ['Vide infini', 'Infinite Void', 'Muryo Kusho'], keypoints: ['Infini', 'Illusion'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: false, univers: 'Dragon Ball', question: "Dans Dragon Ball Z, comment s'appelle la transformation légendaire aux cheveux dorés de Goku ?", answer: 'Super Saiyan', alts: ['Super Saiyen', 'SSJ', 'Super Sayajin'], keypoints: ['Super Saiyan'], histKeys: [] },
-      { type: 'text', answerType: 'court', person: false, univers: 'Fullmetal Alchemist', question: "Dans Fullmetal Alchemist, quelle est la règle fondamentale de l'alchimie ?", answer: "Échange équivalent", alts: ['Principe d échange équivalent', 'Equivalent exchange'], keypoints: ['Échange équivalent'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: false, univers: 'Hunter x Hunter', question: "Dans Hunter x Hunter, quel est le nom de l'examen que passent Gon et ses amis pour devenir chasseurs ?", answer: 'Examen des Hunters', alts: ['Hunter Exam', 'Examen Hunter'], keypoints: ['Hunter'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: false, univers: 'Attack on Titan', question: "Dans L'Attaque des Titans, quel est le nom du premier mur extérieur brisé au début de l'histoire ?", answer: 'Mur Maria', alts: ['Wall Maria', 'Maria'], keypoints: ['Maria'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: false, univers: 'Death Note', question: "Dans Death Note, quel est le prénom du shinigami qui laisse tomber son cahier sur Terre ?", answer: 'Ryuk', alts: ['Ryuuk'], keypoints: ['Ryuk'], histKeys: [] },
-      { type: 'text', answerType: 'nom', person: false, univers: 'My Hero Academia', question: "Dans My Hero Academia, quel est le nom de l'Alter transmis à Izuku Midoriya ?", answer: 'One For All', alts: ['OFA', 'Un pour tous'], keypoints: ['One For All'], histKeys: [] }
-    ];
-    for (const fb of multiversFallback) {
-      if (questions.length >= total) break;
-      const nq = normalizeLoose(fb.question);
-      if (!questions.some(q => normalizeLoose(q.question) === nq)) {
-        questions.push(fb);
-      }
+  for (const q of fallbackPool) {
+    if (questions.length >= total) break;
+    if (!questions.some(existing => normalizeLoose(existing.question) === normalizeLoose(q.question))) {
+      questions.push(q);
     }
   }
 
   return questions.slice(0, total);
-}
-
-// Banque locale de culture générale (vérifiée à la main) : sert de filet de sécurité si l'IA n'en fournit pas assez
-const QUIZ_CG_BANK = [
-  // FACILE
-  { level: 'facile', question: "Quelle est la capitale de l'Italie ?", answer: 'Rome', alts: [] },
-  { level: 'facile', question: 'Quelle planète est la plus proche du Soleil ?', answer: 'Mercure', alts: [] },
-  { level: 'facile', question: "Combien de jours compte une année non bissextile ?", answer: '365', alts: ['trois cent soixante-cinq'] },
-  { level: 'facile', question: 'Quel est le plus grand océan du monde ?', answer: 'Océan Pacifique', alts: ['Pacifique', 'Le Pacifique'] },
-  { level: 'facile', question: 'Quel animal est surnommé le « roi des animaux » ?', answer: 'Le lion', alts: ['Lion'] },
-  { level: 'facile', question: 'Dans quel pays se trouve la tour Eiffel ?', answer: 'France', alts: ['La France'] },
-  { level: 'facile', question: 'Quel gaz les humains respirent-ils pour vivre ?', answer: 'Oxygène', alts: ["L'oxygène", 'O2'] },
-  { level: 'facile', question: 'Combien de côtés a un hexagone ?', answer: '6', alts: ['six'] },
-  { level: 'facile', question: 'Quelle est la langue la plus parlée au Brésil ?', answer: 'Portugais', alts: ['Le portugais'] },
-  { level: 'facile', question: "Quelle est la formule chimique de l'eau ?", answer: 'H2O', alts: ['H2O'] },
-  { level: 'facile', question: 'Quel est le plus grand mammifère du monde ?', answer: 'Baleine bleue', alts: ['La baleine bleue'] },
-  { level: 'facile', question: 'Quel pays a pour capitale Tokyo ?', answer: 'Japon', alts: ['Le Japon'] },
-  // MOYEN
-  { level: 'moyen', question: "Quelle est la capitale de l'Australie ?", answer: 'Canberra', alts: [] },
-  { level: 'moyen', question: 'En quelle année le mur de Berlin est-il tombé ?', answer: '1989', alts: [] },
-  { level: 'moyen', question: "Quel est le symbole chimique de l'or ?", answer: 'Au', alts: [] },
-  { level: 'moyen', question: 'Qui a peint La Joconde ?', answer: 'Léonard de Vinci', alts: ['Vinci', 'De Vinci', 'Leonardo da Vinci'], person: true },
-  { level: 'moyen', question: 'Quel est le plus petit pays du monde par sa superficie ?', answer: 'Vatican', alts: ['Le Vatican', 'Cité du Vatican', 'Etat de la Cité du Vatican'] },
-  { level: 'moyen', question: 'Quelle est la capitale du Canada ?', answer: 'Ottawa', alts: [] },
-  { level: 'moyen', question: 'Quel fleuve traverse Paris ?', answer: 'La Seine', alts: ['Seine'] },
-  { level: 'moyen', question: 'Quel scientifique a découvert la pénicilline en 1928 ?', answer: 'Alexander Fleming', alts: ['Fleming'], person: true },
-  { level: 'moyen', question: "Combien d'os compte le squelette d'un adulte ?", answer: '206', alts: [] },
-  { level: 'moyen', question: "Quel est le plus long fleuve d'Afrique ?", answer: 'Le Nil', alts: ['Nil'] },
-  { level: 'moyen', question: "Quelle est la plus haute montagne d'Afrique ?", answer: 'Kilimandjaro', alts: ['Kilimanjaro', 'Mont Kilimandjaro'] },
-  { level: 'moyen', question: 'En quelle année a débuté la Première Guerre mondiale ?', answer: '1914', alts: [] },
-  // ÉLEVÉ
-  { level: 'eleve', question: 'Quel traité de 1648 a mis fin à la guerre de Trente Ans ?', answer: 'Traité de Westphalie', alts: ['Westphalie', 'Paix de Westphalie', 'Traités de Westphalie'] },
-  { level: 'eleve', question: 'Quel mathématicien a démontré le dernier théorème de Fermat ?', answer: 'Andrew Wiles', alts: ['Wiles'], person: true },
-  { level: 'eleve', question: "Quel est l'élément chimique le plus abondant dans l'univers ?", answer: 'Hydrogène', alts: ["L'hydrogène"] },
-  { level: 'eleve', question: "Quel empereur romain a refondé Byzance sous le nom de Constantinople ?", answer: 'Constantin', alts: ['Constantin Ier', 'Constantin le Grand'] },
-  { level: 'eleve', question: "Quel homme d'État prussien est le principal artisan de l'unification allemande de 1871 ?", answer: 'Otto von Bismarck', alts: ['Bismarck'], person: true },
-  { level: 'eleve', question: 'Quel est le lac le plus profond du monde ?', answer: 'Lac Baïkal', alts: ['Baïkal', 'Baikal'] },
-  { level: 'eleve', question: 'Quelle est la capitale de la Mongolie ?', answer: 'Oulan-Bator', alts: ['Ulaanbaatar', 'Ulan Bator'] },
-  { level: 'eleve', question: "Quel physicien a découvert l'électron en 1897 ?", answer: 'Joseph John Thomson', alts: ['J. J. Thomson', 'Thomson'], person: true },
-  { level: 'eleve', question: 'Qui a écrit le recueil « Les Fleurs du mal » ?', answer: 'Charles Baudelaire', alts: ['Baudelaire'], person: true },
-  { level: 'eleve', question: "Quel détroit sépare l'Asie de l'Amérique du Nord ?", answer: 'Détroit de Béring', alts: ['Béring', 'Bering', 'Détroit de Bering'] },
-  { level: 'eleve', question: 'Qui a écrit « Le Capital », publié en 1867 ?', answer: 'Karl Marx', alts: ['Marx'], person: true },
-  { level: 'eleve', question: 'Quelle est la formule chimique du sel de table ?', answer: 'NaCl', alts: ['Chlorure de sodium'] }
-];
-
-function pickCgBankQuestions(level, count, exclude, history) {
-  const askedKeys = new Set(exclude.map(q => normalizeLoose(q.question)));
-  const pool = QUIZ_CG_BANK.filter(
-    item => item.level === level && !askedKeys.has(normalizeLoose(item.question))
-  );
-  const unseen = shuffleInPlace(pool.filter(item => !history.keys.has(`q:${normalizeLoose(item.question)}`)));
-  const seen = shuffleInPlace(pool.filter(item => history.keys.has(`q:${normalizeLoose(item.question)}`)));
-
-  return [...unseen, ...seen].slice(0, count).map(item => ({
-    type: 'text',
-    answerType: item.person ? 'nom' : 'court',
-    person: Boolean(item.person),
-    univers: '',
-    question: item.question,
-    answer: item.answer,
-    alts: item.alts || [],
-    keypoints: [],
-    histKeys: [{ key: `q:${normalizeLoose(item.question)}`, label: item.question }]
-  }));
 }
 
 let lastQuizGenerationError = '';
@@ -8268,7 +7950,7 @@ async function startAutoQuiz(session) {
 
   try {
     await quizSend(jid, {
-      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation et relecture des questions (maximum 30 secondes)...`
+      text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation des questions...`
     });
 
     if (!CONFIG.groqKey && !['id', 'idv'].includes(session.category)) {
@@ -8280,14 +7962,7 @@ async function startAutoQuiz(session) {
         ? await generateIdQuizQuestions(session.total, session.level || 'moyen')
         : session.category === 'idv'
           ? await generateIdvQuizQuestions(session.total, session.level || 'moyen')
-          : await generateTextQuizQuestions(
-              session.category,
-              session.total,
-              session.level || 'moyen',
-              (done, wanted) => {
-                quizSend(jid, { text: `⏳ ${done}/${wanted} questions vérifiées, je termine...` }).catch(() => {});
-              }
-            );
+          : await generateTextQuizQuestions(session.category, session.total, session.level || 'moyen');
 
     if (autoQuizzes.get(jid) !== session) return;
 
@@ -8302,12 +7977,6 @@ async function startAutoQuiz(session) {
             : '')
       });
       return;
-    }
-
-    if (questions.length < session.total) {
-      await quizSend(jid, {
-        text: `⚠️ Seulement ${questions.length} question${questions.length > 1 ? 's' : ''} fiable${questions.length > 1 ? 's ont' : ' a'} passé la relecture sur ${session.total} demandées : on joue avec celles-là (je préfère ne pas poser de question douteuse).`
-      }).catch(() => {});
     }
 
     session.questions = questions;
@@ -8549,13 +8218,10 @@ async function ensureBotFlagsLoaded() {
 
   try {
     const res = await executeDbWithRetry({
-      sql: "SELECT key, value FROM bot_flags WHERE key IN ('kayden_only', 'firewall')",
+      sql: "SELECT value FROM bot_flags WHERE key = 'kayden_only'",
       args: []
     });
-    for (const row of res.rows || []) {
-      if (row.key === 'kayden_only') isKaydenOnly = String(row.value || '') === '1';
-      if (row.key === 'firewall') firewallConfig.enabled = String(row.value || '') === '1';
-    }
+    isKaydenOnly = String(res.rows?.[0]?.value || '') === '1';
     botFlagsLoaded = true;
   } catch (error) {
     logger.warn({ error: error?.message }, 'Mode Kayden : lecture impossible.');
@@ -8578,15 +8244,15 @@ async function setKaydenOnly(enabled) {
 
 const KNOWN_COMMANDS = new Set([
   'chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police', 'syp', 'spy', 'synopsis', 'sypnosis', 'info',
-  'daily', 'coins', 'p', 'xp', 'rank', 'profil',
-  'quiz', 'qflash', 'reponse',
+  'daily', 'coins', 'p', 'rank', 'profil',
+  'quiz', 'reponse',
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models',
-  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff', 'resume', 'source', 'voix', 'firewall'
+  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff', 'resume', 'source', 'voix'
 ]);
 
-const COMMAND_ALIASES = { parefeu: 'firewall', antiban: 'firewall', ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
+const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
 
 async function processCommand(message) {
   const jid = message?.key?.remoteJid;
@@ -8655,7 +8321,7 @@ async function processCommand(message) {
         }
         if (CONFIG.groqKey) {
           const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
-          if (await isVoiceReplyEnabled(jid)) {
+          if (voiceReplyChats.has(jid)) {
             const rawReply = await askGroq(cleanPrompt, jid, {
               senderJid: sender,
               pushName: message?.pushName || ''
@@ -8682,6 +8348,28 @@ async function processCommand(message) {
   const { args } = parsed;
   const command = COMMAND_ALIASES[parsed.command] || parsed.command;
 
+  if (command === 'firewall') {
+    if (!ownerCommand) {
+      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
+      return;
+    }
+    const sub = String(args || '').trim().toLowerCase();
+    if (sub === 'on') {
+      firewallConfig.enabled = true;
+      await sendReply(jid, '🛡️ *Pare-feu Anti-Ban ACTIVÉ*\nDélais humains et anti-spam actifs.', message);
+    } else if (sub === 'off') {
+      firewallConfig.enabled = false;
+      await sendReply(jid, '⚠️ *Pare-feu Anti-Ban DÉSACTIVÉ*\nAttention au risque de bannissement.', message);
+    } else {
+      await sendReply(
+        jid,
+        `🛡️ *Statut Pare-feu :* ${firewallConfig.enabled ? 'ACTIVÉ ✅' : 'DÉSACTIVÉ ❌'}\nUtilisation : *Xfirewall on* ou *Xfirewall off*`,
+        message
+      );
+    }
+    return;
+  }
+
   if (isFirewallSpam(sender)) return;
 
   if (!KNOWN_COMMANDS.has(command)) {
@@ -8700,24 +8388,6 @@ async function processCommand(message) {
     isOwner(message?.key?.participant) ||
     isOwner(message?.key?.participantPn) ||
     isOwner(message?.key?.remoteJidAlt);
-
-  if (command === 'firewall') {
-    if (!ownerCommand) {
-      await sendReply(jid, '⛔ Cette commande est réservée à KAY≈DEN.', message);
-      return;
-    }
-    const sub = String(args || '').trim().toLowerCase();
-    if (sub === 'on') {
-      await setFirewallEnabled(true);
-      await sendReply(jid, '🛡️ *Pare-feu Anti-Ban ACTIVÉ*\nDélais humains, anti-spam et ralentissement automatique actifs.', message);
-    } else if (sub === 'off') {
-      await setFirewallEnabled(false);
-      await sendReply(jid, '⚠️ *Pare-feu Anti-Ban DÉSACTIVÉ*\nLe bot envoie sans pause : risque de bannissement plus élevé.', message);
-    } else {
-      await sendReply(jid, firewallStatusText(), message);
-    }
-    return;
-  }
 
   if (command === 'voix') {
     const sub = String(args || '').trim().toLowerCase();
@@ -9207,7 +8877,7 @@ async function startBot() {
     const rawSend = socket.sendMessage.bind(socket);
 
     socket.sendMessage = async (jid, content, options) => {
-      await applyFirewallDelay(socket, jid, content);
+      await applyFirewallDelay(socket, jid);
       if (content && typeof content === 'object') {
         const next = { ...content };
 

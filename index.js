@@ -626,24 +626,24 @@ function isOwner(jid = '') {
 
 function getMessageSender(message) {
   const key = message?.key || {};
+  const isGroup = isGroupJid(key.remoteJid);
+
+  if (isGroup) {
+    const rawGroup = pickPhoneJid(key.participantPn, key.participantAlt, key.participant);
+    if (rawGroup) return normalizeJid(rawGroup);
+  }
 
   if (key.fromMe) {
     return normalizeJid(
       botJid ||
         sock?.user?.id ||
-        key.participant ||
         (CONFIG.pairingNumber ? `${CONFIG.pairingNumber}@s.whatsapp.net` : '') ||
         key.remoteJid ||
         ''
     );
   }
 
-  const isGroup = isGroupJid(key.remoteJid);
-
-  const raw = isGroup
-    ? pickPhoneJid(key.participantPn, key.participantAlt, key.participant)
-    : pickPhoneJid(key.senderPn, key.remoteJidAlt, key.remoteJid);
-
+  const raw = pickPhoneJid(key.senderPn, key.remoteJidAlt, key.remoteJid);
   return normalizeJid(raw);
 }
 
@@ -1030,6 +1030,7 @@ function getMenu() {
 ├ ◈ 𝚇𝚒 (𝚜𝚝𝚒𝚌𝚔𝚎𝚛 ➜ 𝚒𝚖𝚊𝚐𝚎)
 ├ ◈ 𝚇𝚙𝚕𝚊𝚢
 ├ ◈ 𝚇𝚟𝚒𝚍𝚎𝚘
+├ ◈ 𝚇𝚟𝚘𝚒𝚡 (𝚘𝚗/𝚘𝚏𝚏)
 │
 ╰━━━━━━━━━━━━━━━━━━━━━
 
@@ -1543,7 +1544,7 @@ async function listGroqModels() {
     });
     cachedGroqModels = (res.data?.data || [])
       .map(m => m.id)
-      .filter(id => !/whisper|guard|tts|audio|distil|prompt-guard/i.test(id));
+      .filter(id => !/whisper|guard|tts|audio|distil|prompt-guard|gpt-oss/i.test(id));
     cachedGroqModelsAt = Date.now();
     return cachedGroqModels;
   } catch {
@@ -2441,24 +2442,22 @@ async function addRewards(jid, coins = 0, xp = 0) {
 function getRank(xp) {
   xp = Number(xp) || 0;
 
-  if (xp >= 10000) return '👑 Legend';
-  if (xp >= 5000) return '💠 Elite';
-  if (xp >= 2500) return '💎 Diamond';
-  if (xp >= 1000) return '🥇 Gold';
-  if (xp >= 500) return '🥈 Silver';
-  if (xp >= 100) return '🥉 Bronze';
+  if (xp >= 10000) return 'Rang S';
+  if (xp >= 5000) return 'Rang A';
+  if (xp >= 2500) return 'Rang B';
+  if (xp >= 1000) return 'Rang C';
+  if (xp >= 300) return 'Rang D';
 
-  return '🌱 Novice';
+  return 'Rang E';
 }
 
 function getNextRank(xp) {
   const ranks = [
-    { xp: 100, name: 'Bronze' },
-    { xp: 500, name: 'Silver' },
-    { xp: 1000, name: 'Gold' },
-    { xp: 2500, name: 'Diamond' },
-    { xp: 5000, name: 'Elite' },
-    { xp: 10000, name: 'Legend' }
+    { xp: 300, name: 'Rang D' },
+    { xp: 1000, name: 'Rang C' },
+    { xp: 2500, name: 'Rang B' },
+    { xp: 5000, name: 'Rang A' },
+    { xp: 10000, name: 'Rang S' }
   ];
 
   return ranks.find(rank => xp < rank.xp) || null;
@@ -2575,7 +2574,7 @@ Classement : ${position >= 0 ? `#${position + 1}` : 'Non classé'}
 ${
   next
     ? `Prochain rang : ${next.name}\nXP nécessaire : ${next.xp - xp}`
-    : '👑 Rang maximal atteint : Legend'
+    : '👑 Rang maximal atteint : Rang S'
 }
 
 ╰━━━━━━━━━━━━━━━━━━━━━━╯
@@ -2794,13 +2793,12 @@ function buildFallbackMiniCardPng({ username, level, xp, currentLevelXp, nextLev
 
 // ───────── Carte « Ranker » (fenêtre de statut) ─────────
 const RANKER_TIERS = [
-  { name: 'Legend', letter: 'SS', color: '#fb7185' },
-  { name: 'Elite', letter: 'S', color: '#c084fc' },
-  { name: 'Diamond', letter: 'A', color: '#38bdf8' },
-  { name: 'Gold', letter: 'B', color: '#fbbf24' },
-  { name: 'Silver', letter: 'C', color: '#cbd5e1' },
-  { name: 'Bronze', letter: 'D', color: '#d97706' },
-  { name: 'Novice', letter: 'E', color: '#94a3b8' }
+  { name: 'Rang S', letter: 'S', color: '#fb7185' },
+  { name: 'Rang A', letter: 'A', color: '#c084fc' },
+  { name: 'Rang B', letter: 'B', color: '#38bdf8' },
+  { name: 'Rang C', letter: 'C', color: '#fbbf24' },
+  { name: 'Rang D', letter: 'D', color: '#cbd5e1' },
+  { name: 'Rang E', letter: 'E', color: '#94a3b8' }
 ];
 
 function cardSafeText(value, fallback = 'Joueur', max = 18) {
@@ -2838,8 +2836,8 @@ async function renderRankerCard(data, sharpFn, fontB64) {
   const nextLevelXp = Math.max(Number(data.nextLevelXp) || 100, currentLevelXp + 1);
   const ratio = Math.min(Math.max((xp - currentLevelXp) / (nextLevelXp - currentLevelXp), 0), 1);
 
-  const rankName = String(data.rankLabel || 'Novice').replace(/[^A-Za-z]/g, '') || 'Novice';
-  const tier = RANKER_TIERS.find(t => t.name.toLowerCase() === rankName.toLowerCase()) || RANKER_TIERS[RANKER_TIERS.length - 1];
+  const rankClean = String(data.rankLabel || 'Rang E').replace(/[^A-Za-z0-9 ]/g, '').trim();
+  const tier = RANKER_TIERS.find(t => t.name.toLowerCase() === rankClean.toLowerCase() || t.letter.toLowerCase() === rankClean.toLowerCase()) || RANKER_TIERS[RANKER_TIERS.length - 1];
   const name = cardSafeText(data.username, 'Joueur', 18).toUpperCase();
   const position = Number(data.position) > 0 ? `#${data.position} / ${Math.max(Number(data.totalUsers) || 1, 1)}` : 'NON CLASSE';
 
@@ -3193,9 +3191,15 @@ async function resolveProfileTarget(message, sender) {
   }
 
   const mem = await getUserMemory(targetJid);
+  const senderPush = targetJid === sender ? String(message?.pushName || '').trim() : '';
+  if (senderPush && !mem.name) {
+    saveUserMemory(targetJid, senderPush, mem.facts || '').catch(() => {});
+  }
   const displayName =
     mem.name ||
-    (targetJid === sender ? getDisplayName(message, targetJid) : getNumber(targetJid) || 'Utilisateur');
+    senderPush ||
+    getNumber(targetJid) ||
+    'Ranker';
 
   return { targetJid, displayName, avatarBuffer };
 }
@@ -5694,13 +5698,42 @@ function insightOnCooldown(jid, sender, key) {
   return false;
 }
 
+const GROQ_FALLBACK_MODELS = [
+  'llama-3.3-70b-versatile',
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'qwen/qwen3-32b',
+  'llama-3.1-8b-instant'
+];
+
 async function groqChat(messages, { model = CONFIG.groqModel, maxTokens = 800, temperature = 0.4, timeout = 40000 } = {}) {
-  const res = await axios.post(
-    'https://api.groq.com/openai/v1/chat/completions',
-    { model, messages, temperature, max_tokens: maxTokens },
-    { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout }
-  );
-  return String(res.data?.choices?.[0]?.message?.content || '').trim();
+  const isVision = Array.isArray(messages?.[0]?.content);
+  const candidates = isVision
+    ? [model, 'meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct']
+    : [model, ...GROQ_FALLBACK_MODELS];
+
+  const models = [...new Set(candidates)].filter(m => m && !/gpt-oss/i.test(m));
+  let lastError = null;
+
+  for (const m of models) {
+    try {
+      const res = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        { model: m, messages, temperature, max_tokens: maxTokens },
+        { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout }
+      );
+      const out = String(res.data?.choices?.[0]?.message?.content || '').trim();
+      if (out) {
+        if (!isVision) CONFIG.groqModel = m;
+        return out;
+      }
+    } catch (err) {
+      lastError = err;
+      const status = err?.response?.status;
+      if (status === 429 || status === 404 || status >= 500) continue;
+      throw err;
+    }
+  }
+  throw lastError || new Error('Tous les modèles Groq sont temporairement saturés.');
 }
 
 function formatClockHm(ts) {
@@ -5933,6 +5966,75 @@ async function handleSourceCommand(jid, message, sender) {
   await sendReply(jid, buildSourceReply(trace, vision), message);
 }
 
+
+// --- Xvoix : synthèse vocale féminine française (Xvoix <texte>, Xvoix on/off, Sitri-Nel)
+const voiceReplyChats = new Set();
+
+function splitVoiceChunks(text, maxLen = 190) {
+  const clean = String(text || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/[*_~`#•◈✦┃╭╮╰╯━─│├└]/g, ' ')
+    .replace(/𖤍.*?𖤍/g, ' ')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!clean) return [];
+  const words = clean.split(' ');
+  const chunks = [];
+  let current = '';
+
+  for (const w of words) {
+    if ((current + ' ' + w).trim().length > maxLen) {
+      if (current) chunks.push(current.trim());
+      current = w;
+    } else {
+      current = (current + ' ' + w).trim();
+    }
+  }
+  if (current) chunks.push(current.trim());
+  return chunks.slice(0, 5);
+}
+
+async function synthesizeFemaleFrenchAudio(text) {
+  const chunks = splitVoiceChunks(text, 190);
+  if (!chunks.length) return null;
+
+  const buffers = [];
+  for (const chunk of chunks) {
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=fr&client=tw-ob`;
+    const res = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 15000
+    });
+    buffers.push(Buffer.from(res.data));
+  }
+  return Buffer.concat(buffers);
+}
+
+async function sendVoiceReply(jid, text, quoted = null) {
+  try {
+    const audioBuffer = await synthesizeFemaleFrenchAudio(text);
+    if (!audioBuffer || !audioBuffer.length) {
+      return sendReply(jid, text, quoted);
+    }
+    await sock.sendMessage(
+      jid,
+      {
+        audio: audioBuffer,
+        mimetype: 'audio/mpeg',
+        ptt: true
+      },
+      quoted ? { quoted } : {}
+    );
+  } catch (error) {
+    logger.warn({ error: error?.message }, 'Xvoix : synthèse vocale échouée, repli texte.');
+    await sendReply(jid, text, quoted);
+  }
+}
 
 async function handleAICommand(jid, message, sender, command, args) {
   if (!['chat', 'ai', 'ia', 'ask', 'cerveau', 'anime', 'police'].includes(command)) {
@@ -6811,17 +6913,36 @@ function significantTokens(value) {
     .filter(token => token && !QUIZ_STOPWORDS.has(token));
 }
 
+function stripSubtitles(text = '') {
+  return String(text || '')
+    .split(/\s*[:\-–—(|/]\s*/)[0]
+    .trim();
+}
+
 function isQuizAnswerCorrect(submitted, question) {
   const sub = normalizeLoose(submitted);
   if (!sub) return false;
 
   const subTokens = significantTokens(submitted);
-  const candidates = [question.answer, ...(question.alts || [])]
-    .map(normalizeLoose)
-    .filter(Boolean);
+  const rawCandidates = [question.answer, ...(question.alts || [])].filter(Boolean);
+  const expanded = [];
+  for (const raw of rawCandidates) {
+    expanded.push(raw);
+    const shortTitle = stripSubtitles(raw);
+    if (shortTitle && shortTitle !== raw && shortTitle.length >= 4) {
+      expanded.push(shortTitle);
+    }
+  }
+
+  const candidates = [...new Set(expanded.map(normalizeLoose).filter(Boolean))];
 
   for (const cand of candidates) {
     if (sub === cand || fuzzyEqual(sub, cand)) return true;
+
+    // Titre principal sans sous-titre (ex. "Mushoku Tensei" pour "Mushoku Tensei: Jobless Reincarnation")
+    if (question.kind === 'poster' && sub.length >= 5 && (cand.startsWith(sub + ' ') || sub.startsWith(cand + ' '))) {
+      return true;
+    }
 
     const candTokens = significantTokens(cand);
     if (!candTokens.length || !subTokens.length) continue;
@@ -6830,7 +6951,6 @@ function isQuizAnswerCorrect(submitted, question) {
     if (candTokens.every(ct => subTokens.some(st => fuzzyEqual(st, ct)))) return true;
 
     // Les mots déjà présents dans la question n'ont pas à être répétés
-    // (ex. « Quel souffle utilise Shinobu ? » : « insecte » suffit pour « Souffle de l'insecte »)
     if (question.type === 'text' && question.question) {
       const inQuestion = new Set(significantTokens(question.question));
       const needed = candTokens.filter(ct => !inQuestion.has(ct));
@@ -6839,8 +6959,7 @@ function isQuizAnswerCorrect(submitted, question) {
       }
     }
 
-    // Personnage (ID) : le prénom seul suffit ; le nom de famille seul est refusé (plusieurs personnages
-    // le portent), sauf pour les noms à 3 mots ou plus où le dernier mot est le nom d'usage (ex. Monkey D. Luffy)
+    // Personnage (ID) : le prénom seul suffit
     if (question.type === 'image' && question.kind !== 'poster' && subTokens.length === 1 && subTokens[0].length >= 3 && cand === normalizeLoose(question.answer)) {
       const rawTokens = normalizeLoose(question.answer).split(' ').filter(Boolean);
       const accepted = [rawTokens[0]];
@@ -6855,24 +6974,40 @@ function isQuizAnswerCorrect(submitted, question) {
 // --- Génération des questions
 
 async function groqJson(prompt, maxTokens = 3500, temperature = 0.6) {
-  const res = await axios.post(
-    'https://api.groq.com/openai/v1/chat/completions',
-    {
-      model: CONFIG.groqModel,
-      messages: [
-        {
-          role: 'system',
-          content: 'Tu es un générateur de quiz rigoureux. Tu réponds uniquement par un objet JSON valide.'
-        },
-        { role: 'user', content: prompt }
-      ],
-      temperature,
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' }
-    },
-    { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 45000 }
+  const models = [...new Set([CONFIG.groqModel, ...GROQ_FALLBACK_MODELS])].filter(
+    m => m && !/gpt-oss/i.test(m)
   );
-  return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
+  let lastError = null;
+
+  for (const m of models) {
+    try {
+      const res = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: m,
+          messages: [
+            {
+              role: 'system',
+              content: 'Tu es un générateur de quiz rigoureux. Tu réponds uniquement par un objet JSON valide.'
+            },
+            { role: 'user', content: prompt }
+          ],
+          temperature,
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' }
+        },
+        { headers: { Authorization: `Bearer ${CONFIG.groqKey}` }, timeout: 45000 }
+      );
+      CONFIG.groqModel = m;
+      return JSON.parse(res.data?.choices?.[0]?.message?.content || '{}');
+    } catch (err) {
+      lastError = err;
+      const status = err?.response?.status;
+      if (status === 429 || status === 404 || status >= 500) continue;
+      throw err;
+    }
+  }
+  throw lastError || new Error('Groq JSON indisponible.');
 }
 
 // Juge une réponse : traductions (VO, VF, VOSTFR, anglais, romaji), fautes, formulations différentes
@@ -6901,7 +7036,8 @@ ${extra.length ? `${extra.join('\n')}\n` : ''}Réponse du joueur : ${playerText}
 
 Règles :
 - Compare d'abord avec la réponse attendue : si le joueur donne une autre personne, un autre pays, un autre lieu ou une autre chose que celle attendue, REFUSE (ex. « Brésil » quand la réponse attendue est « Allemagne »), même si c'est lié à la question.
-- L'orthographe doit être exacte : une lettre en moins, en trop ou remplacée par une autre est REFUSÉE. Majuscules, accents, tirets, espaces et apostrophes ne comptent pas.
+- Ignore totalement les majuscules, accents, virgules, deux-points, tirets, apostrophes et la ponctuation.
+- Pour un titre d'animé/manga (affiche), ACCEPTE le titre principal sans le sous-titre (ex. « Mushoku Tensei » pour « Mushoku Tensei: Jobless Reincarnation », « Konosuba » pour « KonoSuba: God's Blessing on This Wonderful World! », « Re:Zero » pour « Re:Zero - Starting Life in Another World ») et tolère les petites fautes d'orthographe (1 ou 2 lettres).
 - ACCEPTE toute orthographe, transcription ou traduction qui EXISTE réellement pour cette réponse (VO, VF, VOSTFR, anglais, romaji, coréen romanisé...) : ex. « Tohru » et « Tooru », « Dokja » et « Dok-ja », « Najenda » et « Nadezhda Najenda », « Vide infini » / « Vide incommensurable » / « Infinite Void ». Vérifie qu'elle existe vraiment : si oui, ACCEPTE ; si c'est une simple faute, REFUSE.
 - Si la question contient déjà le mot générique (souffle, technique, forme, titan, épée...), le mot distinctif seul suffit (ex. « insecte » pour « Souffle de l'insecte », « originel » pour « Titan originel »).
 - Personnage d'une œuvre : accepte le prénom, le nom de famille ou le nom d'usage seul quand il désigne ce personnage de façon unique parmi les personnages connus de l'œuvre (ex. « Gojo », « Isagi », « Uzui », « Urahara »). REFUSE le nom de famille seul quand d'autres membres connus de la famille le portent (ex. « Uchiha » pour Sasuke, « Elric », « Zoldyck »).
@@ -7981,7 +8117,7 @@ const KNOWN_COMMANDS = new Set([
   'img', 'play', 'video', 's', 'v', 'xi', 'reveal',
   'tag', 'tagall', 'htag', 'hidetag', 'onlyadmin', 'kick', 'add', 'annonce', 'clear',
   'on', 'off', 'restart', 'upt', 'menu', 'models',
-  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff', 'resume', 'source'
+  'start', 'recap', 'tab', 'end', 'kayon', 'kayoff', 'resume', 'source', 'voix'
 ]);
 
 const COMMAND_ALIASES = { ban: 'kick', spy: 'syp', synopsis: 'syp', sypnosis: 'syp', i: 'xi' };
@@ -8053,7 +8189,15 @@ async function processCommand(message) {
         }
         if (CONFIG.groqKey) {
           const cleanPrompt = text.replace(/^sitri[- ]?nel[\s,:-]*/i, '').trim() || 'Salut Sitri-Nel !';
-          await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+          if (voiceReplyChats.has(jid)) {
+            const rawReply = await askGroq(cleanPrompt, jid, {
+              senderJid: sender,
+              pushName: message?.pushName || ''
+            });
+            await sendVoiceReply(jid, rawReply, message);
+          } else {
+            await handleAICommand(jid, message, sender, 'chat', cleanPrompt);
+          }
         }
         return;
       }
@@ -8088,6 +8232,30 @@ async function processCommand(message) {
     isOwner(message?.key?.participant) ||
     isOwner(message?.key?.participantPn) ||
     isOwner(message?.key?.remoteJidAlt);
+
+  if (command === 'voix') {
+    const sub = String(args || '').trim().toLowerCase();
+    if (sub === 'on') {
+      voiceReplyChats.add(jid);
+      await sendReply(
+        jid,
+        '🎙️ 𝗠𝗢𝗗𝗘 𝗩𝗢𝗖𝗔𝗟 𝗔𝗖𝗧𝗜𝗩𝗘́\nJe répondrai désormais en note vocale quand tu m’appelles avec *Sitri-Nel* (les commandes du menu restent en texte).',
+        message
+      );
+      return;
+    }
+    if (sub === 'off') {
+      voiceReplyChats.delete(jid);
+      await sendReply(jid, '🔇 𝗠𝗢𝗗𝗘 𝗩𝗢𝗖𝗔𝗟 𝗗𝗘́𝗦𝗔𝗖𝗧𝗜𝗩𝗘́\nJe réponds de nouveau par écrit.', message);
+      return;
+    }
+    if (!String(args || '').trim()) {
+      await sendReply(jid, '🎙️ Utilisation :\n• *Xvoix <texte>* (je lis ton texte)\n• *Xvoix on* / *Xvoix off*', message);
+      return;
+    }
+    await sendVoiceReply(jid, String(args).trim(), message);
+    return;
+  }
 
   if (command === 'resume') {
     await handleResumeCommand(jid, message, sender, args);

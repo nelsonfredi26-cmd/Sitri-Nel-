@@ -5995,12 +5995,12 @@ function formatMmSs(seconds) {
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
 
-async function searchTraceMoe(jpegBuffer, mime = 'image/jpeg') {
+async function searchTraceMoe(imageBuffer, mime = 'image/jpeg') {
   const headers = { 'Content-Type': mime };
   const key = cleanEnv(process.env.TRACE_MOE_KEY);
   if (key) headers['x-trace-key'] = key;
 
-  const res = await axios.post('https://api.trace.moe/search?anilistInfo&cutBorders', jpegBuffer, {
+  const res = await axios.post('https://api.trace.moe/search?anilistInfo&cutBorders', imageBuffer, {
     headers,
     timeout: 25000,
     maxBodyLength: Infinity
@@ -6018,18 +6018,126 @@ async function searchTraceMoe(jpegBuffer, mime = 'image/jpeg') {
   };
 }
 
+// SauceNAO : manga, manhwa, illustrations, animé (clé gratuite sur saucenao.com -> SAUCENAO_KEY)
+async function searchSauceNao(imageBuffer, mime = 'image/jpeg') {
+  const key = cleanEnv(process.env.SAUCENAO_KEY);
+  if (!key) return null;
+
+  const form = new FormData();
+  form.append('api_key', key);
+  form.append('output_type', '2');
+  form.append('numres', '6');
+  form.append('db', '999');
+  form.append('file', new Blob([imageBuffer], { type: mime }), mime === 'image/png' ? 'image.png' : 'image.jpg');
+
+  const res = await fetch('https://saucenao.com/search.php', {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(25000)
+  });
+  if (!res.ok) throw new Error(`SauceNAO ${res.status}`);
+
+  const data = await res.json();
+  return (data?.results || [])
+    .map(item => {
+      const d = item?.data || {};
+      const title = String(d.eng_name || d.title || d.source || d.jp_name || d.material || '').trim();
+      const url = Array.isArray(d.ext_urls) && d.ext_urls.length ? String(d.ext_urls[0]) : '';
+      return {
+        similarity: Number(item?.header?.similarity) || 0,
+        db: String(item?.header?.index_name || '').replace(/^Index #\d+:\s*/, '').split(' - ')[0].slice(0, 40),
+        title,
+        part: d.part ? String(d.part) : '',
+        time: d.est_time ? String(d.est_time).split(' / ')[0] : '',
+        author: String(d.author_name || d.creator || d.member_name || '').slice(0, 60),
+        url
+      };
+    })
+    .filter(r => r.title || r.url)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, 4);
+}
+
+// Hébergement temporaire (1 h) : nécessaire pour envoyer l'image à Google Lens
+async function uploadTempImage(imageBuffer, mime = 'image/jpeg') {
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  form.append('time', '1h');
+  form.append('fileToUpload', new Blob([imageBuffer], { type: mime }), mime === 'image/png' ? 'image.png' : 'image.jpg');
+
+  const res = await fetch('https://litterbox.catbox.moe/resources/internals/api.php', {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(30000)
+  });
+  const url = (await res.text()).trim();
+  if (!res.ok || !/^https?:\/\//i.test(url)) throw new Error('Hébergement temporaire indisponible.');
+  return url;
+}
+
+// Google Lens (via SerpAPI : SERPAPI_KEY, 100 recherches gratuites par mois)
+async function searchGoogleLens(imageBuffer, mime = 'image/jpeg') {
+  const key = cleanEnv(process.env.SERPAPI_KEY);
+  if (!key) return null;
+
+  const imageUrl = await uploadTempImage(imageBuffer, mime);
+  const res = await axios.get('https://serpapi.com/search.json', {
+    params: { engine: 'google_lens', url: imageUrl, api_key: key, hl: 'fr' },
+    timeout: 45000
+  });
+
+  const matches = Array.isArray(res.data?.visual_matches) ? res.data.visual_matches : [];
+  return matches
+    .slice(0, 12)
+    .map(m => ({ title: String(m.title || '').slice(0, 140), source: String(m.source || '').slice(0, 40) }))
+    .filter(m => m.title);
+}
+
+function parseJsonLoose(raw) {
+  const text = String(raw || '');
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+// Déduit l'œuvre quand PLUSIEURS résultats Google Lens concordent (sinon : rien)
+async function inferWorkFromLens(matches) {
+  if (!matches?.length || !CONFIG.groqKey) return null;
+
+  const list = matches.map((m, i) => `${i + 1}. ${m.title} (${m.source})`).join('\n');
+  const raw = await groqChat(
+    [
+      {
+        role: 'system',
+        content: "Tu identifies l'œuvre d'une image à partir de résultats de recherche visuelle. Tu ne devines jamais."
+      },
+      {
+        role: 'user',
+        content: `Titres de pages web visuellement proches d'une image :\n${list}\n\nDéduis le titre de l'œuvre (animé, manga, manhwa/webtoon, jeu, film, série...) UNIQUEMENT si plusieurs résultats concordent. Réponds en JSON : {"titre":"","type":"","certitude":0}. Si rien n'est clair, laisse "titre" vide.`
+      }
+    ],
+    { maxTokens: 200, temperature: 0 }
+  );
+  return parseJsonLoose(raw);
+}
+
 const SOURCE_VISION_PROMPT = `Analyse cette image envoyée dans un groupe WhatsApp. Réponds uniquement en JSON :
-{"type":"capture_anime|fanart|manga|texte|autre","titre":"","personnages":[],"description":"","texte":"","explication":"","certitude":0}
-- "type" : capture_anime = image tirée d'un anime ; fanart = dessin de fan ; manga = page de manga/webtoon ; texte = image surtout composée de texte (message, article, capture d'écran...) ; autre sinon.
-- "titre" : titre de l'anime/manga/œuvre si tu le reconnais avec confiance, sinon "".
-- "personnages" : noms des personnages que tu reconnais, sinon [].
-- "description" : 1 à 2 phrases en français décrivant l'image.
+{"type":"capture_anime|manga_manhwa|fanart|jeu|film_serie|texte|autre","titre":"","personnages":[],"description":"","texte":"","explication":"","certitude":0}
+- "type" : capture_anime = image tirée d'un anime ; manga_manhwa = case de manga, manhwa ou webtoon ; fanart = dessin de fan ; jeu = jeu vidéo ; film_serie = film ou série ; texte = image surtout composée de texte (message, article, capture d'écran...) ; autre sinon.
+- "titre" : titre de l'œuvre SEULEMENT si tu le reconnais avec confiance, sinon "".
+- "personnages" : noms des personnages que tu reconnais avec confiance, sinon [].
+- "description" : 1 à 2 phrases en français décrivant l'image (personnages, décor, ambiance, style graphique).
 - "texte" : transcription fidèle du texte visible (vide s'il n'y en a pas).
 - "explication" : si l'image contient du texte, explique son contenu en français simple en 2 à 4 phrases ; sinon "".
 - "certitude" : nombre de 0 à 100.
 N'invente rien : si tu n'es pas sûr de l'œuvre, laisse "titre" vide. Pour un fanart, indique que c'est un fanart.`;
 
-async function analyzeImageWithVision(jpegBuffer, mime = 'image/jpeg') {
+async function analyzeImageWithVision(imageBuffer, mime = 'image/jpeg') {
   const model = cleanEnv(process.env.GROQ_VISION_MODEL) || 'meta-llama/llama-4-scout-17b-16e-instruct';
   const raw = await groqChat(
     [
@@ -6037,59 +6145,76 @@ async function analyzeImageWithVision(jpegBuffer, mime = 'image/jpeg') {
         role: 'user',
         content: [
           { type: 'text', text: SOURCE_VISION_PROMPT },
-          { type: 'image_url', image_url: { url: `data:${mime};base64,${jpegBuffer.toString('base64')}` } }
+          { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBuffer.toString('base64')}` } }
         ]
       }
     ],
     { model, maxTokens: 900, temperature: 0.2, timeout: 45000 }
   );
 
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('Réponse de vision illisible.');
-  return JSON.parse(raw.slice(start, end + 1));
+  const parsed = parseJsonLoose(raw);
+  if (!parsed) throw new Error('Réponse de vision illisible.');
+  return parsed;
 }
 
-function buildSourceReply(trace, vision) {
+function buildSourceReply({ trace, sauce, lens, vision, hint }) {
   const lines = [];
-  const strong = trace && trace.title && trace.similarity >= 0.9;
+  const strongTrace = trace && trace.title && trace.similarity >= 0.92;
+  const topSauce = Array.isArray(sauce) && sauce.length ? sauce[0] : null;
+  const sureSauce = topSauce && topSauce.title && topSauce.similarity >= 85;
+  const lensOk = lens && lens.titre && Number(lens.certitude) >= 60;
+  const found = Boolean(strongTrace || sureSauce || lensOk);
 
-  if (strong) {
+  if (strongTrace) {
     lines.push('📺 *Capture d’anime reconnue*');
     lines.push(`• Anime : *${trace.title}*`);
     lines.push(
       `• Épisode : ${trace.episode ?? 'inconnu'}${trace.from !== null ? ` (vers ${formatMmSs(trace.from)})` : ''}`
     );
     lines.push(`• Fiabilité : ${Math.round(trace.similarity * 100)} %`);
-    if (vision?.description) lines.push('', `🖼️ ${String(vision.description).slice(0, 300)}`);
+  } else if (sureSauce) {
+    lines.push('🔎 *Source trouvée*');
+    lines.push(`• Œuvre : *${topSauce.title}*`);
+    if (topSauce.part) lines.push(`• Épisode / chapitre : ${topSauce.part}${topSauce.time ? ` (vers ${topSauce.time})` : ''}`);
+    if (topSauce.author) lines.push(`• Auteur : ${topSauce.author}`);
+    lines.push(`• Fiabilité : ${Math.round(topSauce.similarity)} %${topSauce.db ? ` (${topSauce.db})` : ''}`);
+    if (topSauce.url) lines.push(`• Lien : ${topSauce.url}`);
+  } else if (lensOk) {
+    lines.push('🌐 *Recherche visuelle (type Google Lens)*');
+    lines.push(`• Œuvre probable : *${lens.titre}*${lens.type ? ` (${lens.type})` : ''}`);
+    lines.push('• Plusieurs résultats concordent, à vérifier si besoin.');
   } else if (vision) {
     const labels = {
       capture_anime: '📺 *Capture d’anime*',
+      manga_manhwa: '📖 *Case de manga / manhwa / webtoon*',
       fanart: '🎨 *Fanart* (dessin de fan)',
-      manga: '📖 *Page de manga / webtoon*',
+      jeu: '🎮 *Jeu vidéo*',
+      film_serie: '🎬 *Film / série*',
       texte: '📝 *Image contenant du texte*',
       autre: '🖼️ *Image*'
     };
     lines.push(labels[vision.type] || labels.autre);
-
-    const sure = Number(vision.certitude) >= 60;
-    if (vision.titre) lines.push(`• Œuvre : *${vision.titre}*${sure ? '' : ' (pas certain)'}`);
+    lines.push('⚠️ Aucun moteur de recherche n’a trouvé la source exacte : ce qui suit vient de l’analyse de l’image.');
+    if (vision.titre) lines.push(`• Œuvre possible : *${vision.titre}* (pas certain)`);
     if (Array.isArray(vision.personnages) && vision.personnages.length) {
       lines.push(`• Personnage(s) : ${vision.personnages.slice(0, 4).join(', ')}`);
     }
-    if (vision.description) lines.push('', String(vision.description).slice(0, 300));
-    if (vision.texte) lines.push('', `📝 *Texte :* ${String(vision.texte).slice(0, 500)}`);
-    if (vision.explication) lines.push('', `🧠 *Explication :* ${String(vision.explication).slice(0, 600)}`);
-
-    if (trace && trace.title && trace.similarity >= 0.8) {
-      lines.push('', `💡 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
-    }
-  } else if (trace && trace.title && trace.similarity >= 0.8) {
-    lines.push(`📺 Ça ressemble à une scène de *${trace.title}* (${Math.round(trace.similarity * 100)} %), à vérifier.`);
   } else {
     lines.push('🤔 Je n’ai pas réussi à identifier cette image.');
   }
 
+  // Piste secondaire quand la correspondance est moyenne
+  if (!found && topSauce && topSauce.title && topSauce.similarity >= 70) {
+    lines.push('', `💡 Piste : *${topSauce.title}* (${Math.round(topSauce.similarity)} %), à vérifier.`);
+  }
+
+  if (vision) {
+    if (vision.description) lines.push('', `🖼️ ${String(vision.description).slice(0, 300)}`);
+    if (vision.texte) lines.push('', `📝 *Texte :* ${String(vision.texte).slice(0, 500)}`);
+    if (vision.explication) lines.push('', `🧠 *Explication :* ${String(vision.explication).slice(0, 600)}`);
+  }
+
+  if (hint) lines.push('', hint);
   lines.push('', SIGNATURE);
   return lines.join('\n');
 }
@@ -6155,22 +6280,30 @@ async function handleSourceCommand(jid, message, sender) {
     await sendReply(jid, '⚠️ Je n’arrive pas à lire cette image (format non pris en charge).', message);
     return;
   }
-  const jpeg = prepared.buffer;
 
-  const [trace, vision] = await Promise.all([
-    searchTraceMoe(jpeg, prepared.mime).catch(error => {
-      logger.warn({ error: error?.response?.status || error?.message }, 'Xsource : trace.moe indisponible.');
-      return null;
-    }),
-    CONFIG.groqKey
-      ? analyzeImageWithVision(jpeg, prepared.mime).catch(error => {
-          logger.warn({ error: error?.response?.data?.error?.message || error?.message }, 'Xsource : vision indisponible.');
-          return null;
-        })
-      : null
+  const warn = (name, error) => {
+    logger.warn({ error: error?.response?.status || error?.message }, `Xsource : ${name} indisponible.`);
+    return null;
+  };
+
+  // Tous les moteurs en parallèle : animé (trace.moe), manga/manhwa/illustrations (SauceNAO),
+  // recherche visuelle web (Google Lens), analyse de l'image par l'IA
+  const [trace, sauce, lensMatches, vision] = await Promise.all([
+    searchTraceMoe(prepared.buffer, prepared.mime).catch(e => warn('trace.moe', e)),
+    searchSauceNao(prepared.buffer, prepared.mime).catch(e => warn('SauceNAO', e)),
+    searchGoogleLens(prepared.buffer, prepared.mime).catch(e => warn('Google Lens', e)),
+    CONFIG.groqKey ? analyzeImageWithVision(prepared.buffer, prepared.mime).catch(e => warn('vision', e)) : null
   ]);
 
-  await sendReply(jid, buildSourceReply(trace, vision), message);
+  const lens = await inferWorkFromLens(lensMatches).catch(e => warn('analyse Lens', e));
+
+  const noEngineKeys = !cleanEnv(process.env.SAUCENAO_KEY) && !cleanEnv(process.env.SERPAPI_KEY);
+  const hint =
+    noEngineKeys && isOwnerMessage(message)
+      ? 'ℹ️ Pour une vraie recherche type Google Lens, ajoute SAUCENAO_KEY (gratuit sur saucenao.com) et SERPAPI_KEY (serpapi.com) dans tes variables.'
+      : '';
+
+  await sendReply(jid, buildSourceReply({ trace, sauce, lens, vision, hint }), message);
 }
 
 
@@ -6823,7 +6956,7 @@ function sameUser(a, b) {
   return getNumber(normalizeJid(a)) === getNumber(normalizeJid(b));
 }
 
-const QUIZ_THANKS_TEXT = '🙏 Merci pour la participation au *Sitri~Quiz* !';
+const QUIZ_THANKS_TEXT = 'Merci pour la participation au Sitri~Quiz';
 
 // Compte (ou retire) un point quand l'animateur du quiz met / enlève l'émoji
 async function applyQuizReaction({ chatJid, targetKey, emoji, byJid }) {
@@ -7322,91 +7455,12 @@ Réponds en JSON : {"correct": true} ou {"correct": false}`,
   }
 }
 
-// Relecture : on écarte les questions douteuses, ambiguës, fausses ou hors niveau.
-// Une question non validée est ÉCARTÉE (jamais posée "au cas où").
-async function verifyQuizQuestions(list, level = 'moyen', category = 'multivers') {
-  if (!list.length) return list;
-
-  const levelRule = quizLevelInstruction(category, level);
-
-  const attempt = async () => {
-    const questions = list
-      .map((q, i) => `${i + 1}. ${q.univers ? `[${q.univers}] ` : ''}${q.question}`)
-      .join('\n');
-
-    // Le modèle répond lui-même SANS voir la réponse proposée, puis on compare
-    const independent = await groqJson(
-      `Réponds de façon brève et exacte à chacune de ces questions de quiz. Si tu n'es pas certain, mets "?".
-
-${questions}
-
-Réponds en JSON : {"items":[{"n":1,"answer":"..."}]}`,
-      1500,
-      0
-    );
-
-    const given = new Map();
-    for (const item of independent?.items || []) given.set(Number(item?.n), String(item?.answer || '').trim());
-
-    const rows = list
-      .map(
-        (q, i) =>
-          `${i + 1}. Question : ${q.question} | Réponse proposée : ${q.answer} | Réponse indépendante : ${given.get(i + 1) || '?'}`
-      )
-      .join('\n');
-
-    const verdict = await groqJson(
-      `Tu es relecteur exigeant d'un quiz. Pour chaque ligne, réponds :
-- "same" : true si les deux réponses désignent la même chose (même écrites autrement : VO/VF, transcription, forme courte) ;
-- "ok" : true seulement si la réponse proposée est EXACTE selon l'œuvre originale ou les faits établis ; si tout ce que la question affirme (liens de parenté, rôles, événements, chronologie) est vrai ; si la situation décrite existe vraiment ; si UNE SEULE réponse est possible (pas de double volet, pas de record contestable, pas de donnée qui change avec le temps) ; et si la question est claire, non ambiguë, compréhensible seule et correctement écrite en français ;
-- "lvl" : false SEULEMENT si la question est clairement hors du niveau demandé (trop facile ou trop difficile) — niveau demandé : ${levelRule}. Sinon true.
-Au moindre doute sur l'exactitude, mets ok = false. Si la réponse indépendante est "?", juge avec tes propres connaissances et sois très prudent.
-
-${rows}
-
-Réponds en JSON : {"items":[{"n":1,"same":true,"ok":true,"lvl":true}]}`,
-      1500,
-      0
-    );
-
-    return { verdict, given };
-  };
-
-  let result = null;
-  for (let i = 0; i < 2 && !result; i++) {
-    try {
-      result = await attempt();
-    } catch (error) {
-      logger.warn({ error: error?.message }, 'Sitri~Quiz : relecture des questions impossible.');
-      if (i === 0) await sleep(2500);
-    }
-  }
-
-  // Relecture impossible = on n'accepte rien (pas de question non vérifiée)
-  if (!result) return [];
-
-  const byN = new Map();
-  for (const item of result.verdict?.items || []) byN.set(Number(item?.n), item);
-  if (!byN.size) return [];
-
-  return list.filter((q, i) => {
-    const v = byN.get(i + 1);
-    if (!v) return false;
-    const independentAnswer = result.given.get(i + 1);
-    const agrees =
-      v.same === true ||
-      Boolean(independentAnswer && independentAnswer !== '?' && isQuizAnswerCorrect(independentAnswer, q));
-    const ok = v.ok === true || v.ok === 'true';
-    return agrees && ok && v.lvl !== false;
-  });
-}
-
 // ─── Niveaux et historique des questions (jamais deux fois la même question) ───
 
 const AUTO_QUIZ_LEVELS = {
   facile: { label: 'Facile', icon: '🟢' },
   moyen: { label: 'Moyen', icon: '🟡' },
-  eleve: { label: 'Élevé', icon: '🔴' }
+  eleve: { label: 'Difficile', icon: '🔴' }
 };
 
 function matchQuizLevel(text) {
@@ -7416,26 +7470,6 @@ function matchQuizLevel(text) {
   if (['moyen', 'medium', 'normal', 'intermediaire'].includes(n)) return 'moyen';
   if (['eleve', 'haut', 'difficile', 'hard', 'expert', 'dur'].includes(n)) return 'eleve';
   return null;
-}
-
-function quizLevelInstruction(category, level) {
-  if (category === 'multivers') {
-    if (level === 'facile') {
-      return "niveau FACILE : un fan qui a regardé l'anime répond sans réfléchir (personnage principal, village/lieu célèbre, technique ou événement emblématique, début de l'histoire). Exemple de difficulté (ne le reprends pas) : « Dans Naruto, comment s'appelle le village caché d'où vient Naruto ? »";
-    }
-    if (level === 'eleve') {
-      return "niveau ÉLEVÉ : fan confirmé ; détails précis d'un arc, personnage secondaire, cause ou conséquence d'un événement, règle du système de pouvoirs. Difficile mais toujours canonique, vérifiable et équitable. Exemple de difficulté (ne le reprends pas) : « Dans Hunter x Hunter, quel type de Nen maîtrise Gon ? »";
-    }
-    return "niveau MOYEN : niveau fan ; jamais une question que quelqu'un ayant vu quelques épisodes saurait (pas de « qui est le héros de… »), mais rien d'impossible ; noms de techniques, causes, personnages secondaires importants, déroulement d'arcs. Exemple de difficulté (ne le reprends pas) : « Dans Demon Slayer, quel souffle Tanjiro utilise-t-il au début de son entraînement ? »";
-  }
-
-  if (level === 'facile') {
-    return "niveau FACILE : culture de base que presque tout le monde connaît (capitales de pays très célèbres, planètes, animaux, couleurs, formes, drapeaux, grands monuments). Exemple de difficulté (ne le reprends pas) : « Quelle planète est la plus proche du Soleil ? »";
-  }
-  if (level === 'eleve') {
-    return "niveau ÉLEVÉ : pour passionnés de culture générale ; histoire précise, littérature, sciences, géographie moins connue, mais réponse unique et incontestable. Exemple de difficulté (ne le reprends pas) : « Quel traité de 1648 a mis fin à la guerre de Trente Ans ? »";
-  }
-  return "niveau MOYEN : niveau lycée / curieux ; il faut avoir un peu appris ou lu pour répondre (capitales moins évidentes, dates majeures, auteurs, découvertes). Exemple de difficulté (ne le reprends pas) : « Quelle est la capitale de l'Australie ? »";
 }
 
 const quizHistoryCache = new Map();
@@ -7512,423 +7546,284 @@ function shuffleInPlace(list) {
   return list;
 }
 
-async function generateTextQuizQuestions(category, total, level = 'moyen', onProgress = null, opts = {}) {
-  const questions = [];
-  const usedTopics = [];
-  const usedAnswers = new Set();
-  const history = await loadQuizHistory(category);
-  pruneQuizHistory(category).catch(() => {});
+// ------------------------------------------------------------
+// BANQUE DE QUESTIONS (Multivers et CG) : relues une par une, aucune attente
+// Format Multivers : [univers, question, réponse, [variantes acceptées]]
+// Format CG        : [question, réponse, [variantes acceptées]]
+// Pour en ajouter : copie une ligne, change le texte, garde la virgule à la fin.
+// ------------------------------------------------------------
 
-  const startedAt = Date.now();
-  const budgetMs = opts.budgetMs || 120 * 1000; // temps maximum de recherche en direct
-  const excludeKeys = new Set((opts.exclude || []).map(q => normalizeLoose(q)));
-  const maxAttempts = Math.max(20, Math.ceil(total * 1.3));
-  let attempts = 0;
-  let failures = 0;
-  let progressSent = false;
+const QUIZ_BANK_MULTIVERS = {
+  facile: [
+    ['Naruto', "Quel est le nom du village caché dont Naruto est originaire ?", "Konoha", ["Konohagakure", "Village de la Feuille", "La Feuille"]],
+    ['One Piece', "Comment s'appelle le capitaine de l'équipage du Chapeau de paille ?", "Monkey D. Luffy", ["Luffy", "Monkey D Luffy"]],
+    ['Dragon Ball', "Comment s'appelle le héros saiyan élevé sur Terre, aux cheveux noirs en pics ?", "Son Goku", ["Goku", "Sangoku", "San Goku", "Kakarot"]],
+    ['Bleach', "Comment s'appelle le lycéen aux cheveux orange qui devient Shinigami remplaçant ?", "Ichigo Kurosaki", ["Ichigo", "Kurosaki Ichigo"]],
+    ["L'Attaque des Titans", "Comment s'appelle le héros qui jure d'exterminer tous les Titans après la chute de sa ville ?", "Eren Jäger", ["Eren", "Eren Yeager", "Eren Jaeger", "Eren Jager", "Eren Yaeger"]],
+    ['Death Note', "Comment s'appelle le lycéen brillant qui trouve le Death Note ?", "Light Yagami", ["Light", "Raito", "Yagami Light", "Raito Yagami"]],
+    ['Fullmetal Alchemist', "Comment s'appelle le frère aîné Elric, surnommé l'Alchimiste d'acier ?", "Edward Elric", ["Edward", "Ed", "Ed Elric"]],
+    ['My Hero Academia', "Comment s'appelle le héros numéro 1 qui transmet son Alter à Izuku ?", "All Might", ["Allmight", "Toshinori Yagi", "Toshinori"]],
+    ['Demon Slayer', "Comment s'appelle le jeune héros dont la famille est massacrée par un démon ?", "Tanjiro Kamado", ["Tanjiro", "Kamado Tanjiro"]],
+    ['Jujutsu Kaisen', "Comment s'appelle le lycéen qui avale un doigt de Sukuna ?", "Yuji Itadori", ["Yuji", "Itadori", "Itadori Yuji"]],
+    ['Hunter x Hunter', "Comment s'appelle le jeune héros qui part à la recherche de son père, Ging ?", "Gon Freecss", ["Gon", "Gon Freecs", "Gon Freeces"]],
+    ['Fairy Tail', "Comment s'appelle le mage aux cheveux roses qui crache du feu ?", "Natsu Dragneel", ["Natsu", "Natsu Dragnir", "Dragneel Natsu"]],
+    ['Sword Art Online', "Comment s'appelle le héros surnommé le Spadassin noir ?", "Kirito", ["Kazuto Kirigaya", "Kirigaya Kazuto", "Kazuto", "Kirigaya"]],
+    ['Tokyo Ghoul', "Comment s'appelle l'étudiant qui devient mi-humain mi-goule ?", "Ken Kaneki", ["Kaneki", "Kaneki Ken"]],
+    ['One Punch Man', "Comment s'appelle le héros chauve capable de vaincre n'importe qui en un seul coup de poing ?", "Saitama", []],
+    ['Pokémon', "Quel Pokémon électrique de couleur jaune accompagne Sacha ?", "Pikachu", []],
+    ['Chainsaw Man', "Comment s'appelle le chien-démon tronçonneuse qui fusionne avec Denji ?", "Pochita", []],
+    ['Spy x Family', "Quel est le nom de code de l'espion qui se fait passer pour un père de famille ?", "Twilight", ["Crépuscule", "Loid Forger", "Loid"]],
+    ['Haikyu!!', "Quel sport est pratiqué dans cet animé ?", "Volley-ball", ["Volley", "Volleyball", "Volley ball"]],
+    ['Black Clover', "Comment s'appelle le héros né sans aucune magie ?", "Asta", []],
+    ['Cowboy Bebop', "Comment s'appelle le chasseur de primes principal, ancien membre du Syndicat du Dragon rouge ?", "Spike Spiegel", ["Spike"]],
+    ['Neon Genesis Evangelion', "Comment s'appelle le jeune pilote de l'EVA-01 ?", "Shinji Ikari", ["Shinji", "Ikari Shinji"]],
+    ['Code Geass', "Comment s'appelle le prince exilé qui obtient le pouvoir du Geass ?", "Lelouch", ["Lelouch Lamperouge", "Lelouch vi Britannia", "Lamperouge"]],
+    ['Steins;Gate', "Comment s'appelle le « savant fou » autoproclamé du laboratoire ?", "Rintaro Okabe", ["Okabe", "Rintarou Okabe", "Okabe Rintaro", "Kyouma Hououin", "Hououin Kyouma", "Okarin"]],
+    ['Dr. Stone', "Comment s'appelle le génie scientifique qui veut reconstruire la civilisation ?", "Senku Ishigami", ["Senku", "Ishigami Senku"]],
+    ['Mob Psycho 100', "Comment s'appelle le jeune esper aux pouvoirs immenses ?", "Shigeo Kageyama", ["Mob", "Kageyama Shigeo", "Shigeo"]],
+    ['Re:Zero', "Comment s'appelle le héros qui revient dans le temps à chaque mort ?", "Subaru Natsuki", ["Subaru", "Natsuki Subaru"]],
+    ["JoJo's Bizarre Adventure", "Comment s'appelle la manifestation d'énergie spirituelle qui combat aux côtés du personnage ?", "Stand", ["Un Stand", "Les Stands", "Stands"]],
+    ['Berserk', "Comment s'appelle le héros, un guerrier à la grande épée et au bras mécanique ?", "Guts", ["Gatsu"]],
+    ['Vinland Saga', "Quel peuple de guerriers du Nord est au cœur de l'histoire ?", "Vikings", ["Les Vikings", "Viking"]],
+    ['Blue Lock', "Quel sport est au cœur de l'histoire ?", "Football", ["Foot", "Le football", "Soccer"]],
+    ['Détective Conan', "Quel est le vrai nom du détective lycéen devenu enfant ?", "Shinichi Kudo", ["Shinichi", "Kudo Shinichi", "Jimmy Kudo", "Jimmy"]],
+    ['Yu-Gi-Oh!', "Comment s'appelle le héros qui résout le Puzzle du Millenium ?", "Yugi Muto", ["Yugi", "Yugi Mutou", "Muto Yugi"]],
+    ['Sailor Moon', "Comment s'appelle le chat noir parlant qui guide Usagi ?", "Luna", []]
+  ],
+  moyen: [
+    ['Naruto', "Quel clan possède le Sharingan ?", "Uchiwa", ["Uchiha", "Les Uchiwa", "Clan Uchiwa", "Clan Uchiha"]],
+    ['One Piece', "Quel fruit du démon Luffy a-t-il mangé ?", "Gomu Gomu no Mi", ["Gum Gum", "Gomu Gomu", "Fruit du caoutchouc", "Fruit Gum-Gum", "Gum-Gum", "Fruit du Gum-Gum"]],
+    ['Dragon Ball', "Comment s'appelle la planète natale des Saiyans, détruite par Freezer ?", "Végéta", ["Vegeta", "Planète Végéta", "Planète Vegeta"]],
+    ['Bleach', "Comment s'appelle le zanpakutō d'Ichigo au début de l'histoire ?", "Zangetsu", []],
+    ["L'Attaque des Titans", "Comment s'appelle le mur le plus extérieur, celui qui protège l'humanité en premier ?", "Maria", ["Mur Maria", "Wall Maria"]],
+    ['Death Note', "Comment s'appelle le Shinigami qui laisse tomber son Death Note dans le monde humain ?", "Ryuk", ["Ryuku", "Ryuuku", "Ryûku"]],
+    ['Fullmetal Alchemist', "Quel objet légendaire les frères Elric recherchent-ils pour retrouver leur corps ?", "Pierre philosophale", ["La pierre philosophale", "Philosopher's Stone"]],
+    ['My Hero Academia', "Quel est l'Alter de Katsuki Bakugo ?", "Explosion", ["L'explosion"]],
+    ['Demon Slayer', "Comment s'appelle la petite sœur de Tanjiro, transformée en démon ?", "Nezuko", ["Nezuko Kamado"]],
+    ['Jujutsu Kaisen', "Comment s'appelle le professeur au bandeau, considéré comme le plus puissant sorcier ?", "Satoru Gojo", ["Gojo", "Satoru", "Gojo Satoru"]],
+    ['Hunter x Hunter', "Comment s'appelle le meilleur ami de Gon, issu d'une famille d'assassins ?", "Killua Zoldyck", ["Killua", "Kirua", "Kirua Zoldik", "Killua Zoldick", "Killua Zaoldyeck"]],
+    ['Fairy Tail', "Comment s'appelle le chat bleu ailé, compagnon de Natsu ?", "Happy", []],
+    ['Sword Art Online', "Comment s'appelle la partenaire de Kirito, surnommée l'Éclair ?", "Asuna", ["Asuna Yuuki", "Asuna Yuki", "Yuuki Asuna"]],
+    ['Tokyo Ghoul', "Comment s'appelle le café où travaille Kaneki ?", "Anteiku", ["Café Anteiku", "Antei Ku"]],
+    ['One Punch Man', "Comment s'appelle le cyborg disciple de Saitama ?", "Genos", ["Genosu"]],
+    ['Pokémon', "Comment s'appelle la ville natale de Sacha ?", "Bourg Palette", ["Bourg-Palette", "Pallet Town", "Pallet"]],
+    ['Chainsaw Man', "Comment s'appelle le démon du sang qui devient la partenaire de Denji ?", "Power", ["Pawa"]],
+    ['Spy x Family', "Quel est le véritable métier secret de Yor Forger ?", "Assassin", ["Assassine", "Tueuse à gages", "Tueuse"]],
+    ['Haikyu!!', "Comment s'appelle le lycée de Hinata et Kageyama ?", "Karasuno", ["Lycée Karasuno"]],
+    ['Black Clover', "Comment s'appelle l'ordre de chevaliers magiques dont Asta fait partie ?", "Les Taureaux noirs", ["Taureaux noirs", "Black Bull", "Black Bulls", "Taureau noir", "Les Black Bulls"]],
+    ['Cowboy Bebop', "Comment s'appelle la chasseuse de primes séductrice, couverte de dettes ?", "Faye Valentine", ["Faye"]],
+    ['Neon Genesis Evangelion', "Comment s'appelle l'organisation dirigée par Gendo Ikari ?", "NERV", ["Nerv"]],
+    ['Code Geass', "Comment s'appelle l'empire que Lelouch veut détruire ?", "Britannia", ["Empire de Britannia", "Sainte Britannia", "L'empire de Britannia", "Empire Britannien"]],
+    ['Steins;Gate', "Dans quel quartier de Tokyo se déroule l'histoire ?", "Akihabara", ["Akiba"]],
+    ['Dr. Stone', "Comment s'appelle le meilleur ami costaud de Senku ?", "Taiju Oki", ["Taiju", "Taiju Ooki", "Oki Taiju"]],
+    ['Mob Psycho 100', "Comment s'appelle le « maître » charlatan de Mob ?", "Reigen Arataka", ["Reigen", "Arataka Reigen", "Arataka"]],
+    ['Re:Zero', "Comment s'appelle la demi-elfe aux cheveux argentés que Subaru veut protéger ?", "Emilia", ["Émilia"]],
+    ["JoJo's Bizarre Adventure", "Comment s'appelle le Stand de Jotaro Kujo ?", "Star Platinum", ["Star Platinium"]],
+    ['Berserk', "Comment s'appelle le chef de la Troupe du Faucon ?", "Griffith", ["Griffis"]],
+    ['Vinland Saga', "Comment s'appelle le jeune héros guerrier, en quête de vengeance ?", "Thorfinn", ["Thorfin"]],
+    ['Blue Lock', "Comment s'appelle le héros attaquant qui débute dans le programme ?", "Yoichi Isagi", ["Isagi", "Isagi Yoichi", "Yoichi"]],
+    ['Détective Conan', "Comment s'appelle l'organisation criminelle qui a empoisonné Shinichi ?", "Organisation des hommes en noir", ["L'Organisation des hommes en noir", "Les hommes en noir", "Hommes en noir", "Organisation noire"]],
+    ['Yu-Gi-Oh!', "Comment s'appelle le monstre signature de Seto Kaiba ?", "Dragon blanc aux yeux bleus", ["Blue-Eyes White Dragon", "Dragon Blanc aux Yeux Bleus"]],
+    ['Sailor Moon', "Quelle guerrière représente l'eau et porte les cheveux bleus ?", "Sailor Mercury", ["Sailor Mercure", "Mercure", "Mercury", "Ami Mizuno"]]
+  ],
+  eleve: [
+    ['Naruto', "Quelle technique de scellement Minato utilise-t-il, au prix de sa vie, contre Kurama ?", "Shiki Fujin", ["Shiki Fuin", "Sceau du dieu de la mort", "Sceau du Faucheur", "Sceau de la mort", "Dead Demon Consuming Seal", "Reaper Death Seal"]],
+    ['One Piece', "Comment s'appelle l'épée noire de Dracule Mihawk ?", "Yoru", ["Kokuto Yoru", "Yoru Kokuto"]],
+    ['Dragon Ball', "Comment s'appelle le dieu de la destruction de l'Univers 7 ?", "Beerus", ["Bills", "Biruzu"]],
+    ['Bleach', "Qui est le capitaine de la 10e division du Gotei 13 ?", "Toshiro Hitsugaya", ["Hitsugaya", "Toshiro", "Tôshirô Hitsugaya", "Hitsugaya Toshiro"]],
+    ["L'Attaque des Titans", "Quel Titan Reiner Braun possède-t-il ?", "Titan Cuirassé", ["Cuirassé", "Titan Armure", "Armored Titan", "Le Cuirassé"]],
+    ['Death Note', "Comment s'appelle l'orphelinat où ont grandi Near et Mello ?", "Wammy's House", ["Wammy House", "Wammys House", "Maison de Wammy", "Wammy's"]],
+    ['Fullmetal Alchemist', "Quel homonculus représente l'envie ?", "Envy", ["Envie"]],
+    ['My Hero Academia', "Comment s'appelle l'Alter qui permet de voler les Alters des autres ?", "All For One", ["All for One", "Tout pour un"]],
+    ['Demon Slayer', "Comment s'appelle le Pilier de la Flamme ?", "Kyojuro Rengoku", ["Rengoku", "Kyojuro", "Rengoku Kyojuro", "Kyôjurô Rengoku"]],
+    ['Jujutsu Kaisen', "Comment s'appelle l'extension de domaine de Satoru Gojo ?", "Vide infini", ["Vide incommensurable", "Infinite Void", "Mukaryo Kusho", "Le vide infini"]],
+    ['Hunter x Hunter', "Quel est le type de Nen de Gon ?", "Renforcement", ["Le Renforcement", "Enhancer"]],
+    ['Fairy Tail', "Comment s'appelle le premier maître de la guilde ?", "Mavis Vermillion", ["Mavis", "Mavis Vermilion"]],
+    ['Sword Art Online', "Combien d'étages compte le château flottant d'Aincrad ?", "100", ["Cent"]],
+    ['Tokyo Ghoul', "Quelle organisation gouvernementale traque les goules ?", "CCG", ["Commission de Contre-Goules", "Commission Contre Goules", "Commission de contre goules"]],
+    ['One Punch Man', "Comment s'appelle l'organisation qui classe les héros par rang ?", "Association des héros", ["L'Association des héros", "Hero Association", "Association des Héros"]],
+    ['Pokémon', "Combien de Pokémon compte la première génération ?", "151", ["Cent cinquante et un"]],
+    ['Chainsaw Man', "Quel démon est Makima ?", "Démon du Contrôle", ["Diable du Contrôle", "Contrôle", "Control Devil", "Le Démon du Contrôle", "Démon du contrôle"]],
+    ['Spy x Family', "Comment s'appelle le chien d'Anya ?", "Bond", ["Bond Forger"]],
+    ['Haikyu!!', "Comment s'appelle le capitaine de Karasuno au début de l'histoire ?", "Daichi Sawamura", ["Daichi", "Sawamura", "Sawamura Daichi"]],
+    ['Black Clover', "Quel est le nom du démon qui vit dans le grimoire d'Asta ?", "Liebe", []],
+    ['Cowboy Bebop', "Comment s'appelle le chien intelligent de l'équipage ?", "Ein", []],
+    ['Neon Genesis Evangelion', "Comment s'appelle la pilote de l'EVA-02 ?", "Asuka Langley Soryu", ["Asuka", "Asuka Langley", "Soryu Asuka Langley", "Asuka Langley Sohryu", "Shikinami Asuka Langley"]],
+    ['Code Geass', "Comment s'appelle le Knightmare Frame de Suzaku ?", "Lancelot", ["Le Lancelot"]],
+    ['Steins;Gate', "Quelle organisation scientifique est l'ennemie d'Okabe et surveille le monde ?", "SERN", ["Sern"]],
+    ['Dr. Stone', "Comment s'appelle le chef de l'Empire de la Force, rival de Senku ?", "Tsukasa Shishio", ["Tsukasa", "Shishio Tsukasa", "Shishio"]],
+    ['Mob Psycho 100', "Comment s'appelle l'organisation d'espers qui veut conquérir le monde ?", "Claw", ["Griffe", "Les Griffes", "Griffes", "Claw Organization"]],
+    ['Re:Zero', "Comment s'appelle le pouvoir de Subaru qui le ramène dans le passé après sa mort ?", "Retour par la mort", ["Return by Death", "Retour de la mort", "Retour à la mort"]],
+    ["JoJo's Bizarre Adventure", "Comment s'appelle le Stand de Dio Brando ?", "The World", ["Za Warudo", "Le Monde"]],
+    ['Berserk', "Comment s'appelle l'événement où Griffith sacrifie la Troupe du Faucon ?", "L'Éclipse", ["Éclipse", "Eclipse", "The Eclipse"]],
+    ['Vinland Saga', "Comment s'appelle le père de Thorfinn ?", "Thors", ["Thors Snorresson"]],
+    ['Blue Lock', "Comment s'appelle l'entraîneur à l'origine du projet ?", "Jinpachi Ego", ["Ego", "Ego Jinpachi"]],
+    ['Détective Conan', "Quel est le vrai nom d'Ai Haibara ?", "Shiho Miyano", ["Shiho", "Miyano Shiho", "Sherry"]],
+    ['Yu-Gi-Oh!', "Comment s'appelle le pharaon dont l'esprit habite le Puzzle du Millenium ?", "Atem", ["Yami Yugi", "Atem Yami Yugi", "Pharaon Atem", "Yami"]],
+    ['Sailor Moon', "Quel est le vrai nom de Tuxedo Mask ?", "Mamoru Chiba", ["Mamoru", "Chiba Mamoru", "Endymion", "Darien Shields"]]
+  ]
+};
 
-  while (questions.length < total && attempts < maxAttempts && Date.now() - startedAt < budgetMs) {
-    attempts++;
-    const remaining = total - questions.length;
-    const need = Math.min(8, remaining + 3); // on en demande plus : la relecture en écarte une partie
-    const recent = [...questions.map(q => q.question), ...(opts.exclude || []).slice(-15), ...history.recent].slice(0, 40).join(' | ') || 'aucune';
+const QUIZ_BANK_CG = {
+  facile: [
+    ["Quelle est la capitale de l'Italie ?", "Rome", []],
+    ["Quelle planète est la plus proche du Soleil ?", "Mercure", []],
+    ["Combien de jours compte une année non bissextile ?", "365", []],
+    ["Quel est le plus grand océan du monde ?", "Océan Pacifique", ["Pacifique", "Le Pacifique"]],
+    ["Quel animal est surnommé le « roi des animaux » ?", "Le lion", ["Lion"]],
+    ["Dans quel pays se trouve la tour Eiffel ?", "France", ["La France"]],
+    ["Quel gaz les humains respirent-ils pour vivre ?", "Oxygène", ["L'oxygène", "O2"]],
+    ["Combien de côtés a un hexagone ?", "6", ["Six"]],
+    ["Quelle est la langue la plus parlée au Brésil ?", "Portugais", ["Le portugais"]],
+    ["Quelle est la formule chimique de l'eau ?", "H2O", []],
+    ["Quel est le plus grand mammifère du monde ?", "Baleine bleue", ["La baleine bleue"]],
+    ["Quel pays a pour capitale Tokyo ?", "Japon", ["Le Japon"]],
+    ["Quelle est la capitale de l'Espagne ?", "Madrid", []],
+    ["Combien y a-t-il de jours dans une semaine ?", "7", ["Sept"]],
+    ["Quelle couleur obtient-on en mélangeant du bleu et du jaune ?", "Vert", ["Le vert", "Du vert"]],
+    ["Comment s'appelle notre galaxie ?", "La Voie lactée", ["Voie lactée", "Voie lactee", "Milky Way"]],
+    ["Combien de pattes a une araignée ?", "8", ["Huit"]],
+    ["Quel fruit jaune et courbé est adoré des singes ?", "Banane", ["La banane"]],
+    ["Quelle est la capitale de l'Allemagne ?", "Berlin", []],
+    ["Quel est le plus grand continent du monde ?", "Asie", ["L'Asie"]],
+    ["Combien y a-t-il de mois dans une année ?", "12", ["Douze"]],
+    ["Quel instrument de musique a 88 touches ?", "Piano", ["Le piano"]],
+    ["Quelle est la capitale des États-Unis ?", "Washington", ["Washington D.C.", "Washington DC"]],
+    ["Comment s'appelle le satellite naturel de la Terre ?", "La Lune", ["Lune"]],
+    ["Quel est l'animal terrestre le plus rapide ?", "Guépard", ["Le guépard", "Guepard"]],
+    ["Combien de joueurs composent une équipe de football sur le terrain ?", "11", ["Onze"]],
+    ["Comment s'appelle le liquide rouge qui circule dans notre corps ?", "Le sang", ["Sang"]],
+    ["Dans quel pays se trouvent les pyramides de Gizeh ?", "Égypte", ["Egypte", "L'Égypte"]],
+    ["Quelle est la capitale du Royaume-Uni ?", "Londres", []],
+    ["Quel est le plus grand désert chaud du monde ?", "Sahara", ["Le Sahara"]],
+    ["Quelle planète est surnommée la planète rouge ?", "Mars", []],
+    ["Quelle saison suit l'été ?", "Automne", ["L'automne"]],
+    ["Quel animal de la savane a un très long cou ?", "Girafe", ["La girafe"]],
+    ["Quel pays a la forme d'une botte ?", "Italie", ["L'Italie"]]
+  ],
+  moyen: [
+    ["Quelle est la capitale de l'Australie ?", "Canberra", []],
+    ["En quelle année le mur de Berlin est-il tombé ?", "1989", []],
+    ["Quel est le symbole chimique de l'or ?", "Au", []],
+    ["Qui a peint La Joconde ?", "Léonard de Vinci", ["Vinci", "De Vinci", "Leonardo da Vinci", "Da Vinci"]],
+    ["Quel est le plus petit pays du monde par sa superficie ?", "Vatican", ["Le Vatican", "Cité du Vatican", "État de la Cité du Vatican"]],
+    ["Quelle est la capitale du Canada ?", "Ottawa", []],
+    ["Quel fleuve traverse Paris ?", "La Seine", ["Seine"]],
+    ["Quel scientifique a découvert la pénicilline en 1928 ?", "Alexander Fleming", ["Fleming"]],
+    ["Combien d'os compte le squelette d'un adulte ?", "206", []],
+    ["Quel est le plus long fleuve d'Afrique ?", "Le Nil", ["Nil"]],
+    ["Quelle est la plus haute montagne d'Afrique ?", "Kilimandjaro", ["Kilimanjaro", "Mont Kilimandjaro"]],
+    ["En quelle année a débuté la Première Guerre mondiale ?", "1914", []],
+    ["Quelle est la capitale du Brésil ?", "Brasilia", ["Brasília"]],
+    ["Qui a écrit « Les Misérables » ?", "Victor Hugo", ["Hugo"]],
+    ["Quel est le plus grand pays du monde par sa superficie ?", "Russie", ["La Russie"]],
+    ["Dans quelle ville se trouve la statue de la Liberté ?", "New York", ["New York City", "NYC"]],
+    ["Qui a atteint l'Amérique en 1492 pour le compte de l'Espagne ?", "Christophe Colomb", ["Colomb"]],
+    ["Quel élément chimique a pour symbole Fe ?", "Fer", ["Le fer"]],
+    ["Quelle est la capitale de la Turquie ?", "Ankara", []],
+    ["Quel compositeur a écrit la Neuvième Symphonie avec l'Ode à la joie ?", "Ludwig van Beethoven", ["Beethoven"]],
+    ["Dans quelle ville se trouve le Colisée ?", "Rome", []],
+    ["Quel est le plus grand organe du corps humain ?", "La peau", ["Peau"]],
+    ["Quelle est la monnaie du Japon ?", "Yen", ["Le yen"]],
+    ["Combien de joueurs d'une équipe de basket sont sur le terrain ?", "5", ["Cinq"]],
+    ["Quel océan borde la côte ouest de l'Afrique ?", "Océan Atlantique", ["Atlantique", "L'Atlantique"]],
+    ["Qui a écrit « Roméo et Juliette » ?", "William Shakespeare", ["Shakespeare"]],
+    ["Quel est le plus petit nombre premier ?", "2", ["Deux"]],
+    ["En quelle année l'homme a-t-il marché sur la Lune pour la première fois ?", "1969", []],
+    ["Quelle est la capitale de l'Argentine ?", "Buenos Aires", []],
+    ["Quelle est la plus grande planète du système solaire ?", "Jupiter", []],
+    ["Quel physicien est célèbre pour sa théorie de la relativité ?", "Albert Einstein", ["Einstein"]],
+    ["Quel pays a pour capitale Nairobi ?", "Kenya", ["Le Kenya"]],
+    ["Qui a été le premier président des États-Unis ?", "George Washington", ["Washington"]],
+    ["Quelle est la capitale de la Suisse ?", "Berne", ["Bern"]]
+  ],
+  eleve: [
+    ["Quel traité de 1648 a mis fin à la guerre de Trente Ans ?", "Traité de Westphalie", ["Westphalie", "Paix de Westphalie", "Traités de Westphalie"]],
+    ["Quel mathématicien a démontré le dernier théorème de Fermat ?", "Andrew Wiles", ["Wiles"]],
+    ["Quel est l'élément chimique le plus abondant dans l'univers ?", "Hydrogène", ["L'hydrogène"]],
+    ["Quel empereur romain a fait de Byzance sa nouvelle capitale en 330 ?", "Constantin", ["Constantin Ier", "Constantin le Grand"]],
+    ["Quel homme d'État prussien est le principal artisan de l'unification allemande de 1871 ?", "Otto von Bismarck", ["Bismarck"]],
+    ["Quel est le lac le plus profond du monde ?", "Lac Baïkal", ["Baïkal", "Baikal"]],
+    ["Quelle est la capitale de la Mongolie ?", "Oulan-Bator", ["Ulaanbaatar", "Ulan Bator"]],
+    ["Quel physicien a découvert l'électron en 1897 ?", "Joseph John Thomson", ["J. J. Thomson", "Thomson"]],
+    ["Qui a écrit le recueil « Les Fleurs du mal » ?", "Charles Baudelaire", ["Baudelaire"]],
+    ["Quel détroit sépare l'Asie de l'Amérique du Nord ?", "Détroit de Béring", ["Béring", "Bering", "Détroit de Bering"]],
+    ["Qui a écrit « Le Capital », publié en 1867 ?", "Karl Marx", ["Marx"]],
+    ["Quelle est la formule chimique du sel de table ?", "NaCl", ["Chlorure de sodium"]],
+    ["Quel poète grec est l'auteur de « L'Odyssée » ?", "Homère", ["Homere"]],
+    ["Quel est le plus long fleuve d'Europe ?", "La Volga", ["Volga"]],
+    ["Quelle est la capitale du Pérou ?", "Lima", []],
+    ["Quel est le plus petit os du corps humain ?", "Étrier", ["L'étrier", "Etrier"]],
+    ["Quel peintre a réalisé « Guernica » ?", "Pablo Picasso", ["Picasso"]],
+    ["En quelle année la Révolution française a-t-elle commencé ?", "1789", []],
+    ["Quelle est la plus grande île du monde ?", "Groenland", ["Le Groenland"]],
+    ["Quelle bataille de 1815 a marqué la défaite finale de Napoléon ?", "Waterloo", ["La bataille de Waterloo"]],
+    ["Quel est le symbole chimique du sodium ?", "Na", []],
+    ["Quel écrivain britannique a écrit « 1984 » ?", "George Orwell", ["Orwell"]],
+    ["Quelle est la capitale de la Nouvelle-Zélande ?", "Wellington", []],
+    ["Quel physicien a découvert la radioactivité en 1896 ?", "Henri Becquerel", ["Becquerel"]],
+    ["Quel est le plus grand lac d'eau douce du monde par sa superficie ?", "Lac Supérieur", ["Superior", "Lac Superieur", "Lac Superior"]],
+    ["Quel compositeur a écrit « Les Quatre Saisons » ?", "Antonio Vivaldi", ["Vivaldi"]],
+    ["Quelle est la capitale du Maroc ?", "Rabat", []],
+    ["Quel empire était dirigé par Gengis Khan ?", "Empire mongol", ["Mongol", "L'empire mongol", "Les Mongols"]],
+    ["Comment s'appelle le dieu grec de la mer ?", "Poséidon", ["Poseidon"]],
+    ["Quel métal est liquide à température ambiante ?", "Mercure", ["Le mercure"]],
+    ["Quel peintre a réalisé « La Nuit étoilée » ?", "Vincent van Gogh", ["Van Gogh"]],
+    ["Quelle est la capitale de la Colombie ?", "Bogota", ["Bogotá"]],
+    ["Quel naturaliste a formulé la théorie de l'évolution par sélection naturelle ?", "Charles Darwin", ["Darwin"]],
+    ["Quel philosophe grec a été le précepteur d'Alexandre le Grand ?", "Aristote", []]
+  ]
+};
 
-    const prompt =
-      category === 'multivers'
-        ? `Tu animes un quiz entre fans d'animés et de mangas sur WhatsApp. Génère exactement ${need} questions en français.
+function buildBankQuestion(category, row) {
+  const multivers = category === 'multivers';
+  const univers = multivers ? row[0] : '';
+  const question = multivers ? row[1] : row[0];
+  const answer = multivers ? row[2] : row[1];
+  const alts = (multivers ? row[3] : row[2]) || [];
 
-Ton et formulation :
-- écris comme un fan qui lance une question à ses potes : naturel, décontracté, phrases simples et fluides (pas de style scolaire, pas de ton robotique) ;
-- utilise la terminologie française courante de la VF/VOSTFR (ex. « souffle » et non « respiration » pour Demon Slayer) ;
-- la question doit être complète, claire et compréhensible seule, sans sous-entendu ni référence floue ; cite les noms et la situation utiles.
-
-Niveau : ${quizLevelInstruction('multivers', level)} ;
-- environ la moitié de questions de COMPRÉHENSION DE L'HISTOIRE (pourquoi, comment, dans quel but, quelle conséquence), l'autre moitié de questions factuelles précises.
-
-Fiabilité (très important) :
-- UNE seule question par univers dans ce lot : chaque question porte sur un anime/manga DIFFÉRENT ;
-- uniquement des faits de l'œuvre originale (canon) : jamais de théorie de fans, de classement de puissance, de numéro d'épisode/chapitre ni de date de sortie ;
-- ne pose que des questions dont tu es absolument certain de la réponse ; au moindre doute, change de sujet ;
-- UNE seule réponse attendue : jamais de question à double volet ;
-- la réponse ne doit pas apparaître dans la question.
-
-Champ "type" :
-- "nom" : la réponse est un nom propre (personnage, technique, lieu...) ;
-- "court" : réponse de 1 à 4 mots qui n'est pas un nom propre ;
-- "explication" : réponse d'une phrase courte (15 mots maximum) ; mets dans "keypoints" les 1 à 3 idées essentielles à retrouver.
-Champ "alts" : toutes les façons acceptables de répondre (VO, VF, VOSTFR, anglais, romaji, prénom seul ou nom de famille unique).
-Univers déjà utilisés dans ce quiz : ${usedTopics.slice(-20).join(', ') || 'aucun'}.
-Questions déjà posées (interdites) : ${recent}.
-Réponds en JSON : {"questions":[{"univers":"nom de l'anime/manga","type":"nom|court|explication","question":"...","answer":"...","alts":["..."],"keypoints":["..."]}]}`
-        : `Tu animes un quiz de culture générale entre potes sur WhatsApp. Génère exactement ${need} questions en français.
-Règles :
-- écris naturellement, comme un humain qui pose la question à l'oral (simple, fluide, décontracté) ;
-- sujets variés (géographie, histoire, sciences, arts, littérature, sport, nature, technologie) : pas deux questions sur le même sujet dans le lot ;
-- ${quizLevelInstruction('cg', level)} ; question complète, claire et compréhensible seule ;
-- réponse courte (1 à 4 mots), précise et incontestable ;
-- INTERDIT : records ou « le plus… » contestables, chiffres qui changent (population, classements), actualité, « qui est l'actuel… », questions à plusieurs réponses possibles, questions piégeuses ;
-- ne pose que des questions dont tu es absolument certain de la réponse, n'invente rien ;
-- la réponse ne doit pas apparaître dans la question.
-Champ "type" : "nom" (nom propre) ou "court" (autre réponse courte).
-Champ "person" : true si la réponse est le nom d'une personne.
-Champ "usual" : nom d'usage universel si différent du nom de famille (ex : "Napoléon"), sinon "".
-Champ "alts" : variantes, traductions ou nom de famille seul si personne (jamais le prénom seul).
-Questions déjà posées (interdites) : ${recent}.
-Réponds en JSON : {"questions":[{"type":"nom|court","person":false,"usual":"","question":"...","answer":"...","alts":["..."]}]}`;
-
-    try {
-      const data = await groqJson(prompt, 3500, 0.65);
-      const list = Array.isArray(data.questions) ? data.questions : [];
-      const batch = [];
-
-      for (const item of list) {
-        const question = String(item?.question || '').trim();
-        const answer = String(item?.answer || '').trim();
-        if (!question || !answer || answer.length > 140) continue;
-        if (answer.length > 3 && normalizeLoose(question).includes(normalizeLoose(answer))) continue;
-
-        const key = normalizeLoose(question);
-        if (excludeKeys.has(key)) continue;
-        if (questions.some(q => normalizeLoose(q.question) === key)) continue;
-        if (batch.some(q => normalizeLoose(q.question) === key)) continue;
-
-        const qKey = `q:${key}`;
-        const answerKey = normalizeLoose(answer);
-
-        // Une même réponse ne revient pas deux fois dans le même quiz
-        if (usedAnswers.has(answerKey) || batch.some(q => normalizeLoose(q.answer) === answerKey)) continue;
-
-        // Historique : on évite les questions déjà posées. Pour le multivers on évite aussi
-        // la même réponse dans le même univers ; en culture générale la même réponse
-        // (ex. « Paris ») peut revenir avec une autre question.
-        const aKey = `a:${normalizeLoose(item?.univers || '')}|${answerKey}`;
-        if (history.keys.has(qKey)) continue;
-        if (category === 'multivers' && history.keys.has(aKey)) continue;
-
-        let univers = '';
-        if (category === 'multivers') {
-          univers = String(item?.univers || '').trim();
-          const topic = normalizeLoose(univers);
-          if (topic && usedTopics.includes(topic) && attempts <= 8) continue;
-          if (topic && !usedTopics.includes(topic)) usedTopics.push(topic);
-        }
-
-        const answerType = ['nom', 'court', 'explication'].includes(item?.type) ? item.type : 'court';
-        let alts = Array.isArray(item?.alts) ? item.alts.map(String).slice(0, 12) : [];
-        const person = category === 'cg' && item?.person === true;
-
-        if (person) {
-          const tokens = significantTokens(answer);
-          if (tokens.length >= 2) {
-            alts = alts.filter(a => normalizeLoose(a) !== tokens[0]);
-            const last = tokens[tokens.length - 1];
-            if (!alts.some(a => significantTokens(a).includes(last))) alts.push(last);
-          }
-          const usual = String(item?.usual || '').trim();
-          if (usual && usual.length <= 30) alts.push(usual);
-        }
-
-        batch.push({
-          type: 'text',
-          answerType,
-          person,
-          univers,
-          question,
-          answer,
-          alts,
-          keypoints: Array.isArray(item?.keypoints) ? item.keypoints.map(String).slice(0, 4) : [],
-          histKeys: [
-            { key: qKey, label: question },
-            { key: aKey, label: '' }
-          ]
-        });
-      }
-
-      // Relecture : seules les questions validées (exactes + bon niveau) sont gardées
-      const verified = await verifyQuizQuestions(batch, level, category);
-      for (const q of verified) {
-        if (questions.length >= total) break;
-        questions.push(q);
-        usedAnswers.add(normalizeLoose(q.answer));
-      }
-
-      failures = 0;
-
-      if (!progressSent && onProgress && questions.length >= Math.ceil(total / 2) && questions.length < total) {
-        progressSent = true;
-        try {
-          onProgress(questions.length, total);
-        } catch {}
-      }
-    } catch (error) {
-      failures++;
-      lastQuizGenerationError = `Groq : ${String(error?.response?.data?.error?.message || error?.message || error).slice(0, 150)}`;
-      logger.warn({ error: error?.message }, 'Sitri~Quiz : génération de questions échouée.');
-      await sleep(Math.min(10000, 2000 * failures)); // on laisse respirer l'API (limite de débit)
-    }
-  }
-
-  // Filet de sécurité (culture générale) : questions vérifiées à la main
-  if (category === 'cg' && !opts.noBank && questions.length < total) {
-    questions.push(...pickCgBankQuestions(level, total - questions.length, questions, history));
-  }
-
-  return questions.slice(0, total);
-}
-
-// Banque locale de culture générale (vérifiée à la main) : sert de filet de sécurité si l'IA n'en fournit pas assez
-const QUIZ_CG_BANK = [
-  // FACILE
-  { level: 'facile', question: "Quelle est la capitale de l'Italie ?", answer: 'Rome', alts: [] },
-  { level: 'facile', question: 'Quelle planète est la plus proche du Soleil ?', answer: 'Mercure', alts: [] },
-  { level: 'facile', question: "Combien de jours compte une année non bissextile ?", answer: '365', alts: ['trois cent soixante-cinq'] },
-  { level: 'facile', question: 'Quel est le plus grand océan du monde ?', answer: 'Océan Pacifique', alts: ['Pacifique', 'Le Pacifique'] },
-  { level: 'facile', question: 'Quel animal est surnommé le « roi des animaux » ?', answer: 'Le lion', alts: ['Lion'] },
-  { level: 'facile', question: 'Dans quel pays se trouve la tour Eiffel ?', answer: 'France', alts: ['La France'] },
-  { level: 'facile', question: 'Quel gaz les humains respirent-ils pour vivre ?', answer: 'Oxygène', alts: ["L'oxygène", 'O2'] },
-  { level: 'facile', question: 'Combien de côtés a un hexagone ?', answer: '6', alts: ['six'] },
-  { level: 'facile', question: 'Quelle est la langue la plus parlée au Brésil ?', answer: 'Portugais', alts: ['Le portugais'] },
-  { level: 'facile', question: "Quelle est la formule chimique de l'eau ?", answer: 'H2O', alts: ['H2O'] },
-  { level: 'facile', question: 'Quel est le plus grand mammifère du monde ?', answer: 'Baleine bleue', alts: ['La baleine bleue'] },
-  { level: 'facile', question: 'Quel pays a pour capitale Tokyo ?', answer: 'Japon', alts: ['Le Japon'] },
-  // MOYEN
-  { level: 'moyen', question: "Quelle est la capitale de l'Australie ?", answer: 'Canberra', alts: [] },
-  { level: 'moyen', question: 'En quelle année le mur de Berlin est-il tombé ?', answer: '1989', alts: [] },
-  { level: 'moyen', question: "Quel est le symbole chimique de l'or ?", answer: 'Au', alts: [] },
-  { level: 'moyen', question: 'Qui a peint La Joconde ?', answer: 'Léonard de Vinci', alts: ['Vinci', 'De Vinci', 'Leonardo da Vinci'], person: true },
-  { level: 'moyen', question: 'Quel est le plus petit pays du monde par sa superficie ?', answer: 'Vatican', alts: ['Le Vatican', 'Cité du Vatican', 'Etat de la Cité du Vatican'] },
-  { level: 'moyen', question: 'Quelle est la capitale du Canada ?', answer: 'Ottawa', alts: [] },
-  { level: 'moyen', question: 'Quel fleuve traverse Paris ?', answer: 'La Seine', alts: ['Seine'] },
-  { level: 'moyen', question: 'Quel scientifique a découvert la pénicilline en 1928 ?', answer: 'Alexander Fleming', alts: ['Fleming'], person: true },
-  { level: 'moyen', question: "Combien d'os compte le squelette d'un adulte ?", answer: '206', alts: [] },
-  { level: 'moyen', question: "Quel est le plus long fleuve d'Afrique ?", answer: 'Le Nil', alts: ['Nil'] },
-  { level: 'moyen', question: "Quelle est la plus haute montagne d'Afrique ?", answer: 'Kilimandjaro', alts: ['Kilimanjaro', 'Mont Kilimandjaro'] },
-  { level: 'moyen', question: 'En quelle année a débuté la Première Guerre mondiale ?', answer: '1914', alts: [] },
-  // ÉLEVÉ
-  { level: 'eleve', question: 'Quel traité de 1648 a mis fin à la guerre de Trente Ans ?', answer: 'Traité de Westphalie', alts: ['Westphalie', 'Paix de Westphalie', 'Traités de Westphalie'] },
-  { level: 'eleve', question: 'Quel mathématicien a démontré le dernier théorème de Fermat ?', answer: 'Andrew Wiles', alts: ['Wiles'], person: true },
-  { level: 'eleve', question: "Quel est l'élément chimique le plus abondant dans l'univers ?", answer: 'Hydrogène', alts: ["L'hydrogène"] },
-  { level: 'eleve', question: "Quel empereur romain a refondé Byzance sous le nom de Constantinople ?", answer: 'Constantin', alts: ['Constantin Ier', 'Constantin le Grand'] },
-  { level: 'eleve', question: "Quel homme d'État prussien est le principal artisan de l'unification allemande de 1871 ?", answer: 'Otto von Bismarck', alts: ['Bismarck'], person: true },
-  { level: 'eleve', question: 'Quel est le lac le plus profond du monde ?', answer: 'Lac Baïkal', alts: ['Baïkal', 'Baikal'] },
-  { level: 'eleve', question: 'Quelle est la capitale de la Mongolie ?', answer: 'Oulan-Bator', alts: ['Ulaanbaatar', 'Ulan Bator'] },
-  { level: 'eleve', question: "Quel physicien a découvert l'électron en 1897 ?", answer: 'Joseph John Thomson', alts: ['J. J. Thomson', 'Thomson'], person: true },
-  { level: 'eleve', question: 'Qui a écrit le recueil « Les Fleurs du mal » ?', answer: 'Charles Baudelaire', alts: ['Baudelaire'], person: true },
-  { level: 'eleve', question: "Quel détroit sépare l'Asie de l'Amérique du Nord ?", answer: 'Détroit de Béring', alts: ['Béring', 'Bering', 'Détroit de Bering'] },
-  { level: 'eleve', question: 'Qui a écrit « Le Capital », publié en 1867 ?', answer: 'Karl Marx', alts: ['Marx'], person: true },
-  { level: 'eleve', question: 'Quelle est la formule chimique du sel de table ?', answer: 'NaCl', alts: ['Chlorure de sodium'] }
-];
-
-function pickCgBankQuestions(level, count, exclude, history) {
-  const askedKeys = new Set(exclude.map(q => normalizeLoose(q.question)));
-  const pool = QUIZ_CG_BANK.filter(
-    item => item.level === level && !askedKeys.has(normalizeLoose(item.question))
-  );
-  const unseen = shuffleInPlace(pool.filter(item => !history.keys.has(`q:${normalizeLoose(item.question)}`)));
-  const seen = shuffleInPlace(pool.filter(item => history.keys.has(`q:${normalizeLoose(item.question)}`)));
-
-  return [...unseen, ...seen].slice(0, count).map(item => ({
+  return {
     type: 'text',
-    answerType: item.person ? 'nom' : 'court',
-    person: Boolean(item.person),
-    univers: '',
-    question: item.question,
-    answer: item.answer,
-    alts: item.alts || [],
+    answerType: 'court',
+    person: false,
+    univers,
+    question,
+    answer,
+    alts,
     keypoints: [],
-    histKeys: [{ key: `q:${normalizeLoose(item.question)}`, label: item.question }]
-  }));
-}
-
-// ─── RÉSERVE DE QUESTIONS DÉJÀ RELUES ───
-// Le bot prépare des questions vérifiées en arrière-plan : au lancement d'un quiz,
-// elles sont prêtes tout de suite. Seules les catégories/niveaux déjà joués sont réapprovisionnés.
-
-const QUIZ_RESERVE_TARGET = 45;
-const QUIZ_RESERVE_BATCH = 8;
-const quizReserveDemand = new Set();
-let quizLiveGenerations = 0;
-let quizReserveBusy = false;
-let quizReserveWorkerStarted = false;
-let quizReserveFailStreak = 0;
-
-async function markQuizReserveDemand(category, level) {
-  const key = `${category}:${level}`;
-  if (quizReserveDemand.has(key)) return;
-  quizReserveDemand.add(key);
-  try {
-    await executeDbWithRetry({
-      sql: `INSERT INTO bot_flags (key, value) VALUES (?, '1')
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      args: [`qres:${key}`]
-    });
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Réserve quiz : demande non enregistrée.');
-  }
-}
-
-async function loadQuizReserveDemand() {
-  try {
-    const res = await executeDbWithRetry({ sql: "SELECT key FROM bot_flags WHERE key LIKE 'qres:%'", args: [] });
-    for (const row of res.rows || []) quizReserveDemand.add(String(row.key).slice(5));
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Réserve quiz : lecture impossible.');
-  }
-}
-
-async function quizReserveRows(category, level) {
-  try {
-    const res = await executeDbWithRetry({
-      sql: 'SELECT id, payload FROM quiz_reserve WHERE category = ? AND level = ? ORDER BY id ASC',
-      args: [category, level]
-    });
-    return res.rows || [];
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Réserve quiz : lecture impossible.');
-    return [];
-  }
-}
-
-async function quizReserveAdd(category, level, questions) {
-  for (const q of questions) {
-    try {
-      await executeDbWithRetry({
-        sql: 'INSERT INTO quiz_reserve (category, level, payload, created_at) VALUES (?, ?, ?, ?)',
-        args: [category, level, JSON.stringify(q), Date.now()]
-      });
-    } catch (error) {
-      logger.warn({ error: error?.message }, 'Réserve quiz : question non enregistrée.');
-    }
-  }
-}
-
-// Retire de la réserve jusqu'à `count` questions jamais posées
-async function quizReserveTake(category, level, count, history) {
-  const out = [];
-  const usedKeys = new Set();
-  const usedAnswers = new Set();
-  const toDelete = [];
-
-  for (const row of await quizReserveRows(category, level)) {
-    if (out.length >= count) break;
-    toDelete.push(row.id);
-
-    let q = null;
-    try {
-      q = JSON.parse(String(row.payload));
-    } catch {
-      continue;
-    }
-    if (!q?.question || !q?.answer) continue;
-
-    const key = `q:${normalizeLoose(q.question)}`;
-    const answerKey = normalizeLoose(q.answer);
-    if (history.keys.has(key) || usedKeys.has(key) || usedAnswers.has(answerKey)) continue;
-
-    usedKeys.add(key);
-    usedAnswers.add(answerKey);
-    out.push(q);
-  }
-
-  for (const id of toDelete) {
-    await executeDbWithRetry({ sql: 'DELETE FROM quiz_reserve WHERE id = ?', args: [id] }).catch(() => {});
-  }
-  return out;
-}
-
-// Retourne 'ok' (des questions ajoutées), 'full' (rien à faire) ou 'fail'
-async function refillQuizReserveOnce() {
-  if (quizReserveBusy || quizLiveGenerations > 0 || !CONFIG.groqKey) return 'full';
-  quizReserveBusy = true;
-
-  try {
-    let best = null;
-    for (const key of quizReserveDemand) {
-      const [category, level] = key.split(':');
-      if (!AUTO_QUIZ_LEVELS[level] || !['multivers', 'cg'].includes(category)) continue;
-      const count = (await quizReserveRows(category, level)).length;
-      if (count < QUIZ_RESERVE_TARGET && (!best || count < best.count)) best = { category, level, count };
-    }
-    if (!best) return 'full';
-
-    const existing = [];
-    for (const row of await quizReserveRows(best.category, best.level)) {
-      try {
-        existing.push(JSON.parse(String(row.payload)).question);
-      } catch {}
-    }
-
-    const questions = await generateTextQuizQuestions(best.category, QUIZ_RESERVE_BATCH, best.level, null, {
-      budgetMs: 70000,
-      noBank: true,
-      exclude: existing
-    });
-
-    if (!questions.length) return 'fail';
-    await quizReserveAdd(best.category, best.level, questions);
-    logger.info(
-      { category: best.category, level: best.level, added: questions.length, total: best.count + questions.length },
-      'Réserve quiz : questions ajoutées.'
-    );
-    return 'ok';
-  } catch (error) {
-    logger.warn({ error: error?.message }, 'Réserve quiz : réapprovisionnement échoué.');
-    return 'fail';
-  } finally {
-    quizReserveBusy = false;
-  }
-}
-
-function startQuizReserveWorker() {
-  if (quizReserveWorkerStarted) return;
-  quizReserveWorkerStarted = true;
-
-  const loop = async () => {
-    let delay = 10 * 60 * 1000;
-    try {
-      const status = await refillQuizReserveOnce();
-      if (status === 'ok') {
-        quizReserveFailStreak = 0;
-        delay = 45 * 1000;
-      } else if (status === 'fail') {
-        quizReserveFailStreak++;
-        delay = Math.min(15 * 60 * 1000, 2 * 60 * 1000 * quizReserveFailStreak); // on ménage l'API si elle est saturée
-      }
-    } catch {}
-    setTimeout(loop, delay);
+    histKeys: [{ key: `q:${normalizeLoose(question)}`, label: question }]
   };
-
-  loadQuizReserveDemand().finally(() => setTimeout(loop, 60 * 1000));
 }
 
-// Questions d'un quiz texte : réserve d'abord (instantané), le reste est généré en direct
-async function prepareTextQuizQuestions(session, jid) {
+// Choisit EXACTEMENT le nombre de questions demandé : d'abord celles jamais posées,
+// une seule question par univers pour Multivers, jamais deux fois la même réponse.
+async function prepareBankQuizQuestions(session) {
   const category = session.category;
   const level = session.level || 'moyen';
-  const total = session.total;
-
-  markQuizReserveDemand(category, level).catch(() => {});
-
+  const bank = (category === 'multivers' ? QUIZ_BANK_MULTIVERS : QUIZ_BANK_CG)[level] || [];
   const history = await loadQuizHistory(category);
-  const questions = await quizReserveTake(category, level, total, history);
-  const missing = total - questions.length;
-  if (missing <= 0) return questions;
 
-  await quizSend(jid, {
-    text: `⏳ Je prépare encore ${missing} question${missing > 1 ? 's' : ''} avec relecture, un instant...`
-  }).catch(() => {});
+  const all = bank.map(row => buildBankQuestion(category, row));
+  const fresh = shuffleInPlace(all.filter(q => !history.keys.has(q.histKeys[0].key)));
+  const seen = shuffleInPlace(all.filter(q => history.keys.has(q.histKeys[0].key)));
+  const ordered = [...fresh, ...seen];
 
-  quizLiveGenerations++;
-  try {
-    const live = await generateTextQuizQuestions(category, missing, level, null, {
-      budgetMs: 120 * 1000,
-      exclude: questions.map(q => q.question)
-    });
-    questions.push(...live);
-  } finally {
-    quizLiveGenerations--;
+  const picked = [];
+  const usedUnivers = new Set();
+  const usedAnswers = new Set();
+
+  for (const q of ordered) {
+    if (picked.length >= session.total) break;
+    const topic = normalizeLoose(q.univers);
+    const answerKey = normalizeLoose(q.answer);
+    if (category === 'multivers' && usedUnivers.has(topic)) continue;
+    if (usedAnswers.has(answerKey)) continue;
+    usedUnivers.add(topic);
+    usedAnswers.add(answerKey);
+    picked.push(q);
   }
-  return questions;
+
+  return shuffleInPlace(picked);
 }
 
 let lastQuizGenerationError = '';
@@ -8405,16 +8300,12 @@ async function startAutoQuiz(session) {
       text: `🚀 *QUIZ LANCÉ !*\n\n${category.icon} Catégorie : *${category.label}*\n${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).icon} Niveau : *${(AUTO_QUIZ_LEVELS[session.level] || AUTO_QUIZ_LEVELS.moyen).label}*\n📋 ${session.total} questions\n\nPréparation des questions...`
     });
 
-    if (!CONFIG.groqKey && !['id', 'idv'].includes(session.category)) {
-      throw new Error('GROQ_API_KEY absent');
-    }
-
     const questions =
       session.category === 'id'
         ? await generateIdQuizQuestions(session.total, session.level || 'moyen')
         : session.category === 'idv'
           ? await generateIdvQuizQuestions(session.total, session.level || 'moyen')
-          : await prepareTextQuizQuestions(session, jid);
+          : await prepareBankQuizQuestions(session);
 
     if (autoQuizzes.get(jid) !== session) return;
 
@@ -8433,7 +8324,7 @@ async function startAutoQuiz(session) {
 
     if (questions.length < session.total) {
       await quizSend(jid, {
-        text: `⚠️ Seulement ${questions.length} question${questions.length > 1 ? 's' : ''} fiable${questions.length > 1 ? 's ont' : ' a'} passé la relecture sur ${session.total} demandées : on joue avec celles-là (je préfère ne pas poser de question douteuse).`
+        text: `⚠️ Seulement ${questions.length} question${questions.length > 1 ? 's' : ''} disponible${questions.length > 1 ? 's' : ''} sur ${session.total} demandées : on joue avec celles-là.`
       }).catch(() => {});
     }
 
@@ -8480,7 +8371,7 @@ async function handleAutoQuizMessage(jid, message, text, sender) {
       text:
         `*╭─〔 ⌬ SITRI~QUIZ 〕*\n*│*\n` +
         `*├ ◈ ${AUTO_QUIZ_CATEGORIES[category].icon} ${AUTO_QUIZ_CATEGORIES[category].label}*\n` +
-        `*│*\n*├ ◈ Quel niveau ?*\n*├ ◈ 🟢 Facile • 🟡 Moyen • 🔴 Élevé*\n*│*\n` +
+        `*│*\n*├ ◈ Quel niveau ?*\n*├ ◈ 🟢 Facile • 🟡 Moyen • 🔴 Difficile*\n*│*\n` +
         `*├ ◈ Réponds à ce message avec le niveau*\n*╰━━━━━━━━━━━━━━━━━━━━━*`
     }, { quoted: message });
     session.promptId = sent?.key?.id || null;
@@ -9575,7 +9466,6 @@ async function boot() {
   }
 
   setInterval(renewInstanceLock, 15000);
-  startQuizReserveWorker();
 
   try {
     await startBot();
